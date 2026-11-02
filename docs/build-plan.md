@@ -78,4 +78,4 @@ flowchart LR
 | Scaffold (workspace, CI, design-change loop, D18 rename) | #1 |
 | 1a Integrators, clock, random streams, schema enums, `Tol` | #2 |
 | 1b ECS kernel, 6DOF and 3DOF bodies, watchdog, recorder, state hash | #3 |
-| 1c Scenario file, Resolver and samplers, `EnvironmentPlugin`, `AeroTable`, `saber-cli validate` | (this PR) |
+| 1c Scenario file, Resolver and samplers, `EnvironmentPlugin`, `AeroTable`, `saber-cli validate` | #4 |
