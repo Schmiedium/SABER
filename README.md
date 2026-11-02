@@ -5,11 +5,13 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 1c. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step 2. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind and a ground-impact stop, and `saber-cli validate`
-> checks a scenario. Requirements and verdicts (`sim_verify`) come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> checks a scenario. `sim_verify` evaluates a `.req.ron` requirement set in every run (metrics, `Threshold`,
+> `Envelope`, `Never`, `Eventually` and custom checks, early stop) and writes per-run verdicts. Output schemas
+> and the local campaign runner come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

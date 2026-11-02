@@ -34,6 +34,10 @@ writes the `scene:` section itself with `bevy_reflect` serde instead of `Dynamic
 the canonical sim section, `config:` carries the `SimConfig` (§7), uncertainties have named fields with optional
 truncation and `Add` (§7), `FileHeader` and `Semver` exist (§5.4), `EnvironmentPlugin` (§5.2), frame origins and
 ECEF without rotation until step 5a (§10.3), and the plugin rule against `Query` caches on Tick 1 (IB-08).
+v0.13 (2026-11-02, build step 2) records `sim_verify` as built: the requirement file's syntax with a header and
+structured conditions (§8.1), sampling, reducers and settled verdicts (§5.3), the early-fail rule (§8.2), the
+kernel's per-tick event channel, declared event names and custom-check catalogue (§5.1, IB-08), probes and the
+`RunVerdictRow` (IB-09), and the compiled JSON form from `saber-cli` (IB-03).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -302,7 +306,8 @@ flowchart LR
 | `SimClock` | Tick counter + fixed dt + multi-rate dividers so controllers/sensors can run at e.g. 1/10 physics rate deterministically. | `RateDivider(u32)` |
 | `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Integrator`, `Tableau<S>`, `trait OdeSystem`, `StateLayout`, `TickReport`, `IntegratorStats`, `SolverFailure` |
 | `SimRng` | Root RNG + **named substreams** (`rng.stream("wind")`) so adding a new noise source doesn't shift every other random draw. | `SimRng`, `RngStream` |
-| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SnapshotSampler` |
+| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. Writing events to `events.parquet` comes with the event schema (3a). | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
+| `FieldPath`, `CheckCatalog` | Kernel support for verification that model plugins can reach without depending on `sim_verify` (§4): `FieldPath` reads a number or `bool` from `Component.field.path` through a path parsed once (no allocation per read); `CheckCatalog` holds the named custom requirement checks plugins register with `SimAppBuilder::register_check` (step 2). | `FieldPath`, `FieldReadError`, `CustomCheck`, `CheckState`, `CheckCatalog` |
 | `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). | `FlightRecorder` |
 | `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). | `CollisionShape`, `ContactPairs`, `TerrainBvh` |
 | `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. | `ContactMaterial`, `ContactPoints`, `trait ContactForces` |
@@ -412,6 +417,31 @@ Stage split:
   `Pass/Fail/Inconclusive` per requirement, written as columns in the summary row.
 - **Per-campaign (Python, `saber.verify`):** statistical requirements over many runs: "P(miss < 2 m)
   ≥ 0.95 with 90 % confidence", sensitivity of a verdict to parameters, coverage of the operating envelope.
+
+**As built (step 2).** `sim_verify::spec` (no kernel, so the data side builds without Bevy) reads and checks the
+file; `sim_verify::monitor` (feature `ecs`) holds `VerifyPlugin`. The plugin is added after the model plugins and
+compiles the set against the World at every Tick 0: each distinct signal path becomes one probe (entity by
+`SimId`, `FieldPath` parsed once), event names must be declared, `Custom` names must be in the `CheckCatalog`;
+any failure is a `SetupError`. In `SimSet::Verify`, while the run is still going, it reads every probe once,
+feeds the reducers and moves every open requirement:
+
+- **Sampling.** A signal is sampled at the end of each tick `k = 1..N` (the state that tick produced), at elapsed
+  time `k·dt`; Tick 0 is not sampled, because model outputs are only computed by the ticks. Windows and deadlines
+  are elapsed seconds since Tick 0.
+- **Reducers.** `Max`, `Min`, `Final` (`NaN` with no samples), `Integral` (`Σ x·dt`, each sample holding for its
+  tick), `TimeAbove(th)` (`dt ×` samples strictly above `th`) take signals; `FirstTime` (elapsed time of the first
+  tick with the event, `+∞` if it never happens) and `Count` take events. A non-finite sample or a tick whose events
+  overflowed poisons the metric to `NaN`, which makes it `Inconclusive` (IB-09).
+- **Settled verdicts.** A requirement is settled when no later tick can change it: a `Never` whose condition
+  held (Fail), an `Eventually` whose condition held in time (Pass) or whose deadline passed (Fail), an `Envelope`
+  violated in its window (Fail) or past it (Pass), a `Custom` check that says so. A non-finite reading settles a
+  still-open requirement as `Inconclusive`. A `Threshold` is judged from its metric at the end; it counts as
+  decided early when the reducer only moves one way (`Max`, `TimeAbove`, `Count` grow, `Min` shrinks, a
+  `FirstTime` is fixed once it happened) and the comparison can no longer change.
+- **Early stop.** A requirement with `early_stop_on_fail` that is settled (or decided) as failed asks the run to
+  stop (`StopRequests`, reason `requirement_failed`, so the run ends `Terminated` at the end of that tick).
+- **After the run,** `run_verdicts(world)` (or `VerifyState::finalize(world, status, stop_reason)`) gives the
+  `RunVerdictRow` by §8.2. Ticks never allocate; the row is built once per run.
 
 ### 5.4 `sim_schema` — formats & versions (new)
 
@@ -972,12 +1002,13 @@ Paths are resolved **once** at Resolver time into typed setters, so the hot loop
 
 ```ron
 RequirementSet(
+    header: (magic: "SABER", format: "requirements", schema_version: "1.0.0"),
     id: "DRN-HOVER-001", version: "0.3.0", scenario_hint: "quad_x_gust.scn.ron",
     metrics: {
         "pos_err_max":   (signal: "entity(1).NavError.horizontal_m", reduce: Max),
         "batt_margin":   (signal: "entity(1).Battery.soc",          reduce: Final),
         "sat_time":      (signal: "entity(1).Motors.any_saturated", reduce: TimeAbove(0.5)),
-        "landed_at":     (event: "Landing", reduce: FirstTime),
+        "landed_at":     (event: "landing", reduce: FirstTime),
     },
     requirements: [
         ( id: "R-01", text: "Hold position within 0.5 m in 8 m/s gusts",
@@ -989,8 +1020,12 @@ RequirementSet(
           kind: Threshold(metric: "batt_margin", op: Ge, value: 0.15),
           per_run: true, campaign: AllPass, trace: ["SYS-REQ-120"] ),
         ( id: "R-03", text: "Never enter keep-out volume",
-          kind: Never(predicate: "inside(entity(1).Position, zone(\"KOZ-A\"))"),
+          kind: Custom(name: "keep_out_KOZ-A"),
           per_run: true, campaign: AllPass, early_stop_on_fail: false ),
+        ( id: "R-04", text: "Stay below 120 m AGL",
+          kind: Never(signal: "entity(1).RigidBody6.position.z", op: Gt, value: 120.0) ),
+        ( id: "R-05", text: "Land within 90 s",
+          kind: Eventually(event: "landing", within_s: 90.0) ),
     ],
 )
 ```
@@ -999,6 +1034,17 @@ Requirement kinds (v1): `Threshold` (metric op value), `Envelope` (signal stays 
 a time window), `Never` / `Eventually(within_s)` (temporal predicates over a signal or event),
 `Custom` (named Rust predicate registered by a model plugin). Campaign aggregations: `AllPass`,
 `Probability{min_p, confidence}` (Clopper–Pearson lower bound), `Quantile{q, op, value}` on a metric.
+
+As built (step 2): the file carries a `FileHeader` (`format: "requirements"`) like every SABER file (§10.4) and is
+read with RON's `implicit_some`, so optional fields need no `Some(..)`. Signals are `entity(SimId).Component.field.path`
+ending at a number or `bool`; events are names a plugin declared. `Never` and `Eventually` take a structured
+condition, either `signal`, `op` (`Lt`, `Le`, `Gt`, `Ge`) and `value`, or `event`, instead of the draft's predicate
+string: there is no zone type yet, so a geometric predicate such as a keep-out volume is a `Custom` check until
+one exists. `Envelope` takes `signal`, `lo`, `hi` and an optional window `from_s`/`to_s`. Defaults: `per_run: true`,
+`campaign: AllPass`, `trace: []`, `early_stop_on_fail: false`. `per_run: false` is only allowed with a `Quantile`
+rule, which reads a `Threshold` requirement's metric. Metrics keep file order and become `metric_<key>` columns;
+per-run requirements become `req_<id>` columns. `req_set_hash` is BLAKE3 (context
+`SABER 2026-11-02 requirement set hash v1`) over the compact RON of everything but the header.
 
 ### 8.2 Verdict semantics
 
@@ -1019,6 +1065,14 @@ flowchart TD
 Distinguishing *the system failed the requirement* from *the simulation failed to say* is the most
 important semantic rule in the verification layer, and the reason crashes never silently count as passes
 or fails.
+
+As built (step 2): a `SetupError` run's row still carries `Inconclusive` verdicts and is excluded downstream by
+its status. A run that `early_stop_on_fail` ended (`Terminated`, stop reason `requirement_failed`) is judged only
+on what was decided when it stopped: settled requirements keep their verdict, a `Threshold` keeps its verdict if
+its comparison was already decided (§5.3), and everything else still open is `Inconclusive` rather than judged on
+a cut-short run. At a natural end (`Completed`, or `Terminated` by a stop condition) open requirements close:
+`Never` and `Envelope` pass, `Eventually` fails, a `Custom` check answers `at_end`. The `Threshold` rule depends only
+on the reducer, the comparison and the metric value, so `saber.verify` can recompute it from the summary columns.
 
 ---
 
@@ -1082,6 +1136,7 @@ flowchart LR
 | Owner | `sim_verify`. Python reads the compiled JSON form produced by `sim_hpc --validate-only --emit-req-json` so it never parses RON. |
 | Validation | Every signal path resolves against the scenario; every metric referenced by a requirement exists; units consistent; IDs unique. |
 | Errors | `ReqError::{UnresolvedSignal, UnknownMetric, DuplicateId, TypeMismatch}` → blocking in Studio and preflight. |
+| As built (step 2) | `RequirementSet::from_ron` checks the header, ids, metric references, reducer against source (signal or event), condition shape, numbers and campaign rules; `VerifyState::compile` resolves signals, events and custom checks against a scenario's Tick-0 World. `ReqError::{Parse{line, col}, BadHeader, VersionMismatch, DuplicateId, UnknownMetric, BadMetric, BadRequirement, UnresolvedSignal, TypeMismatch, UnknownCheck}`. `saber-cli validate <set.req.ron> [--scenario <scn>] --emit-req-json` prints the compiled JSON form (`format: "saber-requirements-json"`, `req_set_hash`, `metric_columns`, `requirement_columns`, the scene hash it was resolved against, and the set itself; JSON objects are unordered, so the column lists carry the order); `sim_hpc --validate-only` reuses it with step 3b. Unit checks wait for `ModelMeta.signals` to carry units. |
 
 ### IB-04 · Campaign bundle `campaign.toml` + CLI (saber.campaign → sim_hpc)
 
@@ -1199,6 +1254,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | | |
 |---|---|
 | Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). A system with a `Query` parameter fills Bevy's archetype cache on its first run after Tick 0 spawned the scenario, which allocates on Tick 1 of every fresh World, so model systems are exclusive (`fn(&mut World)`) and read lists of entities built in `SimPlugin::start`, as the kernel's own systems and `EnvironmentPlugin`'s ground-impact check do (step 1c). |
+| As built (step 2) | Plugins declare the event names they emit (`SimAppBuilder::declare_event`) and may register custom requirement checks (`register_check(name, fn() -> Box<dyn CustomCheck>)`); `sim_core::with_resource` is the allocation-free way for an exclusive system to update its own resource. `EnvironmentPlugin` emits `ground_impact` (value: the body's altitude). |
 | As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrive with the first model that needs them (step 5c). |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
@@ -1210,6 +1266,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Contract | `sim_verify` compiles a `RequirementSet` into a `VerifyPlan` resource: typed probes (resolved signal accessors), reducer slots (pre-allocated `f64` state), predicate trees. Systems run in `SimSet::Verify`. Optional `early_stop_on_fail` asks `TerminationPolicy` to end the run with `SimStatus::Terminated`. |
 | Output | `RunVerdictRow { metrics: [f64; M], verdicts: [Verdict; R] }` merged into `SummaryRow`. |
 | Errors | Probe reading a non-finite value → that requirement becomes `Inconclusive` for the run (and watchdog will usually also trip). |
+| As built (step 2) | `VerifyPlugin::new(Arc<RequirementSet>)`; the compiled plan and per-run state are the `VerifyState` resource, rebuilt at every Tick 0. Probes read through `FieldPath` (a reflection lookup on a pre-parsed path, no string parsing or allocation per tick; a typed fast path can follow with `ModelMeta.signals`). `RunVerdictRow { metrics: Vec<f64>, verdicts: Vec<Verdict> }` in column order, from `run_verdicts(world)` after the run; merging it into the summary row comes with the summaries schema (3a, 3b). Early stop uses `StopRequests` with reason `requirement_failed`. |
 
 ### IB-10 · Crash dump → sim_studio Replay (via sim_explorer and the handoff cache for campaign dumps)
 

@@ -22,9 +22,11 @@ use serde::{Deserialize, Serialize};
 use sim_schema::SimStatus;
 
 use crate::body::{MassProps, PointMass3, RigidBody6, SimId};
+use crate::checks::{CheckCatalog, CheckFactory};
 use crate::clock::SimClock;
 use crate::dynamics::{Dynamics, integrate_system};
 use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldFrame};
+use crate::events::{SimEvents, clear_events};
 use crate::force::ForceModel;
 use crate::hash::{
     CONFIG_CONTEXT, RollingHash, RunIdentity, finish, rolling_hash_system, state_hash,
@@ -351,7 +353,10 @@ impl SimAppBuilder {
             .register_type::<MassProps>()
             .register_type::<ParamBindings>()
             .register_type::<Uncertainties>();
-        b.add_systems(SimSet::Integrate, integrate_system)
+        b.world.insert_resource(SimEvents::default());
+        b.world.insert_resource(CheckCatalog::default());
+        b.add_systems(SimSet::Environment, clear_events)
+            .add_systems(SimSet::Integrate, integrate_system)
             .add_systems(SimSet::Telemetry, telemetry_system)
             .add_systems(SimSet::Record, record_frame)
             .add_systems(
@@ -405,6 +410,24 @@ impl SimAppBuilder {
     /// Replace the environment model (default: vacuum, no gravity).
     pub fn set_environment(&mut self, environment: impl Environment) -> &mut Self {
         self.environment = Box::new(environment);
+        self
+    }
+
+    /// Declare an event name a plugin emits into [`SimEvents`], so requirement
+    /// files can refer to it (IB-03). Declaring a name twice is harmless.
+    pub fn declare_event(&mut self, name: &'static str) -> &mut Self {
+        self.world.resource_mut::<SimEvents>().declare(name);
+        self
+    }
+
+    /// Register a custom requirement check under a name (`Custom(name: ...)` in `*.req.ron`).
+    ///
+    /// # Panics
+    /// If the name is already registered.
+    pub fn register_check(&mut self, name: &'static str, factory: CheckFactory) -> &mut Self {
+        self.world
+            .resource_mut::<CheckCatalog>()
+            .register(name, factory);
         self
     }
 
@@ -627,6 +650,7 @@ impl SimWorld {
         world.insert_resource(RunStatus::default());
         world.insert_resource(StopRequests::default());
         world.insert_resource(RunningStats::default());
+        world.resource_mut::<SimEvents>().clear();
         world
             .resource_mut::<RngStreams>()
             .reseed(SimRng::new(seed.param_set_id, seed.replicate_seed));

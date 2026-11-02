@@ -9,6 +9,10 @@ pub const MAGIC: &str = "SABER";
 pub const SCENE_FORMAT: &str = "scenario";
 /// The scenario schema this build writes and reads (readers accept the same major, §10.4).
 pub const SCENE_SCHEMA_VERSION: Semver = Semver::new(1, 0, 0);
+/// `FileHeader::format` of a requirement set (`*.req.ron`, IB-03).
+pub const REQ_FORMAT: &str = "requirements";
+/// The requirement-set schema this build writes and reads.
+pub const REQ_SCHEMA_VERSION: Semver = Semver::new(1, 0, 0);
 
 /// Identity of a file: what it is, which schema it follows, which build wrote it.
 ///
