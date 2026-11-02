@@ -1,6 +1,6 @@
-# SABERS: End-to-End Sequence Diagrams
+# SABER: End-to-End Sequence Diagrams
 
-Companion to `Architecture.md`. This document walks every key runtime flow in SABERS, from authoring a scenario in the studio to producing a requirements verdict, as Mermaid sequence diagrams. Each flow shows the happy path first and its failure paths in `alt`/`break`/`critical` blocks.
+Companion to `Architecture.md`. This document walks every key runtime flow in SABER, from authoring a scenario in the studio to producing a requirements verdict, as Mermaid sequence diagrams. Each flow shows the happy path first and its failure paths in `alt`/`break`/`critical` blocks.
 
 Anything not in the draft architecture is marked **(proposed)**. Those are gaps the flows exposed, and section 13 collects them as open design questions.
 
@@ -29,7 +29,7 @@ The same short names are used in every diagram, and they match the subsystem and
 
 | Participant | What it is | Lives in |
 | :-- | :-- | :-- |
-| `Analyst` | The engineer using SABERS | |
+| `Analyst` | The engineer using SABER | |
 | `Studio.Builder` | Scenario authoring state (`AppState::ScenarioBuilder`) | `sim_studio/builder.rs` |
 | `Studio.LocalRun` | Local single-run preview state (`AppState::LocalRun`) | `sim_studio` |
 | `Studio.Replay` | Forensic replay state (`AppState::CrashReplay`) | `sim_studio/replay.rs` |
@@ -37,15 +37,15 @@ The same short names are used in every diagram, and they match the subsystem and
 | `Assets.Catalog`, `Assets.Importer`, `Assets.ObjConverter`, `Assets.ShapeDeriver` | 3D model catalogue, import and validation, OBJ conversion (stretch), authoring-time collision derivation | `sim_assets` |
 | `Bevy AssetServer` | Bevy's asset loader, used by the studio for glTF | `bevy_asset`, `bevy_gltf` |
 | `Explorer.Results` | Campaign results browser (Results Explorer view, separate egui app since subsystems D12) | `sim_explorer` |
-| `Explorer.Handoff` / `Studio.Handoff` | IB-18 requests between the explorer and the studio over a local socket, data passed through `~/.sabers/cache` | `sim_explorer`, `sim_studio` |
+| `Explorer.Handoff` / `Studio.Handoff` | IB-18 requests between the explorer and the studio over a local socket, data passed through `~/.saber/cache` | `sim_explorer`, `sim_studio` |
 | `Core.Resolver` | `resolve_parametric_scene_system`, the tick-0 resolver | `sim_core/parametric.rs` |
 | `Core.Schedule` | `SimTickSchedule`, SystemSets in order: Environment, Sensors, Control, Actuation, Forces, Integrate, Constraints, Telemetry, Verify, Record, Watchdog | `sim_core`, domain plugins in `sim_models` |
 | `Core.Verify` | Online per-run requirement checks (`Verify` SystemSet) | `sim_verify` |
 | `Core.Telemetry` | `RunningStats`, `SimEvent` collection, Tier 3 sampler | `sim_core/telemetry.rs` |
 | `Core.Recorder` | `FlightRecorder` ring buffer | `sim_core/recorder.rs` |
 | `Core.Watchdog` | `physics_watchdog_system` | `sim_core/recorder.rs` |
-| `SweepGen` | Sobol / LHS manifest generator | `sabers.sweep` (was `generate_sweep.py`) |
-| `PBS` | PBS Pro scheduler and `mpiexec`, driven by `sabers.submit` from `campaign.toml` | `submit_campaign.pbs` |
+| `SweepGen` | Sobol / LHS manifest generator | `saber.sweep` (was `generate_sweep.py`) |
+| `PBS` | PBS Pro scheduler and `mpiexec`, driven by `saber.submit` from `campaign.toml` | `submit_campaign.pbs` |
 | `Rank0.Dispatcher` | Rank 0 main thread: MPI, chunk dispatch | `sim_hpc/main.rs` |
 | `RankN.Main` | Main (MPI-funneled) thread of any rank other than 0 | `sim_hpc/main.rs` |
 | `Pool` | Rayon pool on one node (`RAYON_NUM_THREADS=62`) | `sim_hpc/worker.rs` |
@@ -55,9 +55,9 @@ The same short names are used in every diagram, and they match the subsystem and
 | `IO.Stager` | Helper thread that copies closed parts to `SharedFS` and commits them | `sim_hpc/io_mux.rs` |
 | `NVMe` | Node-local scratch (`$TMPDIR`) | |
 | `SharedFS` | Lustre/GPFS campaign directory | |
-| `Analyze` | DuckDB / Polars post-processing | `sabers.analyze` (was `analyze_results.py`) |
+| `Analyze` | DuckDB / Polars post-processing | `saber.analyze` (was `analyze_results.py`) |
 | `Query.Service` | DataFusion query service next to the data, `sim_query serve` running as a small scheduler job (D10) | `sim_query` |
-| `Verify` | Offline campaign-level requirement verdicts | `sabers.verify` (Python), schemas in `sim_verify` |
+| `Verify` | Offline campaign-level requirement verdicts | `saber.verify` (Python), schemas in `sim_verify` |
 
 Message vocabulary:
 
@@ -98,7 +98,7 @@ sequenceDiagram
     Builder-->>Analyst: experiment_A.scn.ron (see 2)
     Analyst->>SweepGen: Parameter space, sampler, N replicates
     SweepGen-->>Analyst: sweep_manifest.parquet (see 3)
-    Analyst->>PBS: sabers.submit campaign.toml (see 4)
+    Analyst->>PBS: saber.submit campaign.toml (see 4)
     PBS->>Rank0: mpiexec, rank 0
     PBS->>RankN: mpiexec, ranks 1..N-1
     Rank0->>RankN: Broadcast scene and manifest (see 5)
@@ -109,9 +109,9 @@ sequenceDiagram
     end
     Rank0-)RankN: TAG_TERMINATE
     IO->>SharedFS: Stage out summaries, events, snapshots .parquet and crashes.zst (see 7)
-    Analyst->>Analyze: sabers.analyze on campaign dir (see 10)
+    Analyst->>Analyze: saber.analyze on campaign dir (see 10)
     Analyze->>SharedFS: Glob node_*_summaries.parquet, *_events, *_snapshots
-    Analyst->>Verify: sabers.verify with *.req.ron (see 11)
+    Analyst->>Verify: saber.verify with *.req.ron (see 11)
     Verify->>SharedFS: Per-run requirement columns from summaries
     Verify-->>Analyst: verdicts.parquet, Pass / Fail / Inconclusive per requirement
     opt Crashes worth inspecting
@@ -193,7 +193,7 @@ sequenceDiagram
 
 ### 2.1 Importing a 3D model (glTF, GLB, or OBJ as a stretch goal)
 
-Models enter a workspace only through `Assets.Importer`, which validates, packs and hashes them (subsystems §5.10, IB-20; UX §7.11.3). The same importer runs headless as `sabers-cli model import|convert`, which skips the preview and thumbnail.
+Models enter a workspace only through `Assets.Importer`, which validates, packs and hashes them (subsystems §5.10, IB-20; UX §7.11.3). The same importer runs headless as `saber-cli model import|convert`, which skips the preview and thumbnail.
 
 ```mermaid
 sequenceDiagram
@@ -305,7 +305,7 @@ sequenceDiagram
     actor Analyst
     participant Builder as Studio.Builder
     participant Disk as Workspace disk
-    participant Camp as sabers.campaign
+    participant Camp as saber.campaign
     participant Rank0 as Rank0.Dispatcher
     participant Worker
     participant Results as Explorer.Results
@@ -328,7 +328,7 @@ sequenceDiagram
     Rank0-)Worker: Broadcast scene bytes and geometry blobs, hash-checked (IB-05)
     Worker->>Worker: Tick 0: Parry shapes from ShapeDesc (no glTF, no render crates)
     Note over Rank0,Worker: Changing or deleting a model never changes scene_hash or any result
-    Results-)Replay: IB-18 OpenRun or OpenCrash (bundle in ~/.sabers/cache)
+    Results-)Replay: IB-18 OpenRun or OpenCrash (bundle in ~/.saber/cache)
     Replay->>Assets: Resolve visual section references
     alt Built-in present, or workspace or archived model with matching hash
         Assets-->>Replay: Models drawn
@@ -353,7 +353,7 @@ sequenceDiagram
     participant QMC as scipy.stats.qmc
     participant Disk as campaigns/
 
-    Analyst->>SweepGen: sabers.sweep with campaign.toml (scene, sampler sobol, n 2048, replicates 64)
+    Analyst->>SweepGen: saber.sweep with campaign.toml (scene, sampler sobol, n 2048, replicates 64)
     SweepGen->>Schema: Load param keys, bounds, distributions
     alt Schema missing or scene_hash mismatch
         Schema-->>SweepGen: Error
@@ -393,7 +393,7 @@ sequenceDiagram
     participant Main as sim_hpc main thread
     participant SharedFS
 
-    Analyst->>Login: sabers.submit campaign.toml
+    Analyst->>Login: saber.submit campaign.toml
     Login->>Login: Render submit_campaign.pbs from campaign.toml (nodes, walltime, paths)
     Login->>Login: Check scene_hash in manifest matches the scene file
     alt Hash mismatch
@@ -597,7 +597,7 @@ Determinism notes on this flow:
 
 ### 6.1 Contact within a tick
 
-**(D13, 2026-11-01)** SABERS uses its own physics kernel with Parry for collision detection. Contacts do not always end a run, so the kernel resolves them itself with three contact models: `Compliant` (spring–damper with friction, evaluated in every RK4 stage), `Impulsive` (restitution and friction at an event-located time of impact) and `EventOnly` (detect and record). The full design is in `physics-engine-tradeoffs.md` §9; the interface is IB-19 in `subsystems-and-interfaces.md`.
+**(D13, 2026-11-01)** SABER uses its own physics kernel with Parry for collision detection. Contacts do not always end a run, so the kernel resolves them itself with three contact models: `Compliant` (spring–damper with friction, evaluated in every RK4 stage), `Impulsive` (restitution and friction at an event-located time of impact) and `EventOnly` (detect and record). The full design is in `physics-engine-tradeoffs.md` §9; the interface is IB-19 in `subsystems-and-interfaces.md`.
 
 ```mermaid
 sequenceDiagram
@@ -641,7 +641,7 @@ sequenceDiagram
 
 Output is written as a series of **parts** rather than one file per node. Every `checkpoint_interval_s` (default 600 s), `IO.Mux` closes the current part, hands it to a helper thread (`IO.Stager`) that copies it to `SharedFS`, and opens the next part on NVMe. Closing a part costs one Parquet footer write per file, and the copy runs in the background, so workers never wait on Lustre. A walltime kill or node failure then loses at most one interval of work per node instead of the whole job. Section 12 shows how `--resume` uses the committed parts.
 
-Part file names are `node_{rank}_a{attempt}_p{part}_{summaries|events|snapshots}.parquet` and `..._crashes.zst`. The existing `*_summaries.parquet` globs still match. A 4-hour, 32-node job at the default interval makes about 24 parts per node, roughly 3,000 files, which stays far below the per-run file counts that hurt Lustre metadata servers. `sabers.compact` can merge them into one file per node after the campaign if wanted **(proposed)**.
+Part file names are `node_{rank}_a{attempt}_p{part}_{summaries|events|snapshots}.parquet` and `..._crashes.zst`. The existing `*_summaries.parquet` globs still match. A 4-hour, 32-node job at the default interval makes about 24 parts per node, roughly 3,000 files, which stays far below the per-run file counts that hurt Lustre metadata servers. `saber.compact` can merge them into one file per node after the campaign if wanted **(proposed)**.
 
 **Commit rule:** a part is committed when its summaries file appears under its final name on `SharedFS`. The stager copies events, snapshots and crashes first and renames the summaries file last, so a reader that sees a summaries part can trust the rest of that part is there. Each summaries footer carries the part's completed `run_id` ranges and its crash counts per `param_set_id` in Parquet key-value metadata.
 
@@ -868,7 +868,7 @@ sequenceDiagram
     Analyst->>Replay: Open campaign or crashes.zst
     Replay->>SharedFS: Scan crashes.zst index (offset, run_id, param_set_id, reason)
     opt Analyst came from the explorer's crash table
-        Results-->>Replay: IB-18 OpenCrash (dump already in ~/.sabers/cache, skips the scan)
+        Results-->>Replay: IB-18 OpenCrash (dump already in ~/.saber/cache, skips the scan)
     end
     Replay-->>Analyst: Crash list with reason, crash_tick, params
     Analyst->>Replay: Select run_id
@@ -926,7 +926,7 @@ sequenceDiagram
     participant SharedFS
     participant Out as reports/
 
-    Analyst->>Analyze: sabers.analyze campaigns/run_JOBID
+    Analyst->>Analyze: saber.analyze campaigns/run_JOBID
     Analyze->>SharedFS: Read _MANIFEST.json
     alt Manifest missing or lists missing ranges
         Analyze-->>Analyst: Warn, partial campaign, continue on committed parts and suggest --resume
@@ -974,7 +974,7 @@ sequenceDiagram
     participant Studio as Studio.Handoff
 
     Analyst->>Results: Open campaign run_48211 (cluster profile hpc1)
-    Results->>SharedFS: Over SSH, read ~/.sabers/query/*.json
+    Results->>SharedFS: Over SSH, read ~/.saber/query/*.json
     alt No live service or token expired
         Results-->>Analyst: Banner "Query service not running" with Start button
         Analyst->>Results: Start query service
@@ -982,7 +982,7 @@ sequenceDiagram
         PBS-->>Results: job id, queued
         Results-->>Analyst: Queue wait shown inline, rest of the UI usable
         PBS->>QS: Start on compute node
-        QS->>SharedFS: Write ~/.sabers/query/JOBID.json (host, port, token, build_id, schema_version)
+        QS->>SharedFS: Write ~/.saber/query/JOBID.json (host, port, token, build_id, schema_version)
         Results->>SharedFS: Poll the file over SSH until it appears
     end
     Results->>Results: ssh -L local port to host:port through login node
@@ -1018,8 +1018,8 @@ sequenceDiagram
         Results->>QS: DoGet CrashDumpTicket(run_id)
         QS->>SharedFS: Read crashes.zst index footer, then one dump
         QS-->>Results: CrashDump bytes
-        Results->>Results: Write dump + scene bundle to ~/.sabers/cache/run_48211/
-        Results->>Studio: IB-18 OpenCrash over local socket (or sabers://studio deep link), continue as in section 9
+        Results->>Results: Write dump + scene bundle to ~/.saber/cache/run_48211/
+        Results->>Studio: IB-18 OpenCrash over local socket (or saber://studio deep link), continue as in section 9
         Studio-->>Results: Ack, or Error (build differs, unsaved Builder edits)
     end
     opt Tunnel drops
@@ -1031,10 +1031,10 @@ sequenceDiagram
 
 ## 11. Requirements verification
 
-The draft stops at analysis. Verification answers "does the system meet its requirements", which is the stated goal of SABERS. It runs in two stages, matching the `sim_verify` crate in the subsystems document:
+The draft stops at analysis. Verification answers "does the system meet its requirements", which is the stated goal of SABER. It runs in two stages, matching the `sim_verify` crate in the subsystems document:
 
 1. **Online, per run** in each `Worker`: the `Verify` SystemSet evaluates every requirement in `*.req.ron` against that run and writes metric and pass/fail columns into the summary row (section 6). This is cheap and needs no trajectory storage.
-2. **Offline, per campaign** in `sabers.verify`: turns per-run results into a statistical verdict per requirement and writes `verdicts.parquet`.
+2. **Offline, per campaign** in `saber.verify`: turns per-run results into a statistical verdict per requirement and writes `verdicts.parquet`.
 
 A requirement is a metric, a comparison, a threshold, and a statistical claim, for example "P(miss_distance < 2 m) >= 0.95 at 90% confidence over the operating envelope".
 
@@ -1048,7 +1048,7 @@ sequenceDiagram
     participant SharedFS
     participant Out as verdicts.parquet
 
-    Analyst->>Verify: sabers.verify --campaign run_JOBID --req experiment_A.req.ron
+    Analyst->>Verify: saber.verify --campaign run_JOBID --req experiment_A.req.ron
     Verify->>Req: Load requirements (id, metric, op, threshold, probability, confidence, envelope filter)
     Verify->>SharedFS: Read req_hash from summaries metadata
     alt req.ron changed since the campaign ran
@@ -1104,7 +1104,7 @@ Three pieces make it work:
 Two additions keep jobs from being cut off mid-flight:
 
 * **Drain before walltime.** Rank 0 stops handing out chunks when the remaining walltime drops below `drain_margin_s` (default 5% of walltime). Ranks finish their chunks, the final parts commit cleanly, and the job exits 5 (partial) with an exact resume point. A SIGTERM from PBS still works as the fallback (section 7).
-* **Auto-resubmit (optional).** With `auto_resume = N` in `campaign.toml`, `sabers.submit` queues the next attempt with `qsub -W depend=afterany:JOBID`, up to N times. It stops early if the previous attempt made no progress or ended in code 2, 3 or 6.
+* **Auto-resubmit (optional).** With `auto_resume = N` in `campaign.toml`, `saber.submit` queues the next attempt with `qsub -W depend=afterany:JOBID`, up to N times. It stops early if the previous attempt made no progress or ended in code 2, 3 or 6.
 
 ```toml
 [checkpoint]
@@ -1117,7 +1117,7 @@ auto_resume           = 3
 sequenceDiagram
     autonumber
     actor Analyst
-    participant Submit as sabers.submit
+    participant Submit as saber.submit
     participant PBS
     participant Rank0 as Rank0.Dispatcher
     participant RankN as RankN.Main
@@ -1128,7 +1128,7 @@ sequenceDiagram
             Submit->>PBS: qsub -W depend=afterany:JOBID, sim_hpc --campaign campaign.toml --resume
         end
     else Manual
-        Analyst->>Submit: sabers.submit campaign.toml --resume
+        Analyst->>Submit: saber.submit campaign.toml --resume
         Submit->>PBS: qsub with --resume
     end
     PBS->>Rank0: mpiexec (possibly different nodes and rank count)
@@ -1180,7 +1180,7 @@ These surfaced while drawing the flows. Rows marked "aligned" are already settle
 | 6 | Crash quota is per node | Section 8 | Decided: campaign-wide counts owned by rank 0 and synced on chunk requests, plus a crash-storm abort (exit 6) |
 | 7 | Replay depends on the exact scene file | Section 9 | Store `scene_hash` (and optionally the scene bytes) in every CrashDump and in Parquet metadata |
 | 8 | No timeout or setup-error status | Section 6 | Aligned: `Timeout` and `SetupError` status codes |
-| 9 | No requirements component | Section 11 | Aligned: `*.req.ron`, online `Verify` SystemSet, offline `sabers.verify` writing `verdicts.parquet` |
+| 9 | No requirements component | Section 11 | Aligned: `*.req.ron`, online `Verify` SystemSet, offline `saber.verify` writing `verdicts.parquet` |
 | 10 | Parameter schema between studio and sweep | Sections 2, 3 | Export a `params.json` sidecar (or fold it into `campaign.toml`) so `SweepGen` can validate keys and bounds |
 | 11 | Rank 0 does dispatch and compute on one MPI thread | Section 5 | Poll with `MPI_Iprobe` between local chunk handoffs, or reserve one core on rank 0 for dispatch only |
 | 12 | IO failure on one node stalls its chunks | Sections 5, 7 | Report failed ranges to rank 0 for re-queue, which requires duplicate-tolerant analysis (section 10) |

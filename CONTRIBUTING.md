@@ -28,7 +28,7 @@ The loop:
    `subsystems-and-interfaces.md` §11, `T6` in the verification doc), list it in the PR description, and
    raise it with Alex. Work can continue on the recommended option where it is easy to undo.
 4. **Decisions are recorded where the question was.** When Alex answers, move the row from "Open" to
-   "Decisions" with the next free number (next: `D18`; interface boundaries continue at `IB-21`), date it,
+   "Decisions" with the next free number (next: `D19`; interface boundaries continue at `IB-21`), date it,
    and apply the consequence across every doc that mentions it.
 5. **Names are shared.** New crate, file, state or type names go in the doc that owns them before they
    are used in code, so the docs and the code use one vocabulary.

@@ -1,4 +1,4 @@
-# SABERS `sim_studio`: UX and UI Design
+# SABER `sim_studio`: UX and UI Design
 
 **Status:** Draft v0.5 (2026-11-02: entities can show 3D models from a built-in library, the workspace or a team library; glTF/GLB import, linking to entities, alignment, collision derived on request, OBJ conversion as a stretch goal (§7.11, subsystems D17, IB-20). v0.4, 2026-11-01: campaign monitoring, results and queries move to a separate egui window, `sim_explorer`, linked to the studio by explicit handoffs (§6.2, subsystems D12, IB-18). v0.3, 2026-10-31: UI toolkit is Bevy Feathers instead of `bevy_egui` (§6.1, subsystems D11); new viewport tools: camera focus dropdown, state HUD, graph-paper ground grid (§7.10). v0.2: Results Explorer queries through `sim_query` / DataFusion, subsystems D10) · **Builds on:** `Architecture.md` (§2, §4, §6.4) · **Companion docs:** [subsystems-and-interfaces.md](subsystems-and-interfaces.md) (crate and file names follow it), [sequence-diagrams.md](sequence-diagrams.md)
 
@@ -46,7 +46,7 @@
 | P3 | **Author once, run anywhere** | The same `.scn.ron` runs in Preview (in-process `sim_core`), local `sim_hpc` (size == 1), and the cluster. The UI never offers a setting that would break that equivalence (for example, no wall-clock timestep). |
 | P4 | **Make cost visible before it's spent** | Campaign Setup shows estimated core-hours, output size and file count before submitting, using the measured wall time from Preview. |
 | P5 | **Fail loudly, fail early** | Lint the scenario continuously (unbound `param_key`, missing `SimId`, timestep vs. stiffness). Block export only on errors; warnings stay visible. |
-| P6 | **Show the script** | Anything the studio does through the `sabers` Python package (`sweep`, `submit`, `analyze`, `report`; successor to the draft's `generate_sweep.py`, `submit_campaign.pbs`, `analyze_results.py`) can be revealed as the exact command / generated file, so power users can take it to a terminal and reproducible pipelines. |
+| P6 | **Show the script** | Anything the studio does through the `saber` Python package (`sweep`, `submit`, `analyze`, `report`; successor to the draft's `generate_sweep.py`, `submit_campaign.pbs`, `analyze_results.py`) can be revealed as the exact command / generated file, so power users can take it to a terminal and reproducible pipelines. |
 | P7 | **Engineering-tool density, not game-engine chrome** | Dense dock panels, numeric precision on display, units everywhere, keyboard-first. Dark theme by default, light theme for reports and projectors. |
 
 ---
@@ -132,7 +132,7 @@ The UI vocabulary maps one-to-one onto the architecture so a user can move betwe
 
 | UI term | Backing artifact / type | Notes |
 |---------|-------------------------|-------|
-| **Workspace** | Repo-like folder (`scenarios/`, `campaigns/`, `scripts/`) as in `Architecture.md` §2 | Opened in the Launcher. Studio state lives in `sabers.workspace.ron` **(new)**. |
+| **Workspace** | Repo-like folder (`scenarios/`, `campaigns/`, `scripts/`) as in `Architecture.md` §2 | Opened in the Launcher. Studio state lives in `saber.workspace.ron` **(new)**. |
 | **Scenario** | `scenarios/<name>.scn.ron` (`DynamicScene`) | The system model / digital twin plus its environment. |
 | **Entity** | ECS entity with `SimId(u32)` | `SimId` is shown everywhere an entity is named so it matches Parquet `entity_a` / `entity_b`. |
 | **Parameter** | A `param_key` string referenced by `Bind*Param` components and spawner `*_param_key` fields | Has a name, unit, nominal value, range or distribution. |
@@ -244,18 +244,18 @@ stateDiagram-v2
 
 - **Left activity rail** switches workspaces (Builder, Campaigns, Results, Replay). Each rail icon maps to an `AppState`, so the rail is the visual form of the state diagram above. Disabled icons explain why on hover ("No campaign selected").
 - **Breadcrumb** at the top shows context: `Workspace / scenarios / drone_gust.scn.ron / Campaign run_48211 / run 120044 (ps 3001, seed 7)`. Each segment is clickable.
-- **Deep links** **(new)**: `sabers://studio/replay?workspace=...&campaign=run_48211&run_id=120044&tick=812` opens the studio exactly at a run and tick; `sabers://explorer/open?campaign=run_48211&view=results` opens the explorer (§6.2.1). `sabers.analyze` can print these links.
+- **Deep links** **(new)**: `saber://studio/replay?workspace=...&campaign=run_48211&run_id=120044&tick=812` opens the studio exactly at a run and tick; `saber://explorer/open?campaign=run_48211&view=results` opens the explorer (§6.2.1). `saber.analyze` can print these links.
 - **Command palette** (Ctrl+K): every action, every entity by name or `SimId`, every parameter key, every requirement ID.
 
 ---
 
 ## 6. Shell layout and global UI
 
-All workspaces share one dock shell, `StudioDock` **(new)**, from the `sim_studio_ui` widget kit (§6.1). Version 1 has fixed regions (left, center, right, bottom) with draggable splitters and tab groups; a panel moves between regions from its tab menu or pops out into a floating dialog. Free drag-and-drop docking comes later. The center region is a `ViewportNode` (3D) or a `PlotCanvas`. The layout persists per workspace in `sabers.workspace.ron`.
+All workspaces share one dock shell, `StudioDock` **(new)**, from the `sim_studio_ui` widget kit (§6.1). Version 1 has fixed regions (left, center, right, bottom) with draggable splitters and tab groups; a panel moves between regions from its tab menu or pops out into a floating dialog. Free drag-and-drop docking comes later. The center region is a `ViewportNode` (3D) or a `PlotCanvas`. The layout persists per workspace in `saber.workspace.ron`.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│ ☰ SABERS  │ Workspace ▸ scenarios ▸ drone_gust.scn.ron        [Ctrl+K Search…]  ● Lint 0✖ 2⚠ │  ← title bar + breadcrumb
+│ ☰ SABER  │ Workspace ▸ scenarios ▸ drone_gust.scn.ron        [Ctrl+K Search…]  ● Lint 0✖ 2⚠ │  ← title bar + breadcrumb
 ├──┬─────────────────────────────────────────────────────────────────────────────────────────┤
 │▣ │ ┌───────────────┐ ┌─────────────────────────────────────────────┐ ┌───────────────────┐ │
 │B │ │  LEFT DOCK    │ │                                             │ │   RIGHT DOCK      │ │
@@ -374,7 +374,7 @@ flowchart TB
 
 #### 6.1.5 How the kit builds the hard widgets
 
-- **`StudioDock`:** four regions (left, center, right, bottom) separated by `Splitter`s (pointer drag on a 4 px handle, double-click to collapse, sizes in `sabers.workspace.ron`). Each region holds a tab group on headless `TabList`. A tab's menu offers "Move to left / right / bottom" and "Pop out" (a `FeathersFloatingDialog`). Free drag-and-drop docking is a later version.
+- **`StudioDock`:** four regions (left, center, right, bottom) separated by `Splitter`s (pointer drag on a 4 px handle, double-click to collapse, sizes in `saber.workspace.ron`). Each region holds a tab group on headless `TabList`. A tab's menu offers "Move to left / right / bottom" and "Pop out" (a `FeathersFloatingDialog`). Free drag-and-drop docking is a later version.
 - **`DataTable`:** typed columns, sort, column resize via `Splitter`, multi-select into `Selection`. Hundreds of rows at most (fragments appear as groups), so no virtualization is needed in the studio.
 - **`PlotCanvas`:** time series only. Each plot is a `ViewportNode` with its own orthographic camera and render layer. Series are GPU line strips, decimated per pixel column (min/max), so a 128 k-tick channel stays interactive. Axes, ticks and labels are UI text over the node. Picking through the viewport node gives hover read-outs and the tick cursor. The same canvas draws the Replay timeline tracks.
 - **`TreeView`:** a flattened, virtualized row list with indentation and `FeathersDisclosureToggle`; drag to re-parent emits an `EditCommand`.
@@ -411,7 +411,7 @@ flowchart LR
         Q[sim_query embedded<br/>+ Flight client]
     end
     CL[(Cluster: campaign Parquet,<br/>sim_query serve)]
-    CACHE[(Handoff cache<br/>~/.sabers/cache/campaign_id/)]
+    CACHE[(Handoff cache<br/>~/.saber/cache/campaign_id/)]
     CS -- "submit, then IB-18 OpenCampaign" --> HC
     RES & MON --> HC
     HC -- "IB-18 OpenRun / OpenCrash / OpenFan / PinScenario" --> HS
@@ -435,9 +435,9 @@ The windows do not share live selection or linked brushing. They exchange **expl
 | `PinScenario` | explorer → studio | archived scene bundle, parameter row | Open the Builder with those parameters pinned in Preview |
 | `Ack` / `Error` | both | request id, outcome | Toast in the sending window |
 
-**The explorer does all data fetching.** Before sending a request it writes what the studio needs into the handoff cache (`~/.sabers/cache/<campaign_id>/`): the archived `.scn.ron`, `.req.ron` and `campaign.toml` (checked against the campaign's content hash), the single crash dump fetched with `DoGet` for cluster campaigns, or a snapshot extract for a fan. The studio only reads local files, so it needs no query engine and no tunnel.
+**The explorer does all data fetching.** Before sending a request it writes what the studio needs into the handoff cache (`~/.saber/cache/<campaign_id>/`): the archived `.scn.ron`, `.req.ron` and `campaign.toml` (checked against the campaign's content hash), the single crash dump fetched with `DoGet` for cluster campaigns, or a snapshot extract for a fan. The studio only reads local files, so it needs no query engine and no tunnel.
 
-**Transport.** A running studio listens on a local socket (Unix domain socket in `$XDG_RUNTIME_DIR`, named pipe on Windows), one JSON message per line, accepting only the current user. If no studio is running, the explorer starts it with a deep link (`sabers://studio/...`) carrying the same request. Deep links now name the target app: `sabers://explorer/open?campaign=run_48211&view=results` and `sabers://studio/replay?campaign=run_48211&run_id=120044&tick=812&focus=12`.
+**Transport.** A running studio listens on a local socket (Unix domain socket in `$XDG_RUNTIME_DIR`, named pipe on Windows), one JSON message per line, accepting only the current user. If no studio is running, the explorer starts it with a deep link (`saber://studio/...`) carrying the same request. Deep links now name the target app: `saber://explorer/open?campaign=run_48211&view=results` and `saber://studio/replay?campaign=run_48211&run_id=120044&tick=812&focus=12`.
 
 ```mermaid
 sequenceDiagram
@@ -456,7 +456,7 @@ sequenceDiagram
     alt studio running
         R->>H: OpenCrash{...} over local socket
     else not running
-        R->>H: launch sabers://studio/crash?... 
+        R->>H: launch saber://studio/crash?... 
     end
     H->>S: enter CrashReplay(cache paths)
     alt dump in cache
@@ -482,7 +482,7 @@ The studio no longer needs the 500 k-row runs table, the SQL editor or the analy
 
 #### 6.2.3 Explorer look and feel
 
-The explorer keeps the layouts in §7.7 and §7.8 and the theme tokens in §10.1, so the two windows read as one product. Tokens are defined once in `theme.toml` and compiled into both apps (Feathers semantic tokens in the studio, `egui::Visuals` in the explorer). Units, number formatting (§9.3), keyboard conventions and the cluster profiles in `sabers.workspace.ron` are shared. Accessibility in the explorer comes from egui's AccessKit support.
+The explorer keeps the layouts in §7.7 and §7.8 and the theme tokens in §10.1, so the two windows read as one product. Tokens are defined once in `theme.toml` and compiled into both apps (Feathers semantic tokens in the studio, `egui::Visuals` in the explorer). Units, number formatting (§9.3), keyboard conventions and the cluster profiles in `saber.workspace.ron` are shared. Accessibility in the explorer comes from egui's AccessKit support.
 
 ---
 
@@ -492,7 +492,7 @@ The explorer keeps the layouts in §7.7 and §7.8 and the theme tokens in §10.1
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────┐
-│  SABERS                                                                       │
+│  SABER                                                                       │
 │                                                                               │
 │  ┌─ Recent workspaces ───────────────────┐  ┌─ Start new ──────────────────┐  │
 │  │ ▸ guided_projectile_v3   2h ago       │  │  [ Aero-ballistics       ]   │  │
@@ -685,7 +685,7 @@ A single scrolling form with a live summary card. Each section is collapsible; s
 ```
 
 - **Preview ▸** opens a pair-plot of the sampled points so Lena can sanity-check coverage before submitting.
-- **Show generated** reveals the exact `sabers sweep` invocation and the rendered `submit_campaign.pbs` (P6). Both are also written into `campaigns/<id>/` for reproducibility.
+- **Show generated** reveals the exact `saber sweep` invocation and the rendered `submit_campaign.pbs` (P6). Both are also written into `campaigns/<id>/` for reproducibility.
 - **Submit…** opens a confirmation modal summarizing core-hours and target, because this spends allocation and can't be undone.
 - **Execution target "This machine"** runs `sim_hpc` locally with the same CLI (`--scene --manifest --scratch-dir --shared-out`), so it's a true dress rehearsal (Roadmap Phase 3).
 
@@ -782,7 +782,7 @@ Re-simulation uses the scenario hash stored in the campaign to guarantee the sam
 
 **Compare mode (J9):** choose a second campaign; the scorecard gains a Δ column, and the param map can show the difference of P(pass) where parameter spaces overlap.
 
-**Export report ▾:** Evidence Report (HTML/PDF) containing scorecard, selected plots, scenario and study plan hashes, and deep links (§5.4) for each cited run. **Copy as DuckDB / Polars** puts the query behind the current view on the clipboard (J10). Built-in views are generated from one query description, so the copied DuckDB SQL or Polars code runs unchanged in `sabers`; SQL typed by hand in the Query view is copied as written, with a note that DataFusion-only functions may need edits.
+**Export report ▾:** Evidence Report (HTML/PDF) containing scorecard, selected plots, scenario and study plan hashes, and deep links (§5.4) for each cited run. **Copy as DuckDB / Polars** puts the query behind the current view on the clipboard (J10). Built-in views are generated from one query description, so the copied DuckDB SQL or Polars code runs unchanged in `saber`; SQL typed by hand in the Query view is copied as written, with a note that DataFusion-only functions may need edits.
 
 ### 7.9 Run Replay and Crash Replay
 
@@ -919,7 +919,7 @@ sequenceDiagram
     end
 ```
 
-The focus target and mode are saved in camera bookmarks in `sabers.workspace.ron`, and studio deep links (§5.4) accept `focus=<SimId>&mode=chase`.
+The focus target and mode are saved in camera bookmarks in `saber.workspace.ron`, and studio deep links (§5.4) accept `focus=<SimId>&mode=chase`.
 
 #### 7.10.2 State HUD: large position and velocity indicator
 
@@ -1005,7 +1005,7 @@ Labels are pooled UI text nodes positioned by projecting f64 world points throug
 
 ### 7.11 3D models: library, import and linking to entities (new, subsystems D17)
 
-Any entity can show a 3D model: a glTF/GLB file from the **built-in** library that ships with SABERS, from the workspace's own `models/` folder, or from a team **library root**. The model is only how the entity looks. Physics comes from the entity's components, and its collision shape is separate (it can be derived from the model once, on request, §7.11.5). Types, file layout and rules are in subsystems §5.10 and IB-20; the flows are in `sequence-diagrams.md` §2.1–2.3.
+Any entity can show a 3D model: a glTF/GLB file from the **built-in** library that ships with SABER, from the workspace's own `models/` folder, or from a team **library root**. The model is only how the entity looks. Physics comes from the entity's components, and its collision shape is separate (it can be derived from the model once, on request, §7.11.5). Types, file layout and rules are in subsystems §5.10 and IB-20; the flows are in `sequence-diagrams.md` §2.1–2.3.
 
 Three rules shape the UI:
 
@@ -1029,7 +1029,7 @@ Three rules shape the UI:
 │   │  ✈    │ │  ⌂    │ │  ⚠    │ ← file changed    │
 │   │uav_v3 │ │hangar │ │rotor_b│   since saved     │
 │   └───────┘ └───────┘ └───────┘                   │
-│ ▸ Team library  /proj/sabers/models (27)          │
+│ ▸ Team library  /proj/saber/models (27)          │
 │ ───────────────────────────────────────────────── │
 │ uav_v3 · 2.40 × 3.10 × 0.55 m · 212 k tris · OBJ  │
 │ Used by: UAV_1 #4, UAV_2 #5                       │
@@ -1099,10 +1099,10 @@ Thumbnails are rendered by the studio on first sight and cached next to the mode
 ```
 
 - The preview shows the body-frame axis triad, a 1 m reference bar and the bounding box in display units, and updates live as unit, axes and origin change, so a sideways or 1000× model is obvious before it is imported.
-- **Blocking problems** replace the Import button with the reason and a fix, for example: "Meshes use Draco compression, which the studio cannot load. Decompress the file with a local tool and import it again." Remote or absolute texture paths are refused the same way, because SABERS never fetches anything (D7).
+- **Blocking problems** replace the Import button with the reason and a fix, for example: "Meshes use Draco compression, which the studio cannot load. Decompress the file with a local tool and import it again." Remote or absolute texture paths are refused the same way, because SABER never fetches anything (D7).
 - A `.gltf` with separate files is packed into one `.glb` in the workspace; the original is left untouched.
 - **OBJ (stretch goal):** the same dialog. OBJ has no unit or axes, so Units, Up and Forward start empty and Import stays disabled until they are set. **Store as** chooses `.glb` (default) or `.gltf` + `.bin` + textures; MTL materials are converted to PBR and the preview shows the result.
-- The same import runs headless as `sabers-cli model import` and `sabers-cli model convert` for batches.
+- The same import runs headless as `saber-cli model import` and `saber-cli model convert` for batches.
 
 #### 7.11.4 Align mode
 
@@ -1311,7 +1311,7 @@ sequenceDiagram
 
     U->>R: open run_48211 on hpc1
     R->>Q: connect(hpc1, run_48211)
-    Q->>P: read ~/.sabers/query/*.json
+    Q->>P: read ~/.saber/query/*.json
     P-->>Q: none live
     Q-->>R: not running
     R-->>U: chip "not running" + Start query service
@@ -1420,8 +1420,8 @@ Names introduced here, so the subsystems and sequence-diagram docs can adopt or 
 | `AppState::{Launcher, CampaignSetup, RunReplay}` (adds to `ScenarioBuilder`, `LocalRun`, `CrashReplay`) | Bevy `States` variants | `sim_studio` | Workspaces in §5.2. `CampaignMonitor` and `ResultsExplorer` are now views of `sim_explorer` (v0.4) |
 | `sim_explorer` | Rust bin (eframe + egui, embeds `sim_query`) | workspace crate | Campaign Monitor, Results Explorer, Query view, reports (§6.2) |
 | IB-18 studio handoff: `OpenCampaign`, `OpenRun`, `OpenCrash`, `OpenFan`, `PinScenario`, `Ack`/`Error` | JSON lines over a per-user local socket, or a deep link when the studio is not running | `sim_schema::handoff` | Explicit requests between the two windows (§6.2.1) |
-| Handoff cache | `~/.sabers/cache/<campaign_id>/` with archived scene bundle, single dumps, snapshot extracts | workstation | The studio reads only local files |
-| Deep link routes `sabers://studio/...`, `sabers://explorer/...` | URI scheme (replaces the single `sabers://open`) | OS + both apps | Each link names the app it opens |
+| Handoff cache | `~/.saber/cache/<campaign_id>/` with archived scene bundle, single dumps, snapshot extracts | workstation | The studio reads only local files |
+| Deep link routes `saber://studio/...`, `saber://explorer/...` | URI scheme (replaces the single `saber://open`) | OS + both apps | Each link names the app it opens |
 | `theme.toml` | Shared theme tokens | compiled into both apps | One look across Feathers and egui |
 | `StudioSimHost` | `sim_studio` module | wraps `sim_core` in-process | Preview and re-simulation |
 | `VerifyPlan` (adopted) | Compiled from `.req.ron` at load time | `sim_verify` | Requirements decide which Tier 1 reductions and Tier 2 triggers run |
@@ -1430,32 +1430,32 @@ Names introduced here, so the subsystems and sequence-diagram docs can adopt or 
 | `campaign_status.json` (adopted, IB-15) | Heartbeat file from Rank 0, `sim_schema::CampaignStatus` | `$SHARED_OUT` | Campaign Monitor progress and live crash map |
 | `CrashDump` index (adopted, `run_id` → offset) | Footer in `node_{rank}_crashes.zst` | `sim_schema` format, written by `sim_hpc::io_mux` | Open one dump without scanning the whole archive |
 | `summaries.crash_tick`, `rank`, `final_state_hash` (adopted), per-requirement metric columns | Parquet columns | `node_{rank}_summaries.parquet` | Scorecard, crash lookup |
-| `sabers://...` | Deep-link URI scheme (routes per app since v0.4, see below) | OS + `sim_studio`, `sim_explorer` | Links from reports and notebooks |
-| `sabers.workspace.ron` | File | workspace root | Layout, cluster profiles, unit profile, recent items |
-| Cluster profile | Config record (host, account, queue, modules, paths) | `sabers.workspace.ron` (secrets in OS keychain) | Campaign Setup / Monitor over SSH |
+| `saber://...` | Deep-link URI scheme (routes per app since v0.4, see below) | OS + `sim_studio`, `sim_explorer` | Links from reports and notebooks |
+| `saber.workspace.ron` | File | workspace root | Layout, cluster profiles, unit profile, recent items |
+| Cluster profile | Config record (host, account, queue, modules, paths) | `saber.workspace.ron` (secrets in OS keychain) | Campaign Setup / Monitor over SSH |
 | `sim_query` (adopted, subsystems §5.8) | Rust crate, DataFusion engine; embedded in `sim_explorer` and run on the cluster as `sim_query serve` | workspace crate | Results Explorer queries, Query view, crash dump fetch |
-| Query service record | `~/.sabers/query/<jobid>.json`: host, port, token, `build_id`, `schema_version`, expiry | user home on the cluster (mode 600) | Query service chip, SSH tunnel setup (IB-17) |
-| Cluster profile `query` block | `placement` (job / login), cores, walltime, idle timeout, `max_rows` | `sabers.workspace.ron` | Starting `sim_query serve` |
+| Query service record | `~/.saber/query/<jobid>.json`: host, port, token, `build_id`, `schema_version`, expiry | user home on the cluster (mode 600) | Query service chip, SSH tunnel setup (IB-17) |
+| Cluster profile `query` block | `placement` (job / login), cores, walltime, idle timeout, `max_rows` | `saber.workspace.ron` | Starting `sim_query serve` |
 | `Selection`, `EditCommand` | Studio resources/types | `sim_studio` | Selection sync, undo/redo |
 | Domain Pack | Bevy plugin trait | `sim_studio` (and pack crates) | Domain-specific assets, widgets, metrics |
 | `sim_studio_ui` | Rust crate: widget kit over Bevy Feathers and headless widgets (`StudioDock`, `Splitter`, `DataTable`, `TreeView`, `PlotCanvas`, `EntityPicker`, `QuantityInput`, `Tooltip`, `Toast`, `CommandPalette`, `StudioTheme`) | workspace crate, used only by `sim_studio` | Only crate that names Feathers types (§6.1.3) |
 | `CameraFocus`, `StudioCameraRig` | Studio resource and camera rig (wraps `PanOrbitCamera`, f64 pivot) | `sim_studio` | Focus dropdown and modes (§7.10.1); drives the `RenderBridge` floating origin |
 | `StateHud` | Viewport overlay | `sim_studio` | Position and velocity indicator (§7.10.2) |
 | `GroundGridPlugin` | Render plugin (full-screen grid pass + label pool) | `sim_studio` | Graph-paper ground (§7.10.3); takes per-decade f64 phases from `RenderBridge` |
-| Deep link `focus=`, `mode=` | URI parameters | `sabers://studio/...` | Open a view with the camera on an entity |
-| `sim_assets` (adopted, subsystems §5.10) | Rust crate: model catalogue, `model.ron` manifests, glTF import, OBJ conversion, collision derivation | workspace crate, linked by `sim_studio` and `sabers-cli` only | Library 3D Models tab, Import dialog, Derive collision (§7.11) |
+| Deep link `focus=`, `mode=` | URI parameters | `saber://studio/...` | Open a view with the camera on an entity |
+| `sim_assets` (adopted, subsystems §5.10) | Rust crate: model catalogue, `model.ron` manifests, glTF import, OBJ conversion, collision derivation | workspace crate, linked by `sim_studio` and `saber-cli` only | Library 3D Models tab, Import dialog, Derive collision (§7.11) |
 | `VisualModel`, `VisualAssetRef`, `Scenery` | Types in the scenario's `visual:` section, keyed by `SimId` | `sim_assets::visual` | Linking a model to an entity; look-only props |
 | `visual_hash` | Hash of the `visual:` section, separate from `scene_hash` | `.scn.ron` envelope | Model changes never invalidate campaigns |
 | `Studio.Assets` (`VisualModelPlugin`), `ModelRoot` | Studio plugin and entity | `sim_studio` | Loading, placeholders, LOD, far markers (moving parts later, D17) |
-| `model_roots` | List of team library folders | `sabers.workspace.ron` | Team library section in the 3D Models tab |
+| `model_roots` | List of team library folders | `saber.workspace.ron` | Team library section in the 3D Models tab |
 | Domain Pack default models | Map from physics `ModelId` to a built-in model | Domain Pack | Palette items arrive with a look |
 
 ---
 
 ## 13. Open questions
 
-1. **Requirements format ownership.** Should `.req.ron` be the source of truth, or should SABERS import from an external requirements tool (DOORS, Jama, ReqIF) and treat `.req.ron` as a cache?
-2. **Who generates the manifest?** The design uses `sabers sweep` (Python). Calling Python from the studio needs a managed Python env; a Rust Sobol/LHS generator in `sim_core` would remove that dependency but duplicate logic.
+1. **Requirements format ownership.** Should `.req.ron` be the source of truth, or should SABER import from an external requirements tool (DOORS, Jama, ReqIF) and treat `.req.ron` as a cache?
+2. **Who generates the manifest?** The design uses `saber sweep` (Python). Calling Python from the studio needs a managed Python env; a Rust Sobol/LHS generator in `sim_core` would remove that dependency but duplicate logic.
 3. **Cluster access model.** *Decided for results (2026-10-31, subsystems D10):* job control and the Campaign Monitor stay on plain SSH; result queries go to an on-demand `sim_query serve` job through an SSH tunnel, so no persistent login-node service is needed. Still open: whether the Monitor should also move onto that service later.
 4. **Re-simulation fidelity across machines.** Bit-identity holds for the same build and target; is the desktop the same CPU architecture and float flags as the cluster? If not, "re-simulate" should be labeled "reproduce (approximate)" or run on the cluster.
 5. **Controllers and software-in-the-loop.** Drone and robotics users will want to plug in real flight-controller or ROS code. Does the GUI need a SIL configuration screen in v1?

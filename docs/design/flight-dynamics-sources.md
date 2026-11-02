@@ -1,4 +1,4 @@
-# SABERS: Flight Dynamics Sources for Aircraft and Drones
+# SABER: Flight Dynamics Sources for Aircraft and Drones
 
 Annotated reading list for the fixed-wing and multirotor models in `sim_models`.
 It complements McCoy's *Modern Exterior Ballistics*, which covers tube-launched
@@ -20,7 +20,7 @@ Edition years are from memory. Check them before citing formally.
 
 ## 1. Shared foundations (all vehicles)
 
-| Source | Rating | What it covers | How it fits SABERS |
+| Source | Rating | What it covers | How it fits SABER |
 |---|---|---|---|
 | Zipfel, *Modeling and Simulation of Aerospace Vehicle Dynamics*, 3rd ed., AIAA Education Series, 2014 | **Core** | Coordinate frames, tensor form of 6DOF equations, and an explicit ladder of 3DOF, 5DOF and 6DOF models for aircraft and missiles. Includes simulation code (CADAC). | The best single text for the 6DOF-with-3DOF-option design. Its 3DOF/6DOF split maps straight onto a `RigidBodyPlugin` that can run either state vector. Bridges McCoy (projectiles) and aircraft in one notation. |
 | ANSI/AIAA R-004-1992, *Atmospheric and Space Flight Vehicle Coordinate Systems* | Reference | Standard frame and angle definitions (body, wind, stability, NED, ECEF). | Pin down frame names in `sim_core` once, so aero tables, rotor models and sensors agree. |
@@ -34,7 +34,7 @@ Edition years are from memory. Check them before citing formally.
 
 ## 2. Fixed-wing aircraft
 
-| Source | Rating | What it covers | How it fits SABERS |
+| Source | Rating | What it covers | How it fits SABER |
 |---|---|---|---|
 | Stevens, Lewis, Johnson, *Aircraft Control and Simulation*, 3rd ed., Wiley, 2015 | **Core** | Full nonlinear 6DOF aircraft equations, aero force/moment buildup, trim and linearization, with a complete F-16 model (tables in the appendix) and code. | The working reference for a fixed-wing model. The F-16 data gives a nontrivial, published model to validate against JSBSim and the NASA check-cases. |
 | Beard and McLain, *Small Unmanned Aircraft: Theory and Practice*, Princeton UP, 2012 (plus the authors' free supplement and updated chapters online) | **Core** | Small UAV kinematics and dynamics, linear aero coefficient model, wind, sensors, autopilot loops. Builds a simulator chapter by chapter. Includes the Aerosonde parameter set. | The right fidelity for small fixed-wing drones. Its stability-derivative model is a simple first fixed-wing component. Its autopilot chapters are enough for `ControlPlugin` without real flight software. |
@@ -51,7 +51,7 @@ Mach × alpha × beta table type (`subsystems-and-interfaces.md` §5.2, D9).
 
 ## 3. Multirotor drones (quad and hex)
 
-| Source | Rating | What it covers | How it fits SABERS |
+| Source | Rating | What it covers | How it fits SABER |
 |---|---|---|---|
 | Mahony, Kumar, Corke, "Multirotor Aerial Vehicles: Modeling, Estimation, and Control of Quadrotor", *IEEE Robotics & Automation Magazine* 19(3), 2012 | **Core** | Rigid-body model, lumped rotor thrust/torque (T = k_T ω², Q = k_Q ω²), blade flapping and induced drag, control structure. | The standard starting point. Its rotor model is exactly the lumped rotor the design chose. |
 | Leishman, *Principles of Helicopter Aerodynamics*, 2nd ed., Cambridge UP, 2006 | **Core** | Momentum theory, blade-element momentum theory, inflow, ground effect, vortex ring state, rotor in forward flight. | Physics behind the Ct and Cq curves and how they change with climb rate and advance ratio. Gives the corrections a lumped model should carry. |
@@ -60,7 +60,7 @@ Mach × alpha × beta table type (`subsystems-and-interfaces.md` §5.2, D9).
 | Pounds, Mahony, Corke, "Modelling and Control of a Large Quadrotor Robot", *Control Engineering Practice* 18(7), 2010 | Reference | Larger vehicle effects: rotor flapping, blade flexibility, and their influence on stability. | Useful once vehicles get heavier than hobby-scale. |
 | Bangura and Mahony, "Nonlinear Dynamic Modeling for High Performance Control of a Quadrotor", ACRA, 2012 | Reference | Rotor drag (H-force) and induced-velocity model in forward flight. | A compact rotor-drag term for the lumped model. |
 | Faessler, Franchi, Scaramuzza, "Differential Flatness of Quadrotor Dynamics Subject to Rotor Drag", *IEEE RA-L* 3(2), 2018 | Reference | Linear rotor-drag model with identified coefficients. | Simple, identified drag term. Also the basis for a reference trajectory controller in `ControlPlugin`. |
-| Mueller and D'Andrea, "Stability and Control of a Quadrocopter Despite the Complete Loss of One, Two, or Three Propellers", ICRA, 2014 | Later | Behavior and control after rotor loss. | Failure scenarios (motor-out on quad versus hex), which fit SABERS requirement checks well. |
+| Mueller and D'Andrea, "Stability and Control of a Quadrocopter Despite the Complete Loss of One, Two, or Three Propellers", ICRA, 2014 | Later | Behavior and control after rotor loss. | Failure scenarios (motor-out on quad versus hex), which fit SABER requirement checks well. |
 | Cheeseman and Bennett, "The Effect of the Ground on a Helicopter Rotor in Forward Flight", ARC R&M 3021, 1955 | Reference | Classic closed-form ground-effect correction. | One-line ground-effect factor on thrust near the ground. |
 | Brandt and Selig, "Propeller Performance Data at Low Reynolds Numbers", AIAA 2011-1255, and the UIUC Propeller Data Site | **Core** (data) | Measured Ct and Cp versus advance ratio for many small propellers. | Real data for `import::rotor_table`. APC also publishes performance files for its propellers. |
 | Padfield, *Helicopter Flight Dynamics*, 3rd ed., Wiley, 2018 | Later | Rotorcraft flight dynamics at full-helicopter fidelity. | Only if blade-element or flapping-dynamics rotors come into scope. |
@@ -73,16 +73,16 @@ Journal*, 2009) is a common choice. Check that reference before relying on it.
 
 ## 4. Open simulators to read and cross-check against
 
-These are for reading equations and comparing outputs, not for linking into SABERS.
+These are for reading equations and comparing outputs, not for linking into SABER.
 All run locally with no external services.
 
 | Model | Rating | What it is | How to use it |
 |---|---|---|---|
-| JSBSim (LGPL). Berndt, "JSBSim: An Open Source Flight Dynamics Model in C++", AIAA Modeling and Simulation Technologies Conference, 2004 | **Core** | Mature, table-driven 6DOF model with a large aircraft library (C172, F-16 and others), rotating-Earth options and a documented XML model format. | The main cross-check for fixed-wing. Run the same aircraft and initial state in both, compare trajectories. Its XML force buildup is a good template for SABERS components. |
+| JSBSim (LGPL). Berndt, "JSBSim: An Open Source Flight Dynamics Model in C++", AIAA Modeling and Simulation Technologies Conference, 2004 | **Core** | Mature, table-driven 6DOF model with a large aircraft library (C172, F-16 and others), rotating-Earth options and a documented XML model format. | The main cross-check for fixed-wing. Run the same aircraft and initial state in both, compare trajectories. Its XML force buildup is a good template for SABER components. |
 | ArduPilot SITL physics (`libraries/SITL`, for example `SIM_Multicopter`, `SIM_Frame`, `SIM_Plane`) | Reference | Simple, readable multirotor and plane models used for autopilot testing. | Compact reference for frame layouts (quad X, hex X, and others) and motor mixing. |
 | PX4 SITL with Gazebo plugins (`gazebo_motor_model` and related) | Reference | Motor model with first-order dynamics, rotor drag and rolling moment. | Another small, readable lumped-rotor implementation. |
 | RotorS (Furrer et al., "RotorS: A Modular Gazebo MAV Simulator Framework", in *Robot Operating System (ROS)*, Springer, 2016) | Reference | Origin of the motor model PX4 still uses. | Explains the rotor-drag and rolling-moment terms in the PX4 plugin. |
-| RotorPy (Folk, Paulos, Kumar, arXiv:2306.04485, 2023) | **Core** (multirotor) | Python multirotor simulator built for research, with rotor drag, induced drag, wind and documented equations. | The closest open match to SABERS' multirotor scope. Easy to run from the Python `sabers` analysis side as a reference result. |
+| RotorPy (Folk, Paulos, Kumar, arXiv:2306.04485, 2023) | **Core** (multirotor) | Python multirotor simulator built for research, with rotor drag, induced drag, wind and documented equations. | The closest open match to SABER's multirotor scope. Easy to run from the Python `saber` analysis side as a reference result. |
 | Flightmare (Song et al., CoRL 2020) and AirSim (Shah et al., *Field and Service Robotics*, 2017) | Later | Fast quadrotor simulators aimed at learning and vision. | Low priority. Their physics is simpler than RotorPy's. |
 
 ## 5. Ballistics bridge (alongside McCoy)

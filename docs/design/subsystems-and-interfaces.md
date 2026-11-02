@@ -1,4 +1,4 @@
-# SABERS — Subsystem Decomposition & Interface Boundaries
+# SABER — Subsystem Decomposition & Interface Boundaries
 
 Status: draft v0.2 (2026-10-30) · Builds on `Architecture.md` (Alex's first draft)
 v0.2 applies Alex's 2026-10-30 decisions (§11 D1–D8), the campaign-wide crash policy and resume design
@@ -10,7 +10,7 @@ v0.4 (2026-10-31) applies D11: the studio UI uses Bevy Feathers through a `sim_s
 instead of `bevy_egui` (§4, §5.5); viewport focus, state HUD and ground grid feed from `RenderBridge`.
 v0.5 (2026-11-01) applies D12: campaign monitoring, results and queries move to a separate egui app,
 `sim_explorer` (§5.9), which embeds `sim_query`; it hands runs, crashes and fans to the studio over IB-18.
-v0.6 (2026-11-01) applies D13: SABERS uses its own physics kernel with Parry (`parry3d-f64`) for collision
+v0.6 (2026-11-01) applies D13: SABER uses its own physics kernel with Parry (`parry3d-f64`) for collision
 detection; `sim_core` gains `GeometryService` and `ContactSolver` (§5.1, §6, IB-19), and robotics is deferred
 (`MultibodyPlugin` reserved). Analysis and contact design: `physics-engine-tradeoffs.md`.
 v0.7 (2026-11-01) applies D14: selectable integrators (RK4 default; Bogacki–Shampine, Fehlberg, Cash–Karp,
@@ -20,17 +20,19 @@ v0.8 (2026-11-02) applies D17: entities can carry 3D models (glTF/GLB) from a bu
 the workspace or team library roots, through a new `sim_assets` crate (§5.10, IB-20); the scenario's `visual:`
 section gets its own `visual_hash`, collision shapes can be derived from a model once at authoring time (IB-19),
 and OBJ import with conversion to glTF/GLB is a stretch goal.
+v0.9 (2026-11-02) applies D18: the project is renamed SABER, and every `sabers` identifier (Python package,
+`saber-cli`, `~/.saber`, `saber://` links, `saber.workspace.ron`, `saber_version`) drops the S.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
 
-> **What SABERS is for.** Model a physical system (or a digital twin of a real one), simulate it under
+> **What SABER is for.** Model a physical system (or a digital twin of a real one), simulate it under
 > uncertainty with a deterministic physics kernel, and answer the question *"does this system meet its
 > requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing aircraft; robotics deferred (D13).
 >
 > The draft architecture covers the *engine* very well (deterministic kernel, HPC fan-out, I/O, crash
 > forensics). This document adds the two layers that make it a *system-analysis* tool: a **system
-> modeling layer** (`sim_models`) and a **requirements verification layer** (`sim_verify` + `sabers.verify`),
+> modeling layer** (`sim_models`) and a **requirements verification layer** (`sim_verify` + `saber.verify`),
 > and pins down every interface between subsystems as a contract.
 
 ---
@@ -82,16 +84,16 @@ Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-e
 | `sim_studio` | Rust bin — authoring and 3D GUI on Bevy + Feathers (`Launcher`, `ScenarioBuilder`, `LocalRun`, `CampaignSetup`, `RunReplay`, `CrashReplay`) | draft (+4 states) |
 | `sim_explorer` | Rust bin — campaign data GUI on eframe + egui: Campaign Monitor, Results Explorer, Query view, reports; embeds `sim_query` (D12) | **new** |
 | `sim_studio_ui` | Rust lib — studio widget kit over Bevy Feathers and headless `bevy_ui_widgets` (dock, tables, plots, pickers, theme); the only crate that names Feathers types (D11) | **new** |
-| `sim_assets` | Rust lib — 3D model catalogue (built-in library, workspace, library roots), `model.ron` manifests, glTF validation and import, OBJ → glTF conversion (stretch), authoring-time collision derivation; linked only by `sim_studio` and `sabers-cli` (D17) | **new** |
+| `sim_assets` | Rust lib — 3D model catalogue (built-in library, workspace, library roots), `model.ron` manifests, glTF validation and import, OBJ → glTF conversion (stretch), authoring-time collision derivation; linked only by `sim_studio` and `saber-cli` (D17) | **new** |
 | `sim_hpc` | Rust bin — headless MPI + rayon runner | draft |
 | `sim_query` | Rust lib + bin — DataFusion query engine over campaign Parquet; embedded in `sim_explorer` for local campaigns, `sim_query serve` on a compute node for cluster campaigns (D10) | **new** |
-| `sabers` | Python package — `sabers.sweep`, `sabers.campaign`, `sabers.analyze`, `sabers.verify`, `sabers.report` (`sabers.twin` deferred, D6) | draft scripts → package |
+| `saber` | Python package — `saber.sweep`, `saber.campaign`, `saber.analyze`, `saber.verify`, `saber.report` (`saber.twin` deferred, D6) | draft scripts → package |
 
 Sequence-diagram participant names map onto components as: `Studio.Builder`, `Studio.Replay`,
 `Core.Resolver`, `Core.Schedule`, `Core.Watchdog`, `Core.Recorder`, `SweepGen`, `PBS`, `Rank0.Dispatcher`,
 `RankN.Main`, `Pool`, `Worker`, `Quota` (the node's view of the campaign-wide crash counts), `IO.Mux`,
-`IO.Stager`, `NVMe`, `SharedFS`, `Analyze`, `Verify`, `Query.Service`. (The sequence doc calls the submit step `sabers.submit`;
-it is a function of `sabers.campaign`.)
+`IO.Stager`, `NVMe`, `SharedFS`, `Analyze`, `Verify`, `Query.Service`. (The sequence doc calls the submit step `saber.submit`;
+it is a function of `saber.campaign`.)
 
 ---
 
@@ -103,7 +105,7 @@ flowchart LR
     modeler(["Model developer<br/>(writes Rust model plugins)"])
     dataeng(["Test / flight data owner"])
 
-    subgraph SABERS["SABERS"]
+    subgraph SABER["SABER"]
         direction TB
         S[("Model → Simulate → Verify")]
     end
@@ -114,17 +116,17 @@ flowchart LR
     ws["Engineer workstation<br/>(GPU, local cores)"]
     out["Consumers of evidence<br/>(design reviews, certification packages)"]
 
-    analyst -- "scenarios, sweeps, requirement sets (*.req.ron)" --> SABERS
-    modeler -- "model plugins (Rust)" --> SABERS
-    cad -- "import (IB-13)" --> SABERS
-    dataeng --> test -. "calibration / validation (IB-14, deferred)" .-> SABERS
-    SABERS -- "batch jobs" --> hpc
-    SABERS -- "interactive runs, GUI" --> ws
-    SABERS -- "verification reports, traceability matrix" --> out
+    analyst -- "scenarios, sweeps, requirement sets (*.req.ron)" --> SABER
+    modeler -- "model plugins (Rust)" --> SABER
+    cad -- "import (IB-13)" --> SABER
+    dataeng --> test -. "calibration / validation (IB-14, deferred)" .-> SABER
+    SABER -- "batch jobs" --> hpc
+    SABER -- "interactive runs, GUI" --> ws
+    SABER -- "verification reports, traceability matrix" --> out
 ```
 
-**Scope boundary.** SABERS owns: model definitions, scenario authoring, simulation, telemetry, crash
-forensics, requirement evaluation and reporting. SABERS does **not** own: a requirements repository
+**Scope boundary.** SABER owns: model definitions, scenario authoring, simulation, telemetry, crash
+forensics, requirement evaluation and reporting. SABER does **not** own: a requirements repository
 (`*.req.ron` files are the source of truth for now, and verdicts do not flow back anywhere, D3), CAD
 authoring, cluster scheduling, digital-twin calibration (D6), or long-term data archiving. All campaign data
 stays on the cluster and workstation; no component contacts an external service (D7).
@@ -138,10 +140,10 @@ flowchart TB
     subgraph WS["Workstation"]
         studio["sim_studio (Rust, Bevy + Feathers)<br/>ScenarioBuilder · LocalRun · CampaignSetup · RunReplay · CrashReplay"]
         explorer["sim_explorer (Rust, egui)<br/>CampaignMonitor · ResultsExplorer · Query view<br/>embeds sim_query for local campaigns"]
-        cache[("Handoff cache<br/>~/.sabers/cache")]
-        assets["sim_assets (Rust lib, studio and sabers-cli only)<br/>3D model catalogue · import · OBJ conversion"]
+        cache[("Handoff cache<br/>~/.saber/cache")]
+        assets["sim_assets (Rust lib, studio and saber-cli only)<br/>3D model catalogue · import · OBJ conversion"]
         mdl[("3D models (glTF/GLB)<br/>built-in · workspace models/ · library roots")]
-        py["sabers (Python)<br/>sweep · campaign · analyze · verify · report"]
+        py["saber (Python)<br/>sweep · campaign · analyze · verify · report"]
     end
 
     subgraph LIBS["Shared Rust libraries (linked into both binaries)"]
@@ -214,7 +216,7 @@ flowchart BT
     ui["sim_studio_ui<br/>(+ bevy_feathers, bevy_ui_widgets; Bevy pinned exactly)"]
     hpc["sim_hpc<br/>(+ mpi, rayon, arrow, parquet, crossbeam, zstd)"]
     query["sim_query<br/>(+ datafusion, arrow-flight, tokio)"]
-    py["sabers (Python)<br/>(pyarrow, duckdb, polars, scipy)"]
+    py["saber (Python)<br/>(pyarrow, duckdb, polars, scipy)"]
 
     core --> schema
     verify --> core
@@ -239,7 +241,7 @@ Rules:
 - One `arrow` / `parquet` version for the whole workspace, set by the DataFusion release `sim_query` uses.
   `sim_schema`, `sim_hpc` and `sim_query` upgrade together (D10); a mismatch is a build error, not a
   runtime one.
-- A `sabers-cli` thin Rust binary (or `sim_hpc --validate-only`) is the only way Python validates
+- A `saber-cli` thin Rust binary (or `sim_hpc --validate-only`) is the only way Python validates
   `.scn.ron`/`.req.ron`, so Python never re-implements RON parsing.
 
 ---
@@ -382,14 +384,14 @@ Stage split:
 - **Per-run (Rust, in the Worker):** deterministic, per-trajectory predicates: "max lateral accel < 30 g",
   "never enter keep-out zone", "reach waypoint within 12 s". Produces metric values + a per-run
   `Pass/Fail/Inconclusive` per requirement, written as columns in the summary row.
-- **Per-campaign (Python, `sabers.verify`):** statistical requirements over many runs: "P(miss < 2 m)
+- **Per-campaign (Python, `saber.verify`):** statistical requirements over many runs: "P(miss < 2 m)
   ≥ 0.95 with 90 % confidence", sensitivity of a verdict to parameters, coverage of the operating envelope.
 
 ### 5.4 `sim_schema` — formats & versions (new)
 
 | Item | Content |
 |---|---|
-| `FileHeader` | `magic`, `format`, `schema_version` (semver), `sabers_version`, `build_id` (git sha + rustc + target + feature flags), `campaign_id`, `scene_hash`, `req_set_hash`, `created_utc` |
+| `FileHeader` | `magic`, `format`, `schema_version` (semver), `saber_version`, `build_id` (git sha + rustc + target + feature flags), `campaign_id`, `scene_hash`, `req_set_hash`, `created_utc` |
 | Arrow schemas | `SUMMARY_SCHEMA` (fixed + dynamic `param_*`, `metric_*`, `req_*` columns), `EVENTS_SCHEMA`, `SNAPSHOTS_SCHEMA`, `VERDICTS_SCHEMA`, `MANIFEST_SCHEMA` |
 | `CrashDump` | header + run identity + `SimStatus` + `CrashReason` + chronological `Vec<TickFrame>` + optional panic message/backtrace |
 | `SimStatus`, `CrashReason`, `EventType`, `Verdict` | `#[repr(u8)]` enums with stable discriminants, exported to Python |
@@ -409,7 +411,7 @@ stateDiagram-v2
     LocalRun --> ScenarioBuilder : Stop / edit
     LocalRun --> CrashReplay : watchdog trips locally
     ScenarioBuilder --> CampaignSetup : configure sweep + requirements
-    CampaignSetup --> Explorer : submit (sabers.campaign), then OpenCampaign
+    CampaignSetup --> Explorer : submit (saber.campaign), then OpenCampaign
     Explorer --> RunReplay : IB-18 OpenRun / OpenFan
     Explorer --> CrashReplay : IB-18 OpenCrash
     Explorer --> ScenarioBuilder : IB-18 PinScenario
@@ -424,7 +426,7 @@ stateDiagram-v2
 | `Studio.Builder` | Entity/model palette from `ModelLibrary`, inspector driven by `bevy_reflect`, parameter-binding & uncertainty editors, requirement editor, `.scn.ron`/`.req.ron` export, validation panel. |
 | `Studio.LocalRun` | Owns one sim World built by `SimAppBuilder`, steps `SimTickSchedule` from a `Time<Fixed>`-driven system (N ticks per frame, pausable, single-step), plots live signals, shows live requirement status. |
 | `Studio.Replay` | Loads `CrashDump` (from the handoff cache, or a `.zst` the user opens), rebuilds scene via Resolver with the crashed run's params, scrubs frames; can also *re-simulate up to the crash* deterministically for full-fidelity state (see §11 G9). |
-| `Studio.CampaignSetup` | Pick scenario + `.req.ron`, configure sampler (calls `sabers.sweep`), execution settings → writes `campaign.toml`, runs preflight (`--validate-only`), submits. |
+| `Studio.CampaignSetup` | Pick scenario + `.req.ron`, configure sampler (calls `saber.sweep`), execution settings → writes `campaign.toml`, runs preflight (`--validate-only`), submits. |
 | `Studio.RunReplay` | Replays a completed run from Tier 3 snapshots, or rebuilds and re-simulates it at full rate via LocalRun. |
 | `Studio.Handoff` | Local-socket server for IB-18 requests from `sim_explorer` (and deep links when the studio is started by one); validates the cached scene bundle hash and `build_id`, then enters `RunReplay`, `CrashReplay` or the Builder. Sends `OpenCampaign` after a submit. |
 | `RenderBridge` | The only place f64 sim state crosses into f32 render state; uses a floating origin (G7). The origin follows `CameraFocus` while the camera is locked on an entity; also hands the state HUD its f64 values and the ground grid its per-decade phases (`origin mod 10^(k+1)`). |
@@ -471,17 +473,17 @@ flowchart LR
 There is no separate `Checkpointer`: checkpointing is the IO.Mux part roll plus the IO.Stager commit, and
 resume is a Rank0.Dispatcher function (G11, IB-07).
 
-### 5.7 `sabers` Python package
+### 5.7 `saber` Python package
 
 ```mermaid
 flowchart LR
-    subgraph sabers
-        sweep["sabers.sweep<br/>Sobol / LHS / grid / Morris · replicate seeds · manifest writer"]
-        campaign["sabers.campaign<br/>campaign.toml · preflight via sim_hpc --validate-only · PBS (primary) / Slurm templates · submit · resume · auto_resume"]
-        analyze["sabers.analyze<br/>DuckDB/Polars over *_summaries.parquet · UQ stats · sensitivity (Sobol indices)"]
-        verifyp["sabers.verify<br/>campaign-level verdicts · confidence bounds · verdicts.parquet"]
-        report["sabers.report<br/>HTML/PDF evidence report · traceability matrix"]
-        twin["sabers.twin (deferred)<br/>calibration against test data (IB-14)"]
+    subgraph saber
+        sweep["saber.sweep<br/>Sobol / LHS / grid / Morris · replicate seeds · manifest writer"]
+        campaign["saber.campaign<br/>campaign.toml · preflight via sim_hpc --validate-only · PBS (primary) / Slurm templates · submit · resume · auto_resume"]
+        analyze["saber.analyze<br/>DuckDB/Polars over *_summaries.parquet · UQ stats · sensitivity (Sobol indices)"]
+        verifyp["saber.verify<br/>campaign-level verdicts · confidence bounds · verdicts.parquet"]
+        report["saber.report<br/>HTML/PDF evidence report · traceability matrix"]
+        twin["saber.twin (deferred)<br/>calibration against test data (IB-14)"]
     end
     sweep --> campaign --> analyze --> verifyp --> report
     twin -. "calibrated priors" .-> sweep
@@ -514,12 +516,12 @@ flowchart LR
 |---|---|
 | `Query.Catalog` | Reads `_MANIFEST.json` and lists the committed parts of every attempt per table; falls back to globbing `*_summaries.parquet` etc. and skipping `.tmp`/`.partial` when the manifest is missing (same rules as IB-11). Takes one snapshot per query, so a part committed mid-query appears in the next one. |
 | `Query.Engine` | DataFusion `SessionContext` with a `ManifestTableProvider` per view (`summaries`, `events`, `snapshots`, `impacts`, `verdicts`, `manifest`). Row-group pruning uses the `param_set_id, run_id` sort order from IB-07. Deduplicates re-queued `run_id`s as IB-11 does. Spills to `$TMPDIR`. |
-| `Query.UDFs` | Scalar and aggregate SQL functions registered from `sim_verify` / `sim_schema`, for example `req_margin`, `p_pass_ci`, `cep`, `quat_angle`, so studio numbers come from the same code as the online evaluator. `p_pass_ci` must match `sabers.verify`'s aggregation (round-trip test, §12). |
+| `Query.UDFs` | Scalar and aggregate SQL functions registered from `sim_verify` / `sim_schema`, for example `req_margin`, `p_pass_ci`, `cep`, `quat_angle`, so studio numbers come from the same code as the online evaluator. `p_pass_ci` must match `saber.verify`'s aggregation (round-trip test, §12). |
 | `Query.Service` | `sim_query serve` binary: Arrow Flight SQL server, `DoGet` for single crash dumps, bearer token, read-only, idle timeout. |
 | `Query.Client` | Studio side: Flight SQL client over the SSH tunnel, or direct calls into the embedded engine. Runs on a tokio runtime on a dedicated thread and hands batches to Bevy through a channel, so the egui frame never blocks. |
 | `Query.DialectGen` | Builds each view's query from a small AST and renders DataFusion SQL to execute plus DuckDB SQL / Polars code for "Copy as DuckDB / Polars" (UX J10). Free SQL typed in the Query view is DataFusion dialect and may need small edits before it runs in DuckDB. |
 
-Python is unaffected: `sabers.analyze` and `sabers.verify` keep reading the same Parquet with DuckDB/Polars
+Python is unaffected: `saber.analyze` and `saber.verify` keep reading the same Parquet with DuckDB/Polars
 (IB-11).
 
 ---
@@ -555,11 +557,11 @@ flowchart LR
         obj["Assets.ObjConverter (stretch)<br/>tobj → glTF PBR → .glb or .gltf"]
         der["Assets.ShapeDeriver<br/>box · capsule · hull · convex decomposition · trimesh"]
     end
-    builtin[("crates/sim_assets/builtin/<br/>installed as share/sabers/models/builtin")]
+    builtin[("crates/sim_assets/builtin/<br/>installed as share/saber/models/builtin")]
     ws[("workspace models/")]
-    roots[("library roots<br/>(model_roots in sabers.workspace.ron)")]
+    roots[("library roots<br/>(model_roots in saber.workspace.ron)")]
     studio["sim_studio<br/>Studio.Assets (VisualModelPlugin)"]
-    cli["sabers-cli model inspect | import | convert"]
+    cli["saber-cli model inspect | import | convert"]
     geo["sim_core::geometry::derive<br/>(Parry stays here, IB-19)"]
 
     builtin & ws & roots --> cat
@@ -576,7 +578,7 @@ flowchart LR
 | `Assets.Catalog` | Indexes every model from the three sources below, keyed by `(source, id)`; verifies `content_hash` on load; answers "which entities use this model". Read-only over built-ins. | `Catalog`, `CatalogEntry`, `VisualAssetRef` |
 | `VisualAssetManifest` | Per-model metadata in `model.ron`: how the file's unit and axes map onto the body frame, the origin offset to the body reference point, optional moving-part bindings and LOD files, license. | `VisualAssetManifest`, `ModelFrame`, `VisualBinding` |
 | `Assets.Inspector` | Reads a glTF/GLB without rendering it (`gltf` crate): bounds, triangle and material counts, node names, used and required extensions, external URIs, a unit guess. | `ImportReport` |
-| `Assets.Importer` | Validates (rules below), packs `.gltf` + `.bin` + textures into one `.glb`, hashes it, writes `models/<slug>/{model.glb, model.ron}` and registers it. Used by the studio's Import dialog and by `sabers-cli model import`. | `ImportSettings`, `ImportError` |
+| `Assets.Importer` | Validates (rules below), packs `.gltf` + `.bin` + textures into one `.glb`, hashes it, writes `models/<slug>/{model.glb, model.ron}` and registers it. Used by the studio's Import dialog and by `saber-cli model import`. | `ImportSettings`, `ImportError` |
 | `Assets.ObjConverter` | Stretch goal: OBJ + MTL → glTF document → `.glb` (default) or `.gltf` + `.bin` + textures. | `ObjImportSettings` |
 | `Assets.ShapeDeriver` | Authoring-time only: reads a model's triangles in the body frame (f64) and asks `sim_core::geometry::derive` for a `ShapeDesc`. Never runs inside a simulation. | `DeriveMethod`, `DerivedFrom` |
 
@@ -584,9 +586,9 @@ flowchart LR
 
 | Source | Location | Who adds models | Reference | Travels with |
 |---|---|---|---|---|
-| Built-in | `crates/sim_assets/builtin/<domain>/<slug>/` in the repo, installed beside the studio as `share/sabers/models/builtin/`; a few primitives are also embedded in the binary as a fallback | SABERS developers, by pull request | `builtin:rotorcraft/quad_x@1` | Every studio install; never copied into a campaign |
+| Built-in | `crates/sim_assets/builtin/<domain>/<slug>/` in the repo, installed beside the studio as `share/saber/models/builtin/`; a few primitives are also embedded in the binary as a fallback | SABER developers, by pull request | `builtin:rotorcraft/quad_x@1` | Every studio install; never copied into a campaign |
 | Workspace | `<workspace>/models/<slug>/` | Users, through Import (which copies the file in) | `workspace:models/uav_v3` + hash | The workspace folder (git, ideally LFS for `.glb`); copied into each campaign's archive (D17) |
-| Library root | Any folder listed under `model_roots` in `sabers.workspace.ron`, for example a team share | Users or a team | `lib:<root>/<slug>` + hash | Read in place; Import can copy a model into the workspace (D17) |
+| Library root | Any folder listed under `model_roots` in `saber.workspace.ron`, for example a team share | Users or a team | `lib:<root>/<slug>` + hash | Read in place; Import can copy a model into the workspace (D17) |
 
 **Built-in library (the "defaults" part of the code base).**
 
@@ -723,7 +725,7 @@ given mass as a one-off edit, not a live link.
 | Check | Result |
 |---|---|
 | Not glTF 2.0 | Refused |
-| External URI that is remote (`http`, `https`), absolute, or escapes the source folder (`..`) | Refused; SABERS fetches nothing (D7) |
+| External URI that is remote (`http`, `https`), absolute, or escapes the source folder (`..`) | Refused; SABER fetches nothing (D7) |
 | Required extension the pinned Bevy cannot load (for example Draco or Meshopt compression) | Refused, with a hint to decompress first with a local tool |
 | `.gltf` with `.bin` and texture files | Packed into one `.glb` on import, so one file has one hash |
 | Cameras or lights in the file | Info; ignored when loading |
@@ -738,16 +740,16 @@ given mass as a one-off edit, not a live link.
 metallic 0), keeps groups and objects as named glTF nodes so bindings can target them, and writes `.glb`
 (default) or `.gltf` + `.bin` + textures with `gltf-json`. OBJ carries no unit or axes, so the importer always
 asks for both. The manifest records the OBJ's hash and the converter version. The studio never loads OBJ at
-run time; it only loads the converted glTF. Batch use: `sabers-cli model convert part.obj --unit mm --up z
+run time; it only loads the converted glTF. Batch use: `saber-cli model convert part.obj --unit mm --up z
 --forward x -o part.glb`. Other engineering formats (STEP, IGES, STL, JT, native CAD) are out of scope and are
-converted outside SABERS (D17).
+converted outside SABER (D17).
 
 **Headless rule.** `sim_hpc`, `sim_explorer` and Python never link `sim_assets` and never open a glTF. The
 scenario envelope reads `visual` as an opaque value (`serde::de::IgnoredAny`), and `scene_hash` covers only the
 sim section and geometry sidecars; the `visual:` section has its own `visual_hash`. Replacing, moving or deleting
 a model therefore never changes a campaign, a replay's `scene_hash` check or a determinism result.
 
-**Archiving with campaigns (decided, D17).** At submit, `sabers.campaign` copies every workspace and library-root
+**Archiving with campaigns (decided, D17).** At submit, `saber.campaign` copies every workspace and library-root
 model the scenario references into `campaigns/<id>/models/` (by content hash, so a model used by many entities is
 stored once) and writes `visuals.lock`. Built-ins are referenced by id, version and hash only. The cap is 2 GB per
 campaign (`[archive] visual_assets_max_bytes`, default 2 GiB); above it, preflight warns and the user chooses to
@@ -903,7 +905,7 @@ without re-export. Studio shows the derived plan in CampaignSetup.
 Paths are resolved **once** at Resolver time into typed setters, so the hot loop never touches reflection.
 
 **Two kinds of variation, kept separate:**
-- *Epistemic / design parameters* → manifest columns (`param_*`), chosen by `sabers.sweep`.
+- *Epistemic / design parameters* → manifest columns (`param_*`), chosen by `saber.sweep`.
 - *Aleatory noise* (sensor noise, turbulence, manufacturing scatter) → `Uncertainties`, drawn from
   `SimRng` per replicate seed.
 
@@ -952,7 +954,7 @@ flowchart TD
     st -- "Crashed* / Panicked / Timeout" --> inc["All req_* = Inconclusive<br/>(numerical failure ≠ system failure)"]
     st -- "SetupError" --> inv["Run invalid → excluded, counted in preflight stats"]
     ev --> pr["req_* = Pass | Fail per run"]
-    pr --> agg["sabers.verify: campaign aggregation"]
+    pr --> agg["saber.verify: campaign aggregation"]
     inc --> agg
     agg --> cv{"Inconclusive fraction ≤ policy?"}
     cv -- yes --> final["Campaign verdict Pass / Fail<br/>+ bound + n"]
@@ -973,19 +975,19 @@ and **error handling**. Owner = the crate whose types are canonical; all others 
 ```mermaid
 flowchart LR
     studio["sim_studio"] -- IB-01 --> scn[/".scn.ron"/]
-    sweep["sabers.sweep"] -- IB-02 --> man[/"manifest"/]
+    sweep["saber.sweep"] -- IB-02 --> man[/"manifest"/]
     studio -- IB-03 --> req[/".req.ron"/]
-    camp["sabers.campaign"] -- IB-04 --> hpc["sim_hpc"]
+    camp["saber.campaign"] -- IB-04 --> hpc["sim_hpc"]
     hpc -- "IB-05 MPI" --> hpc
     worker["Worker"] -- IB-06 --> io["IO.Mux"]
     io -- IB-07 --> files[/"parquet + zst parts"/]
     models["sim_models"] -- IB-08 --> core["sim_core"]
     verify["sim_verify"] -- IB-09 --> core
     files -- IB-10 --> explorer
-    files -- IB-11 --> analyze["sabers.analyze/verify"]
+    files -- IB-11 --> analyze["saber.analyze/verify"]
     analyze -- IB-12 --> ver[/"verdicts"/]
     ext["CAD/URDF/aero & rotor tables"] -- IB-13 --> studio
-    test["test data"] -. "IB-14 (deferred)" .-> twin["sabers.twin"]
+    test["test data"] -. "IB-14 (deferred)" .-> twin["saber.twin"]
     hpc -- "IB-15 heartbeat" --> explorer["sim_explorer"]
     fragm["fragmentation model<br/>(designed later)"] -- IB-16 --> core
     models -- "IB-19 shapes, materials" --> core
@@ -1000,13 +1002,13 @@ flowchart LR
 | | |
 |---|---|
 | Direction | Written by `Studio.Builder`; read by `Core.Resolver` in LocalRun, Replay, and Rank 0. |
-| Contract | Bevy `DynamicScene` RON **wrapped** in a SABERS envelope: `(header: FileHeader, units: "SI", frame, dt, max_ticks, model_library_version, scene: <DynamicScene>)`. Only components registered in `SimTypeRegistry` may appear; render-only data lives under a separate `visual:` section (`VisualModel` per `SimId`, `Scenery`, §5.10) that `sim_hpc` reads as an opaque value and ignores. Triangle-mesh collision shapes reference `geometry/<blake3>.geom` sidecars. |
+| Contract | Bevy `DynamicScene` RON **wrapped** in a SABER envelope: `(header: FileHeader, units: "SI", frame, dt, max_ticks, model_library_version, scene: <DynamicScene>)`. Only components registered in `SimTypeRegistry` may appear; render-only data lives under a separate `visual:` section (`VisualModel` per `SimId`, `Scenery`, §5.10) that `sim_hpc` reads as an opaque value and ignores. Triangle-mesh collision shapes reference `geometry/<blake3>.geom` sidecars. |
 | Owner | `sim_core` (types, envelope), `sim_schema` (header). |
 | Validation | Parse with `SimTypeRegistry`; unknown type paths, missing `SimId`, duplicate `SimId`, binding targets that don't resolve, bounds violations. `scene_hash` = BLAKE3 of the canonicalised sim section plus geometry sidecars; the `visual:` section has its own `visual_hash`, so a model change never changes `scene_hash` (D17). |
 | Errors | `SceneError::{UnknownType{path}, DuplicateSimId, BadBinding{entity, path}, VersionMismatch{found, supported}}`. In Studio: shown in the validation panel, export blocked. In sim_hpc: preflight abort before any work is dispatched. |
 | Versioning | `model_library_version` must be compatible (semver) with the binary's library; migration functions per major version live in `sim_models::migrate`. |
 
-### IB-02 · Sweep manifest `sweep_manifest.parquet` (sabers.sweep → sim_hpc)
+### IB-02 · Sweep manifest `sweep_manifest.parquet` (saber.sweep → sim_hpc)
 
 | | |
 |---|---|
@@ -1016,7 +1018,7 @@ flowchart LR
 | Errors | `ManifestError::{MissingParam(key), OutOfBounds{run_id,key,value}, NonDenseRunIds, DuplicateRun}` → abort. |
 | Transfer | **Decided:** Rank 0 reads the manifest once and broadcasts its bytes together with the scene; every rank checks the BLAKE3 hash, so no rank reads Lustre for it (G3, seq §5). |
 
-### IB-03 · Requirement set `*.req.ron` (sim_studio / text editor → sim_verify, sabers.verify)
+### IB-03 · Requirement set `*.req.ron` (sim_studio / text editor → sim_verify, saber.verify)
 
 | | |
 |---|---|
@@ -1025,7 +1027,7 @@ flowchart LR
 | Validation | Every signal path resolves against the scenario; every metric referenced by a requirement exists; units consistent; IDs unique. |
 | Errors | `ReqError::{UnresolvedSignal, UnknownMetric, DuplicateId, TypeMismatch}` → blocking in Studio and preflight. |
 
-### IB-04 · Campaign bundle `campaign.toml` + CLI (sabers.campaign → sim_hpc)
+### IB-04 · Campaign bundle `campaign.toml` + CLI (saber.campaign → sim_hpc)
 
 ```toml
 [campaign]
@@ -1061,8 +1063,8 @@ shared_out = "campaigns/drn-hover-a/out"
 | | |
 |---|---|
 | CLI | `sim_hpc --campaign campaign.toml [--resume] [--override-crash-policy] [--validate-only] [--local]`. `--resume` starts a new attempt (`attempt` = previous + 1) that runs only `run_id`s not in a committed summaries part; it refuses if `campaign_id`, `scene_hash`, manifest hash, `req_set_hash` or `build_id` differ. `--override-crash-policy` lets `--resume` continue a campaign that was aborted by the crash policy. `--local` = size 1, no MPI init (Phase 3). |
-| Scheduler | `sabers.campaign` renders PBS Pro templates first and Slurm templates as a second target (D5). The walltime used for `drain_margin_s` comes from `PBS_WALLTIME`/the Slurm job end time. |
-| Owner | `sim_hpc` (config struct), mirrored by `sabers.campaign`. |
+| Scheduler | `saber.campaign` renders PBS Pro templates first and Slurm templates as a second target (D5). The walltime used for `drain_margin_s` comes from `PBS_WALLTIME`/the Slurm job end time. |
+| Owner | `sim_hpc` (config struct), mirrored by `saber.campaign`. |
 | Errors | Exit codes: `0` ok (or nothing left to resume), `2` config/validation error (incl. resume mismatch), `3` build_id mismatch, `4` I/O / stage-out failure (some parts not committed), `5` partial (drained before walltime or runs missing; resumable), `6` aborted by crash policy (`CrashStorm` or `SetupErrors`; evidence committed), `70` internal. Python maps exit codes to campaign status. `auto_resume` resubmits after `4`, `5` or a killed job, and stops on `2`, `3` or `6`, or when the last attempt made no progress. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
@@ -1160,14 +1162,14 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Flow | `sim_explorer` locates the dump via the `node_*_a*_p*_crashes.zst` index footer (for cluster campaigns `sim_query serve` reads the footer and returns the one dump through IB-17 `DoGet`), writes it to the handoff cache and sends IB-18 `OpenCrash`; a `.zst` opened directly in the studio is listed there. Lists dumps (the `M` lowest-seed dumps per `param_set_id` first, since the campaign-wide quota can overshoot `M` slightly); selecting one rebuilds the scenario via Resolver using `params` + seed, verifies `scene_hash` and `build_id` match (warn if not), then scrubs frames. |
 | Errors | Hash mismatch → banner "scene changed since campaign"; still replayable from frames, re-simulate disabled. |
 
-### IB-11 · Campaign outputs → sabers.analyze / sabers.verify
+### IB-11 · Campaign outputs → saber.analyze / saber.verify
 
 | | |
 |---|---|
 | Contract | Read committed parts listed in `_MANIFEST.json` (or glob `*_summaries.parquet` etc. as in the draft, skipping `.tmp`/`.partial`); Python loads column types from exported schemas and checks `FileHeader.schema_version`. Parts from all attempts are read together. A `run_id` that appears twice (re-queued after a node I/O failure) is deduplicated by `run_id`; determinism makes the copies identical, and a differing `final_state_hash` is reported as an error. |
 | Errors | Missing `run_id` ranges in `_MANIFEST.json` → analysis runs but the report is stamped *partial* with those ranges. A policy-aborted campaign (exit `6`) is reported as aborted, with its crash histogram, never as a verdict. |
 
-### IB-12 · Verdicts & report (sabers.verify → sim_explorer ResultsExplorer, humans)
+### IB-12 · Verdicts & report (saber.verify → sim_explorer ResultsExplorer, humans)
 
 | | |
 |---|---|
@@ -1179,7 +1181,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Source | Importer | Output |
 |---|---|---|
 | URDF / MJCF | `sim_models::import::urdf` (deferred with robotics, D13) | `MultibodyPlugin` entities + visual meshes |
-| 3D model (glTF/GLB; OBJ as a stretch goal) | `sim_assets::import` (IB-20); OBJ through `Assets.ObjConverter` to `.glb` | `models/<slug>/` with `model.ron`; linked per entity in the `visual:` section; collision only if derived on request (IB-19). STEP, IGES, STL and native CAD are converted outside SABERS (D17) |
+| 3D model (glTF/GLB; OBJ as a stretch goal) | `sim_assets::import` (IB-20); OBJ through `Assets.ObjConverter` to `.glb` | `models/<slug>/` with `model.ron`; linked per entity in the `visual:` section; collision only if derived on request (IB-19). STEP, IGES, STL and native CAD are converted outside SABER (D17) |
 | Fragment drag table (CSV) | `sim_models::import::fragment_drag` | `FragmentDrag` table with ballistic coefficient (and Cd vs Mach if given), converted to SI, shared by all fragments (IB-16) |
 | Aero coefficient tables (CSV) | `sim_models::import::aero_table` | `AeroTable` (Mach × alpha × beta grids) for `ProjectileAero` or `FixedWingAero` |
 | DATCOM / OpenVSP-VSPAERO output | `sim_models::import::fixedwing_derivs` | `FixedWingAero` stability derivatives and tables |
@@ -1189,14 +1191,14 @@ Imported data is copied into the scenario (content-addressed) so a campaign neve
 file at run time. Requirements are not imported: `*.req.ron` is authored directly and is the source of
 truth until a requirements repository exists (D3).
 
-### IB-14 · Digital-twin calibration & validation (test data ↔ sabers.twin)
+### IB-14 · Digital-twin calibration & validation (test data ↔ saber.twin)
 
 | | |
 |---|---|
-| Contract | Test log → normalised Parquet (`time_s, signal…`) + `TestRunMeta` (asset serial, conditions). `sabers.twin` runs `sim_hpc --local` sweeps and fits parameters (least squares / Bayesian) producing a `TwinProfile` (calibrated values + posteriors) that `sabers.sweep` can sample from. Validation report compares simulated vs measured signals with chosen metrics (RMSE, Theil's U). |
+| Contract | Test log → normalised Parquet (`time_s, signal…`) + `TestRunMeta` (asset serial, conditions). `saber.twin` runs `sim_hpc --local` sweeps and fits parameters (least squares / Bayesian) producing a `TwinProfile` (calibrated values + posteriors) that `saber.sweep` can sample from. Validation report compares simulated vs measured signals with chosen metrics (RMSE, Theil's U). |
 | Status | **Deferred** (D6). Not in the current scope; the optional `TwinProfile` field stays reserved in the scenario envelope so adding calibration later is not a format break. |
 
-### IB-15 · Campaign heartbeat `campaign_status.json` (Rank0.Dispatcher → Explorer.Monitor, sabers.campaign)
+### IB-15 · Campaign heartbeat `campaign_status.json` (Rank0.Dispatcher → Explorer.Monitor, saber.campaign)
 
 | | |
 |---|---|
@@ -1275,7 +1277,7 @@ sequenceDiagram
 | | |
 |---|---|
 | Contract | Arrow Flight SQL over gRPC. The explorer sends DataFusion SQL against the views of one campaign directory (`summaries`, `events`, `snapshots`, `impacts`, `verdicts`, `manifest`) and receives Arrow `RecordBatch` streams. `DoGet` with `CrashDumpTicket{campaign_id, run_id}` returns one `CrashDump` (IB-10). Results are capped at `max_rows` (default 1 M); larger answers must be aggregated on the service side. |
-| Placement | `sim_query serve` runs as a small PBS (or Slurm) job submitted by the explorer through the cluster profile: default 1 node, 8 cores, 4 h walltime, exits after 30 min idle. `placement = "login"` is allowed where site policy permits. At start it writes `~/.sabers/query/<jobid>.json` (mode 600): `{host, port, token, build_id, schema_version, expires_utc}`. The explorer reads it over SSH and opens `ssh -L` through the login node. |
+| Placement | `sim_query serve` runs as a small PBS (or Slurm) job submitted by the explorer through the cluster profile: default 1 node, 8 cores, 4 h walltime, exits after 30 min idle. `placement = "login"` is allowed where site policy permits. At start it writes `~/.saber/query/<jobid>.json` (mode 600): `{host, port, token, build_id, schema_version, expires_utc}`. The explorer reads it over SSH and opens `ssh -L` through the login node. |
 | Security | Read-only. Serves only campaign directories under the cluster profile's `$SHARED_OUT` roots. One bearer token per service job. Listens on the node's internal interface. Makes no outbound connections (D7). |
 | Owner | `sim_query` (view names, UDF names and signatures); column types from `sim_schema`. |
 | Validation | The handshake reports `build_id` and `schema_version`. Same-major is required; a `build_id` different from the explorer's is shown as a warning, since UDF results come from the service's `sim_verify`. |
@@ -1289,8 +1291,8 @@ sequenceDiagram
 |---|---|
 | Direction | Explorer → studio: `OpenRun`, `OpenCrash`, `OpenFan`, `PinScenario`. Studio → explorer: `OpenCampaign`. Both: `Ack` / `Error` with the request id. |
 | Contract | `sim_schema::handoff::Request` (serde, JSON, one message per line, `schema_version` field). `OpenRun { campaign_id, run_id, param_set_id, replicate_seed, status, final_state_hash, build_id, bundle: PathBuf, tick: Option<u64>, focus: Option<SimId> }`; `OpenCrash` adds `crash_tick`, `dump: Option<PathBuf>`, `recorder_k`; `OpenFan { campaign_id, subset_name, run_ids, snapshots: PathBuf, color_metric }`; `PinScenario { bundle, params: Vec<(String, f64)> }`; `OpenCampaign { location: Local(PathBuf) \| Cluster { profile, campaign_id }, view: Monitor \| Results }`. |
-| Data | The explorer writes everything the studio needs into the handoff cache `~/.sabers/cache/<campaign_id>/` first: scene bundle (`.scn.ron`, `.req.ron`, `campaign.toml` from the campaign archive), single `CrashDump` files (IB-10), snapshot extracts (Parquet, `snapshots` schema) for fans. The studio reads only local files and never talks to `sim_query`. |
-| Transport | Per-user local socket (Unix domain socket in `$XDG_RUNTIME_DIR`, mode 600; named pipe with a user-only ACL on Windows). If nothing listens, the sender starts the other app with a deep link (`sabers://studio/...` or `sabers://explorer/...`) carrying the same request. No network listener (D7). |
+| Data | The explorer writes everything the studio needs into the handoff cache `~/.saber/cache/<campaign_id>/` first: scene bundle (`.scn.ron`, `.req.ron`, `campaign.toml` from the campaign archive), single `CrashDump` files (IB-10), snapshot extracts (Parquet, `snapshots` schema) for fans. The studio reads only local files and never talks to `sim_query`. |
+| Transport | Per-user local socket (Unix domain socket in `$XDG_RUNTIME_DIR`, mode 600; named pipe with a user-only ACL on Windows). If nothing listens, the sender starts the other app with a deep link (`saber://studio/...` or `saber://explorer/...`) carrying the same request. No network listener (D7). |
 | Owner | `sim_schema` (message types and versions); `sim_studio` and `sim_explorer` conform. |
 | Validation | Studio checks the bundle's content hash against the campaign's `scene_hash`, and `build_id` against its own; a mismatch is reported in `Ack` and shown as a warning (per D15: replay from frames, or an approximate re-run on the current build). |
 | Errors | Missing cache file, unknown `schema_version` or a busy studio (unsaved Builder edits) → `Error` with a reason; the explorer shows it as a toast and keeps the cache for a retry. |
@@ -1387,7 +1389,7 @@ upgrades because the file format, not the Rust crate version, is the contract.
 
 | # | Gap in Architecture.md | Proposed resolution |
 |---|---|---|
-| G1 | No requirements model or pass/fail evaluation, the core purpose of SABERS. | `sim_verify` + `sabers.verify`, §8, IB-03/09/12. |
+| G1 | No requirements model or pass/fail evaluation, the core purpose of SABER. | `sim_verify` + `saber.verify`, §8, IB-03/09/12. |
 | G2 | Tier 3 snapshots share `events.parquet` with Tier 2 but have different columns; "3 files × 32 nodes" omits crashes vs snapshots. | Separate `snapshots.parquet`; 4 files/node + markers. |
 | G3 | Manifest is never broadcast or partitioned; workers can't look up params for `run_id`. | **Decided (2026-10-30):** Rank 0 broadcasts the full manifest bytes with the scene (500k × 10 f64 ≈ 40 MB), hash-checked on every rank (IB-02, IB-05). |
 | G4 | `parse_scene_bytes` → `DynamicScene` needs an identical `TypeRegistry`; not stated. | `SimTypeRegistry` built by `SimAppBuilder`; `build_id` check at init. |
@@ -1408,7 +1410,7 @@ upgrades because the file format, not the Rust crate version, is the contract.
 
 ### Decisions (Alex, 2026-10-30 and 2026-10-31)
 
-D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing question raised in `flight-dynamics-sources.md`. D10 (2026-10-31) picks the studio's query engine. D13 and D14 (2026-11-01) pick the physics approach and the integrators; D16 (2026-11-02) trims contact scope. D17 (2026-11-02) adds 3D models for entities.
+D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing question raised in `flight-dynamics-sources.md`. D10 (2026-10-31) picks the studio's query engine. D13 and D14 (2026-11-01) pick the physics approach and the integrators; D16 (2026-11-02) trims contact scope. D17 (2026-11-02) adds 3D models for entities. D18 (2026-11-02) renames the project.
 
 | # | Topic | Decision | Consequence in this doc |
 |---|---|---|---|
@@ -1416,19 +1418,20 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | D2 | Fidelity | Ballistics: 6DOF following McCoy's *Modern Exterior Ballistics*, with 3DOF point-mass as an option. Rotors: lumped model. Robot arms: rigid links; flexible arms may be added later. | §5.2 plugin scopes; 3DOF is also the fragment model (IB-16). |
 | D3 | Requirements | No requirements repository for now (worth doing later, out of the current scope). Verdicts do not flow back. | `*.req.ron` is the source of truth; ReqIF/CSV requirement import dropped from IB-13; `report.html` + `verdicts.parquet` only. |
 | D4 | Flight software in the loop | Not needed. Flight models come from published sources (McCoy for gun-launched projectiles; aircraft and multirotor sources in `flight-dynamics-sources.md`). | Native Rust `Controller`s only (§5.2); no external-controller adapter. |
-| D5 | Scheduler | PBS is the primary target; Slurm compatibility is desirable. | `sabers.campaign` templates: PBS first, Slurm second; `auto_resume` uses each scheduler's job dependency (IB-04). |
-| D6 | Digital-twin calibration | Later, not in the current scope. | IB-14 and `sabers.twin` deferred; `TwinProfile` stays reserved in the scenario envelope. |
-| D7 | Data handling | No export concern, but data should live on the cluster and SABERS must not contact external services. | §2 scope; all outputs on cluster FS and the workstation; no telemetry or network services. |
+| D5 | Scheduler | PBS is the primary target; Slurm compatibility is desirable. | `saber.campaign` templates: PBS first, Slurm second; `auto_resume` uses each scheduler's job dependency (IB-04). |
+| D6 | Digital-twin calibration | Later, not in the current scope. | IB-14 and `saber.twin` deferred; `TwinProfile` stays reserved in the scenario envelope. |
+| D7 | Data handling | No export concern, but data should live on the cluster and SABER must not contact external services. | §2 scope; all outputs on cluster FS and the workstation; no telemetry or network services. |
 | D8 | Scenario size | Usually up to a few hundred bodies. Later: fragmenting bodies, where a body is deleted and replaced by up to 30,000 short-lived 3DOF fragments (no FEA; physics designed separately). | Recorder memory is small at a few hundred bodies (500 × 256 × 62 × 80 B ≈ 0.6 GB/node); the fragmentation hook is IB-16. |
 | D9 | Fixed-wing aircraft | Fixed-wing aircraft get their own plugin, kept separate from the ballistics plugin so the two don't get confused. | `FixedWingPlugin` in §3, §5.2 and the domain packs; shares only the environment, rigid-body integrator and table type with `AeroBallisticsPlugin`; added to P5. |
 | D10 | Campaign data exploration | Parquet stays the stored format. The GUI (since D12 the `sim_explorer` app) queries it with Apache DataFusion (not DuckDB), and for cluster campaigns the query runs in a `sim_query serve` job next to the data. Python keeps DuckDB/Polars. | `sim_query` crate (§1, §4, §5.8); IB-17; Explorer.Results and IB-10 route through it; one workspace Arrow version (§4, §10.4); P6. |
 | D11 | Studio UI toolkit | Bevy Feathers instead of `bevy_egui`, accepting that it is experimental and breaks between Bevy releases. | `sim_studio_ui` kit isolates Feathers (§1, §4, §5.5); Bevy pinned exactly and upgraded one minor at a time with determinism goldens, because `sim_core` shares `bevy_ecs` and each upgrade is a new build (D1). Policy for re-simulating old campaigns is O2. |
 | D12 | GUI split | Campaign data exploration (monitor, results, queries) is a separate window and app, `sim_explorer`, built with egui; the studio keeps Bevy + Feathers for building, viewing and simulating a scenario. | `sim_explorer` crate (§1, §3, §4, §5.9); `sim_query` moves from the studio to the explorer; IB-18 handoff; studio states lose `CampaignMonitor` and `ResultsExplorer`; IB-10, IB-12, IB-15, IB-17 now end at the explorer. |
-| D13 | Physics engine | Build SABERS' own physics kernel and use Parry (`parry3d-f64`) for collision detection; no Rapier or Avian. Robotics is dropped as a design consideration for now. First contact sometimes ends a run but often does not, so the kernel needs contact response. | `GeometryService` and `ContactSolver` in `sim_core` (§5.1); contact in the tick pipeline (§6); IB-19; G8; `MultibodyPlugin` and URDF import deferred; P5b; analysis in `physics-engine-tradeoffs.md`. |
+| D13 | Physics engine | Build SABER's own physics kernel and use Parry (`parry3d-f64`) for collision detection; no Rapier or Avian. Robotics is dropped as a design consideration for now. First contact sometimes ends a run but often does not, so the kernel needs contact response. | `GeometryService` and `ContactSolver` in `sim_core` (§5.1); contact in the tick pipeline (§6); IB-19; G8; `MultibodyPlugin` and URDF import deferred; P5b; analysis in `physics-engine-tradeoffs.md`. |
 | D14 | Integrators | Several integrators, RK4 as the default, plus embedded pairs such as Dormand–Prince and Fehlberg, so scenarios can choose quick runs or accurate runs with error estimation. | `Core.Integrator` (§5.1): one Butcher-tableau stepper (RK2, RK4, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) + semi-implicit Euler; fixed or adaptive substeps landing on tick boundaries (§6); error columns and `sim_config_hash` in summaries (IB-07); models supply only RHS functions (IB-08); `7 CrashedSolver` status (§10.2); `physics-engine-tradeoffs.md` §10. |
 | D15 | Campaigns from older builds | After a Bevy (or any) upgrade, older campaigns are replayed from their recorded frames and snapshots only; no archived binaries are kept for bit-identical re-simulation. Reproducing a study means re-running it on the current build, expecting the same physics and statistically similar results. | Studio disables bit-identical re-simulation when `build_id` differs and offers "Re-run on current build" (labelled approximate, compared by metrics, not `final_state_hash`); IB-10, IB-18; `sim_studio_ux.md` §13 Q7 closed. |
 | D16 | Contact scope | No built-in contact material library, and no penetration or deformable-terrain models, for now (Alex, 2026-11-02; was O3). Implicit integrators are not needed either, given the adaptive explicit methods (was O4). | `ContactMaterial` values are entered per body in the scenario (IB-19); terrain is rigid, contact is surface-only; `physics-engine-tradeoffs.md` §12. |
 | D17 | 3D models | Entities can be linked to 3D models in glTF 2.0 / GLB, Bevy's native format. Defaults live in the code base and users can bring their own. OBJ import with conversion to glTF and GLB is a nice-to-have stretch goal. Other engineering model formats are out of scope; conversion happens elsewhere (Alex, 2026-11-02). Campaigns keep a copy of the workspace and library-root models they use, up to 2 GB per campaign (was O5). Spinning rotors and moving control surfaces come later; v1 models are rigid (was O7). Extra library folders (`model_roots`) stay as an option; Import still copies into the workspace by default (was O6). | `sim_assets` crate (§1, §3, §4, §5.10) with the built-in library in `crates/sim_assets/builtin/`; `Studio.Assets` (§5.5); `visual:` section with its own `visual_hash` (IB-01); IB-20; derived collision shapes (IB-19); IB-13 row; G18; roadmap P2v and P6b; `sim_studio_ux.md` §7.11; `sequence-diagrams.md` §2.1–2.3. |
+| D18 | Project name | The project is SABER (was SABERS), and identifiers follow: Python package `saber`, `saber-cli`, `~/.saber/`, `saber://` deep links, `saber.workspace.ron`, `FileHeader.saber_version` (Alex, 2026-11-02). | Renamed across all design docs; the code uses the new names from the first commit. |
 
 ### Still open
 
@@ -1458,7 +1461,7 @@ gantt
     P3 sim_hpc local (rayon + IO.Mux + RunSink)       :p3, 2, 3
     P4 MPI + manifest bcast + crash policy + resume   :p4, 3, 4
     section Analysis
-    P4a sabers.analyze + sabers.verify + report       :p4a, 3, 4
+    P4a saber.analyze + saber.verify + report       :p4a, 3, 4
     section Domains
     P5 AeroBallistics McCoy 6DOF+3DOF, FixedWing, Rotorcraft :p5, 4, 5
     P5b GeometryService + ContactSolver (Parry, IB-19) :p5b, 4, 5
@@ -1474,5 +1477,5 @@ round-trip of every IB file through Rust and Python, a 2-node PBS job and the sa
 killed mid-run and resumed with no duplicated or missing `run_id`s, a deliberately broken scenario that
 trips the crash policy with exit 6, an end-to-end campaign whose `verdicts.parquet` matches a
 hand-computed expectation, and a scorecard that `sim_query` returns identically embedded, through
-`sim_query serve`, and from `sabers.verify`). The `FragmentPool` and
+`sim_query serve`, and from `saber.verify`). The `FragmentPool` and
 per-entity DOF land with P1b/P5 so P7 does not touch the kernel.
