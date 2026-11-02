@@ -2,71 +2,58 @@
 //! recorder, geometry and contact, watchdog).
 //!
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.1, §6, §10.1 and
-//! `docs/design/physics-engine-tradeoffs.md`. Build step 1a (`docs/build-plan.md`) provides the
-//! integrators, the clock and the random streams; the ECS schedule and bodies arrive in step 1b.
+//! `docs/design/physics-engine-tradeoffs.md`. Build step 1a (`docs/build-plan.md`) provided the
+//! integrators, the clock and the random streams; step 1b adds the ECS World, the tick schedule,
+//! 6DOF and 3DOF bodies, force models, the watchdog, the flight recorder and the state hash.
+//! Geometry and contact arrive in step 5d, the fragment pool in step 5e.
 
+pub mod app;
+pub mod body;
 pub mod clock;
+pub mod dynamics;
+pub mod environment;
+pub mod force;
+pub mod hash;
 pub mod integrator;
+pub mod recorder;
 pub mod rng;
+pub mod schedule;
+pub mod sink;
+pub mod telemetry;
+pub mod watchdog;
 
+/// Run `f` with a resource moved out of the World, then put it back. Unlike
+/// `World::resource_scope` this writes no removed-component message and moves no entity between
+/// archetypes, so it never allocates once the resource's buffers exist. `R::default()` must not
+/// allocate. If `f` panics the resource is left at its default; a World that panicked mid-tick is
+/// rebuilt, never reused (seq §8).
+pub(crate) fn with_resource<
+    R: bevy_ecs::resource::Resource<Mutability = bevy_ecs::component::Mutable> + Default,
+    U,
+>(
+    world: &mut bevy_ecs::world::World,
+    f: impl FnOnce(&mut bevy_ecs::world::World, &mut R) -> U,
+) -> U {
+    let mut value = std::mem::take(&mut *world.resource_mut::<R>());
+    let out = f(world, &mut value);
+    *world.resource_mut::<R>() = value;
+    out
+}
+
+pub use app::{
+    RunSeed, SetupError, SimAppBuilder, SimConfig, SimPlugin, SimTypeRegistry, SimWorld,
+};
+pub use body::{BodyState, BodyTable, FRAGMENT_BASE, MassProps, PointMass3, RigidBody6, SimId};
 pub use clock::{RateDivider, SimClock};
-pub use rng::{RngStream, SimRng};
-pub use sim_schema::{CrashKind, IntegratorKind, SimStatus};
-
-/// The tick pipeline's system sets, in their fixed order (subsystems §6).
-///
-/// Becomes a Bevy `SystemSet` when `bevy_ecs` is added in P1.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SimSet {
-    /// Wind, atmosphere, gravity field.
-    Environment,
-    /// Sample truth plus noise (rate-divided).
-    Sensors,
-    /// `Controller::step` (rate-divided).
-    Control,
-    /// Commands to forces and torques, with lag and saturation.
-    Actuation,
-    /// Clear, aero, rotor, contacts, interactions.
-    Forces,
-    /// f64 6DOF / 3DOF integration with the selected integrator, plus contact.
-    Integrate,
-    /// Joint limits, ground, projection, fragmentation trigger.
-    Constraints,
-    /// RunningStats, events, snapshot sampler.
-    Telemetry,
-    /// Metric probes, reducers, requirement monitor.
-    Verify,
-    /// Flight recorder frame (before Watchdog, so the diverged frame is kept).
-    Record,
-    /// Finite and energy checks, termination policy.
-    Watchdog,
-}
-
-impl SimSet {
-    /// The canonical order. A test guards it so no plugin can reorder the pipeline.
-    pub const ORDER: [SimSet; 11] = [
-        SimSet::Environment,
-        SimSet::Sensors,
-        SimSet::Control,
-        SimSet::Actuation,
-        SimSet::Forces,
-        SimSet::Integrate,
-        SimSet::Constraints,
-        SimSet::Telemetry,
-        SimSet::Verify,
-        SimSet::Record,
-        SimSet::Watchdog,
-    ];
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_runs_before_watchdog() {
-        let pos = |s| SimSet::ORDER.iter().position(|x| *x == s).unwrap();
-        assert!(pos(SimSet::Record) < pos(SimSet::Watchdog));
-        assert_eq!(SimSet::ORDER.len(), 11);
-    }
-}
+pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment};
+pub use force::{ForceModel, Stage, Wrench};
+pub use hash::{RollingHash, RunIdentity, state_hash};
+pub use recorder::FlightRecorder;
+pub use rng::{RngStream, RngStreams, SimRng, StreamHandle};
+pub use schedule::{SimSet, SimTickSchedule};
+pub use sim_schema::{CrashKind, CrashReason, IntegratorKind, SimStatus, TickFrame};
+pub use sink::{MemorySink, RunOutput, RunSink, SinkError};
+pub use telemetry::{RunningStats, TickEnergy, Welford};
+pub use watchdog::{
+    MaxTicksOutcome, RunStatus, StopRequests, TerminationPolicy, WatchdogConfig, sim_running,
+};

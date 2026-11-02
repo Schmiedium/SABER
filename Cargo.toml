@@ -30,6 +30,11 @@ ron = "0.12.3"
 blake3 = "=1.8.7"
 rand_core = "=0.10.1"
 rand_chacha = "=0.10.0"
+# Bevy is pinned exactly and upgraded one minor at a time with determinism goldens (D11): sim_core
+# shares bevy_ecs with the studio, and every upgrade is a new build (D1).
+bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std", "bevy_reflect"] }
+bevy_reflect = { version = "=0.20.1", default-features = false, features = ["std", "glam"] }
+glam = { version = "0.33.12", features = ["serde"] }
 # Test-only: exact rational arithmetic for the tableau order conditions.
 num-bigint = "0.4.8"
 num-rational = "0.4.2"

@@ -17,6 +17,9 @@ serde.workspace = true
 blake3.workspace = true
 rand_core.workspace = true
 rand_chacha.workspace = true
+bevy_ecs.workspace = true
+bevy_reflect.workspace = true
+glam.workspace = true
 
 [dev-dependencies]
 sim_testkit.workspace = true

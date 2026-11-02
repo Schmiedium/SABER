@@ -4,10 +4,11 @@
 //! `start_s + n·dt`, so every run lands on bitwise the same tick grid and the integrator's substeps
 //! always end exactly on it (`physics-engine-tradeoffs.md` §10.2).
 
+use bevy_ecs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// The simulation clock of one World.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SimClock {
     /// Simulation time at tick 0, in seconds.
     pub start_s: f64,

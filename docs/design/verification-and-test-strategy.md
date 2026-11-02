@@ -1,6 +1,6 @@
 # SABER: Verification and Test Strategy
 
-Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -191,6 +191,15 @@ Notes:
 - NaN payloads are hashed as-is; a run with NaN has already been flagged by the watchdog.
 - A per-tick rolling hash (`hash_k = H(hash_{k−1} ‖ state_k)`) is available in test builds. When two runs
   disagree, a bisection over ticks finds the first divergent tick and system in seconds.
+- As built (step 1b): the hash is the first 8 bytes (little-endian) of a BLAKE3 keyed-derivation hash over
+  `sim_config_hash`; then per authored body in `SimId` order its `SimId`, a DOF tag (`6` or `3`) and the
+  `to_bits()` of its packed state (`p`, `v`, `q` as `[w, x, y, z]`, `ω` for 6DOF; `p`, `v` for 3DOF); then the
+  tick; then `(stream id, word position)` for every random stream drawn from in the run, in stream-id order.
+  Streams that were registered but never drawn are left out, which is what lets R10 hold for a plugin that
+  registers a stream. `sim_config_hash` covers the scene hash and every `SimConfig` field that changes
+  results (`dt`, start time, `max_ticks`, `at_max_ticks`, integrator kind, mode and tolerances, the energy
+  bound), fed field by field rather than through a text format; the recorder size is left out.
+  `SimWorld::enable_rolling_hash(keep_history)` switches the rolling hash on; it costs one state hash per tick.
 
 ### 4.2 The reproducibility matrix
 
@@ -548,8 +557,8 @@ The minimum oracle set per plugin. Each line names the rung from §5.
 | Free fall, vacuum projectile | closed form |
 | Torque-free symmetric top: precession rate `Ω = (I_x − I_y) ω_x / I_y` in body frame | closed form |
 | Torque-free asymmetric body: `L` and `T_rot` constant; intermediate-axis instability grows, major/minor axes stable | invariants, qualitative-but-numeric (growth rate sign) |
-| Arbitrary forcing | MMS |
-| Order | convergence, `p = 4` for RK4 |
+| Arbitrary forcing | MMS: smooth translation plus rotation about a fixed axis `n` by `θ(t)` (so `ω = θ̇ n` and `q = exp(θ n / 2)`), with a full inertia tensor so the gyroscopic term is exercised |
+| Order | convergence through the kernel, nominal order for SIE, RK2, BS32, RK4, RKF45 and CK45 on the 6DOF MMS case; DOPRI5 shows order about 6 there (its fifth-order error constants are small on this motion until round-off takes over), so the test asks for at least its nominal order |
 | Vertical fall with quadratic drag, constant density: `v(t) = v_t tanh(g t / v_t)` | closed form (also the fragment 3DOF path) |
 | Horizontal flight, no gravity, quadratic drag: `v(t) = v₀ / (1 + k v₀ t)` | closed form |
 | NASA check-cases (sphere, brick, cylinder) | published, nightly |

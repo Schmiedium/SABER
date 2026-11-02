@@ -5,9 +5,10 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 1a. `sim_core` has its integrators (eight methods, fixed and adaptive), clock and
-> random streams; the ECS kernel and bodies come next. The build order is [`docs/build-plan.md`](docs/build-plan.md),
-> derived from the roadmap in `docs/design/subsystems-and-interfaces.md` §12.
+> Status: build step 1b. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenario
+> files come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout
 
