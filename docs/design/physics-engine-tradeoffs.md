@@ -1,4 +1,4 @@
-# SABERS — Physics Engine Trade-offs: Rapier vs Avian vs Custom Kernel
+# SABER — Physics Engine Trade-offs: Rapier vs Avian vs Custom Kernel
 
 Status: **decided, D13** (Alex, 2026-11-01): custom physics kernel with Parry for collision detection;
 robotics deferred. §1–§7 are the analysis that led there; §8 records the decision, §9 designs the
@@ -17,7 +17,7 @@ not confirmed against source or docs and should be checked before they are relie
 > **Superseded in part by D13 (§8).** Alex chose a fully custom kernel with Parry and deferred robotics,
 > so the Rapier part of the recommendation below no longer applies.
 
-**Use a hybrid.** SABERS owns the integrator for everything that flies (projectiles, fixed-wing,
+**Use a hybrid.** SABER owns the integrator for everything that flies (projectiles, fixed-wing,
 multirotors, fragments), uses **Parry** (`parry3d-f64`, Rapier's geometry library) for collision
 *queries*, and brings in **Rapier** (`rapier3d-f64`, the core crate, *not* `bevy_rapier`) only for
 the robotics domain, where contacts, friction and articulated multibodies are the hard part.
@@ -31,9 +31,9 @@ Why, in one paragraph each:
   spin). McCoy 6DOF and the NASA 6DOF check-cases need a higher-order integrator (RK4 or better) that
   re-evaluates aero forces at each stage. Neither engine lets you plug that in.
 - **f64.** Rapier ships a true f64 build (`rapier3d-f64`). Avian 0.8 changed its `f64` feature to mean
-  *f64 positions only*; velocities, forces and the solver are now f32. That breaks the SABERS f64 rule.
+  *f64 positions only*; velocities, forces and the solver are now f32. That breaks the SABER f64 rule.
 - **Determinism.** All three can be bit-identical within one build if each World is single-threaded,
-  which is already the SABERS design. Rapier is the strongest here (an `enhanced-determinism` feature that
+  which is already the SABER design. Rapier is the strongest here (an `enhanced-determinism` feature that
   is now bitwise identical even with its parallel solver).
 - **Contacts and robotics.** This is where an engine earns its keep. Writing a robust contact solver and
   Featherstone multibody in house is many months. Rapier now has reduced-coordinate multibodies, URDF and
@@ -44,7 +44,7 @@ Why, in one paragraph each:
 
 ---
 
-## 2. What SABERS needs from physics
+## 2. What SABER needs from physics
 
 From Architecture.md, the design docs and Alex's decisions (D1 to D9):
 
@@ -81,13 +81,13 @@ kind.
 | ECS fit | Core crate is engine-agnostic: it owns its own body/collider sets, we sync in and out. `bevy_rapier` exists but its `enhanced-determinism` build is currently broken with Bevy. | Native Bevy ECS: owns `Position`, `Rotation`, `LinearVelocity` and its own schedules. | Native: lives in our `SimSet`s on our components. |
 | Bevy coupling | None (core crate). | Tight: one Avian minor per Bevy minor. | Only `bevy_ecs`, which we already pin. |
 | Maintenance (2025–26) | Dimforge. ~14 releases in 2025, gap Jan–Jun 2026, then 0.33 → 0.36 by Oct 2026. Big recent work: glam migration, solver rework, determinism, robotics loaders, Python bindings. Apache-2.0. | Joona Aalto (lead) plus contributors. Feature release every 3–4 months, tracks Bevy releases. MIT/Apache-2.0. | Us. Bus factor is our team. |
-| Velocity caps | Default per-substep caps: linear 400 units/s, rotation ≈ 45° per step (0.35). **Both bite SABERS** (projectiles at 900 m/s, spin 32k rad/s). Configurable *(unverified how)*. | `MaxLinearSpeed`, `MaxAngularSpeed` components. Defaults *(unverified)*. | None unless we add them. |
+| Velocity caps | Default per-substep caps: linear 400 units/s, rotation ≈ 45° per step (0.35). **Both bite SABER** (projectiles at 900 m/s, spin 32k rad/s). Configurable *(unverified how)*. | `MaxLinearSpeed`, `MaxAngularSpeed` components. Defaults *(unverified)*. | None unless we add them. |
 
 ---
 
 ## 4. Applying forces every tick in each option
 
-This is the part Alex found unclear in Rapier's docs. The examples use the SABERS pattern: an aero model
+This is the part Alex found unclear in Rapier's docs. The examples use the SABER pattern: an aero model
 reads state, returns force and moment in world frame, and the integrator applies them.
 
 ### 4.1 Rapier (core crate, `rapier3d-f64` 0.36)
@@ -223,7 +223,7 @@ Rule of thumb: to match RK4's accuracy at dt = 1 ms on a smooth trajectory, firs
 one to three orders of magnitude smaller. That costs more CPU across 500k-run campaigns than the four
 force evaluations RK4 does.
 
-### 5.2 Where this shows up in SABERS
+### 5.2 Where this shows up in SABER
 
 | Case | Why first-order with held force hurts |
 |---|---|
@@ -245,7 +245,7 @@ substepping exactly because of this. That is the reason for the hybrid split.
 ## 6. f64, determinism and HPC fit
 
 **f64.** Rapier f64 is end to end. Avian 0.8's change is deliberate (large-world positions with f32
-physics) and suits games, not SABERS. Pinning Avian 0.7 for full f64 is a dead end, since 0.7 is tied
+physics) and suits games, not SABER. Pinning Avian 0.7 for full f64 is a dead end, since 0.7 is tied
 to Bevy 0.19 and new releases keep the f32 internals.
 
 **Determinism (within one build, R2).** Our design already runs one World per rayon task, single-threaded
@@ -305,7 +305,7 @@ motors and contacts is another few months. Robotics (one of three target domains
 
 ### 7.4 Hybrid (recommended before D13)
 
-**Benefits:** free flight gets RK4 accuracy and full control (the bulk of SABERS campaigns: ballistics,
+**Benefits:** free flight gets RK4 accuracy and full control (the bulk of SABER campaigns: ballistics,
 aircraft, drones, fragments); robotics gets a mature multibody/contact solver without months of work;
 Parry gives exact f64 geometry queries for fragment impacts, ground and sensor ray casts; Rapier core is
 not tied to Bevy upgrades.
@@ -328,7 +328,7 @@ Rough, for one experienced Rust developer. Treat as order of magnitude.
 
 ```mermaid
 quadrantChart
-    title Fit vs effort for SABERS
+    title Fit vs effort for SABER
     x-axis Low effort --> High effort
     y-axis Poor fit --> Good fit
     quadrant-1 Good but costly
@@ -345,7 +345,7 @@ quadrantChart
 
 ## 8. Decision D13 (Alex, 2026-11-01)
 
-> **SABERS builds its own physics kernel and uses Parry (`parry3d-f64`) for collision detection.
+> **SABER builds its own physics kernel and uses Parry (`parry3d-f64`) for collision detection.
 > Robotics is dropped as a design consideration for now.** No Rapier, no Avian, no hand-off between
 > engines. First contact sometimes ends a run but often does not, so the kernel needs its own contact
 > *response*, not only detection.
@@ -587,7 +587,7 @@ Implicit methods (Radau IIA, Rosenbrock) are left out for now (O-P4, closed 2026
 
 ### 10.2 Fixed ticks, adaptive substeps
 
-SABERS keeps its **fixed tick** (`FixedDeltaTime`). Sensors, controllers, telemetry, the recorder and the
+SABER keeps its **fixed tick** (`FixedDeltaTime`). Sensors, controllers, telemetry, the recorder and the
 watchdog all run on ticks, and every run has the same tick grid, which is what makes campaigns
 comparable and replays simple. The integrator choice only changes how each tick's interval
 `[t, t + dt]` is crossed:

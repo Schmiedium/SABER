@@ -1,0 +1,22 @@
+[package]
+name = "sim_hpc"
+description = "SABER headless cluster runner (MPI + rayon)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sim_core.workspace = true
+sim_models.workspace = true
+sim_verify = { workspace = true, features = ["ecs"] }
+sim_schema.workspace = true
+
+[[bin]]
+name = "sim_hpc"
+path = "src/main.rs"

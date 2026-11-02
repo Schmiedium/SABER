@@ -1,14 +1,14 @@
-# SABERS: Verification and Test Strategy
+# SABER: Verification and Test Strategy
 
 Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
-This document answers one question: **how do we know SABERS computes the right numbers, without
+This document answers one question: **how do we know SABER computes the right numbers, without
 watching a simulation and deciding it "looks right"?** It covers unit, integration and end-to-end tests,
 the floating-point comparison policy, bit-reproducibility tests, and where reference answers come from
 (analytic solutions, McCoy, the NASA check-cases, cross-code comparison).
 
-SABERS uses its **own f64 physics engine with Parry (`parry3d-f64`) for collision detection** (Alex,
+SABER uses its **own f64 physics engine with Parry (`parry3d-f64`) for collision detection** (Alex,
 2026-11-01). Robotics and multibody chains are not a design consideration for now, and first contact does
 not necessarily end a run, so contact response is tested as ongoing physics, not only as a stop event
 (§7.5). Every physics test still drives the kernel through `SimAppBuilder` and reads state through
@@ -27,7 +27,7 @@ engine itself.
 6. [Using McCoy, in general and not just for his plotted cases](#6-using-mccoy-in-general-and-not-just-for-his-plotted-cases)
 7. [Per-domain verification catalogue](#7-per-domain-verification-catalogue)
 8. [Test tiers: unit, integration, end-to-end](#8-test-tiers-unit-integration-end-to-end)
-9. [Test infrastructure: `sim_testkit`, reference cases, `sabers.testing`](#9-test-infrastructure)
+9. [Test infrastructure: `sim_testkit`, reference cases, `saber.testing`](#9-test-infrastructure)
 10. [CI cadence and the cluster qualification run](#10-ci-cadence-and-the-cluster-qualification-run)
 11. [Changing numerics on purpose: the golden update flow](#11-changing-numerics-on-purpose-the-golden-update-flow)
 12. [Definition of done for a physics feature](#12-definition-of-done-for-a-physics-feature)
@@ -48,8 +48,8 @@ fits it:
 
 Five practices make this work without visual inspection:
 
-1. **Never hard-code an expected float that came from SABERS itself.** Expected values come from an
-   independent oracle (analytic, published, another code, or a convergence argument). SABERS' own past
+1. **Never hard-code an expected float that came from SABER itself.** Expected values come from an
+   independent oracle (analytic, published, another code, or a convergence argument). SABER's own past
    output is only used as a bit-exact tripwire, never as proof of correctness.
 2. **Derive every tolerance** from discretization error, round-off and reference uncertainty (§3.3), and
    write the derivation next to the number.
@@ -87,7 +87,7 @@ when it fails.
 
 Rules that follow:
 
-- An **Exact** assertion is never used against reference data from outside SABERS.
+- An **Exact** assertion is never used against reference data from outside SABER.
 - A **Close** assertion never uses a tolerance below its round-off floor (§3.3). If a test only passes at
   `1e-15`, it is really an Exact test and belongs in §4.
 - A **Statistical** test always fixes its seed, so it is deterministic in CI. The seed is not tuned until
@@ -106,14 +106,14 @@ Rules that follow:
 | Absolute tolerance on quantities spanning decades | `1e-6` m is huge for a contact penetration check and meaningless at 40 km range | Mixed `atol + rtol`, per quantity, in SI. |
 | Relative tolerance near zero | Lateral drift starts at 0; relative error is infinite | `atol` floor per quantity, sized to the physics (e.g. 1 mm). |
 | ULP distance | Good for elementary functions, useless near zero or after many operations | ULPs only for `sim_core::math` wrappers (`sin`, `atan2`, table lookups). |
-| Point-wise trajectory comparison with mismatched sample times | Reference at 0.1 s, SABERS at `dt = 1/1200` | Resample the SABERS trajectory onto the reference grid with the same interpolant the reference used, then compare. Never interpolate the reference. |
+| Point-wise trajectory comparison with mismatched sample times | Reference at 0.1 s, SABER at `dt = 1/1200` | Resample the SABER trajectory onto the reference grid with the same interpolant the reference used, then compare. Never interpolate the reference. |
 | Comparing angles and attitudes component-wise | Quaternion `q` and `-q` are the same attitude; Euler angles wrap and gimbal-lock | Attitude error angle `θ = 2·acos(|⟨q_a, q_b⟩|)`; angles compared modulo 2π. |
 | Chaotic or near-chaotic motion | Tumbling brick, intermediate-axis flip, fragments | Compare only up to a horizon well before the Lyapunov time; past it, compare invariants and statistics (§5.5). |
 | Events quantized by tick | Impact time, `FirstTime`, `TimeAbove` | Tolerance of one tick (or half, with the interpolated impact time from IB-16). |
 
 ### 3.2 The comparator: `Tol`
 
-One comparator, implemented identically in Rust (`sim_testkit`) and Python (`sabers.testing`), so a
+One comparator, implemented identically in Rust (`sim_testkit`) and Python (`saber.testing`), so a
 reference case gives the same verdict wherever it is checked:
 
 ```text
@@ -148,7 +148,7 @@ tol  =  ε_ref  +  k · ε_disc  +  ε_round
 | Term | Meaning | How to get it |
 |---|---|---|
 | `ε_ref` | Uncertainty of the reference itself | Analytic: 0. Tabulated: half the last printed digit. Digitized figure: ~0.5–1 % of the axis span (measure it by digitizing the same curve twice). NASA check-cases: the spread among the participating tools. Cross-code: that code's own convergence estimate. |
-| `ε_disc` | Discretization error of the SABERS run | **Richardson estimate from the test itself:** run at `dt` and `dt/2`; `ε_disc ≈ |x_dt − x_dt/2| / (2^p − 1)` for an order-`p` method. `k = 3` gives margin without hiding a bug. For an **adaptive** integrator, run at error tolerance `tol` and `tol/10` instead and use their difference (§5.4.1). |
+| `ε_disc` | Discretization error of the SABER run | **Richardson estimate from the test itself:** run at `dt` and `dt/2`; `ε_disc ≈ |x_dt − x_dt/2| / (2^p − 1)` for an order-`p` method. `k = 3` gives margin without hiding a bug. For an **adaptive** integrator, run at error tolerance `tol` and `tol/10` instead and use their difference (§5.4.1). |
 | `ε_round` | Round-off floor | `≈ c · √N · ε_mach · |x|` for `N` steps (`ε_mach = 2.2e-16`), with `c ≈ 10` for a well-conditioned state. For 10⁶ RK4 steps at `|x| = 10⁴ m`, about `2e-9` m: negligible next to the other terms, which is the point. |
 
 Because `ε_disc` is measured, the tolerance tracks the time step automatically: change `dt` in a scenario
@@ -400,7 +400,7 @@ relation. They need no expected value and they run as property tests over random
 
 ### 5.7 Independent re-implementation
 
-For each model plugin, a short Python reference (`sabers.testing.reference`) implements the *same
+For each model plugin, a short Python reference (`saber.testing.reference`) implements the *same
 equations* with SciPy `solve_ivp` (`DOP853`, `rtol = 1e-12`) straight from the source text (McCoy's
 6DOF equations, Beard and McLain's derivative model, Mahony et al.'s rotor model). It is written from the
 book, not translated from the Rust.
@@ -411,7 +411,7 @@ Rungs 8 and 9 cover specification errors. It is slow and that is fine: it runs n
 randomized states and short arcs.
 
 A cheaper form of the same idea, used per PR: **force-function spot checks**. For a frozen state
-(position, velocity, attitude, rates, Mach, air density), compare every force and moment term SABERS
+(position, velocity, attitude, rates, Mach, air density), compare every force and moment term SABER
 computes against the Python reference's value at that state. No integration, so the tolerance is near
 round-off, and the failure names the exact term.
 
@@ -432,7 +432,7 @@ stored in the reference store (§9.2), so CI does not need JSBSim installed on e
   Simulations*): atmospheric and rigid-body check-cases run by six independent tools, with tabulated
   output. Use them as is, and use **the spread among the six tools as `ε_ref`**. That spread is the honest
   answer to "how close is close enough": if six mature simulators disagree at 1e-4, demanding 1e-8 from
-  SABERS is meaningless. These go in the nightly suite as the first gate for the `RigidBodyPlugin`,
+  SABER is meaningless. These go in the nightly suite as the first gate for the `RigidBodyPlugin`,
   `EnvironmentPlugin` and rotating-Earth options.
 - **McCoy**, see §6.
 - **Stevens, Lewis and Johnson F-16 model** (tables in the appendix) for `FixedWingPlugin` trim and
@@ -560,7 +560,7 @@ buildup, plus the metamorphic mirror test (spin sense reverses drift and Magnus 
 | Check | Oracle |
 |---|---|
 | Trim: solved trim state has zero state derivatives | algebraic, near round-off |
-| Linear modes: numerically linearize SABERS at trim (finite differences of the force model), eigenvalues vs the stability-derivative approximations for short period and phugoid | rungs 1, 5 |
+| Linear modes: numerically linearize SABER at trim (finite differences of the force model), eigenvalues vs the stability-derivative approximations for short period and phugoid | rungs 1, 5 |
 | Beard and McLain Aerosonde, Stevens–Lewis–Johnson F-16 | published, rung 9 |
 | Same aircraft in JSBSim | rung 8 |
 | Control surface sign conventions | metamorphic: positive elevator per convention gives nose-down pitching moment; mirror aileron mirrors roll |
@@ -573,7 +573,7 @@ contact is tested as ongoing physics. Each pair resolves to one of three contact
 friction, evaluated at every integrator stage), `Impulsive` (restitution and friction impulse at an
 event-located `t*`) and `EventOnly` (detection and recording only).
 
-**Collision detection (Parry).** These tests check that SABERS uses Parry correctly, not Parry's own
+**Collision detection (Parry).** These tests check that SABER uses Parry correctly, not Parry's own
 geometry:
 
 | Check | Oracle |
@@ -627,7 +627,7 @@ counted in `n_dropped`, segment-vs-shape impact test finds hits that end-point t
 through a thin plate), impact time interpolated within the tick (Close, `Tol::event(0.5)` against the
 analytic crossing time), and BC drag matches the closed forms in §7.2.
 
-### 7.8 `sim_verify` and `sabers.verify`
+### 7.8 `sim_verify` and `saber.verify`
 
 | Check | Oracle |
 |---|---|
@@ -644,7 +644,7 @@ analytic crossing time), and BC drag matches the closed forms in §7.2.
 ```mermaid
 flowchart TB
     subgraph E2E["End-to-end (nightly / release / cluster)"]
-        e1["Tiny campaign: generate_sweep → sim_hpc --local → sabers.verify → verdicts.parquet == hand-computed"]
+        e1["Tiny campaign: generate_sweep → sim_hpc --local → saber.verify → verdicts.parquet == hand-computed"]
         e2["2-node PBS and Slurm jobs · resume after kill · crash-policy exit 6"]
         e3["Reference validation suite: NASA check-cases · McCoy M3 · JSBSim · RotorPy"]
         e4["Cluster qualification (§10.3)"]
@@ -691,7 +691,7 @@ Subsystems together, and the interface boundaries:
 | Fault injection | `FailingSink` (IO error at part `k`), a scenario that panics at tick `n`, a NaN at tick `n`, walltime drain signal, a rank killed mid-chunk. Each checks the documented outcome in §10.2 of the subsystems doc. |
 | Performance invariants | Counting global allocator: zero allocations in `SimTickSchedule` after Tick 0 (including a 30k fragment event). `criterion` benchmarks for ticks/s per domain pack with a regression threshold (e.g. > 10 % slower fails, on a dedicated runner). |
 | Studio | Bevy `App` with `MinimalPlugins` and no renderer: `AppState` transitions, `.scn.ron` export → import round-trip is exact, LocalRun hash equals `sim_hpc --local` (R7). Screenshot tests are deliberately avoided; they are brittle and test pixels, not physics. |
-| Explorer | `sim_query` returns identical scorecards embedded, through `sim_query serve`, and from `sabers.verify` (roadmap exit criterion), on a fixed campaign fixture. |
+| Explorer | `sim_query` returns identical scorecards embedded, through `sim_query serve`, and from `saber.verify` (roadmap exit criterion), on a fixed campaign fixture. |
 
 ### 8.4 End-to-end
 
@@ -768,11 +768,11 @@ RefCase(
 
 `tol_derivation` is mandatory. Review of a tolerance change is a review of that string.
 
-### 9.3 `sabers.testing` (Python)
+### 9.3 `saber.testing` (Python)
 
 Same `Tol` semantics as §3.2, the Python reference models of §5.7, the SymPy MMS generators of §5.3,
 statistical helpers with fixed seeds, and loaders for `tests/reference/`. Python analysis tests
-(`sabers.analyze`, `sabers.verify`) run against a small committed campaign fixture.
+(`saber.analyze`, `saber.verify`) run against a small committed campaign fixture.
 
 ---
 
@@ -803,7 +803,7 @@ toolchain. If they differ, the PR is either not neutral (go to §11) or has intr
 ### 10.2 Nightly verification report
 
 A generated HTML report (written locally, no external services, D7) with, per reference case: pass/fail,
-the tolerance and which term dominated, the overlay plot of SABERS vs reference, the convergence plot
+the tolerance and which term dominated, the overlay plot of SABER vs reference, the convergence plot
 (`log e` vs `log dt` with the expected slope drawn in), and the trend of the error over the last 30
 nightlies. The trend line is what catches slow erosion that stays inside tolerance. This is where humans
 look at plots, after the numbers have already decided pass or fail.
@@ -817,7 +817,7 @@ campaigns is qualified **on the cluster**, as an ordinary PBS job (Slurm when th
    a node with different microcode, a different `libm` in a container, or a mis-set CPU flag).
 2. Run the reference validation suite with the release binary.
 3. Record a qualification record next to the binary: `build_id`, per-scenario state hashes, reference
-   suite results. Campaigns check that their `build_id` has a passing record; `sabers.campaign` warns
+   suite results. Campaigns check that their `build_id` has a passing record; `saber.campaign` warns
    (or refuses, by config) otherwise.
 4. Compare against the previous build's record with the drift report (§11).
 
@@ -901,7 +901,7 @@ it, and the nightly report flags any feature with fewer than two.
 | Name | Kind | Purpose |
 |---|---|---|
 | `sim_testkit` | Rust dev-dependency crate | comparators, `run_case`, convergence, MMS forcing, hashes, `RefCase` loader, proptest strategies, counting allocator |
-| `sabers.testing` | Python subpackage | same comparators, Python reference models, SymPy MMS generators, statistical helpers |
+| `saber.testing` | Python subpackage | same comparators, Python reference models, SymPy MMS generators, statistical helpers |
 | `tests/reference/` with `case.ron` (`RefCase`) | directory and file | reference data with provenance and tolerance derivation |
 | `Tol` | type | the symmetric comparator family (§3.2) |
 | `state_hash`, rolling hash, `first_divergence` | functions | determinism tests; `state_hash` = `final_state_hash` |

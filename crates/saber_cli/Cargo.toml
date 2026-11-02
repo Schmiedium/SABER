@@ -1,0 +1,23 @@
+[package]
+name = "saber_cli"
+description = "SABER thin CLI: scenario and requirement validation for Python, model import and conversion."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sim_core.workspace = true
+sim_models.workspace = true
+sim_verify = { workspace = true, features = ["ecs"] }
+sim_schema.workspace = true
+sim_assets.workspace = true
+
+[[bin]]
+name = "saber-cli"
+path = "src/main.rs"

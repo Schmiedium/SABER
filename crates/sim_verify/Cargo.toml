@@ -1,0 +1,20 @@
+[package]
+name = "sim_verify"
+description = "SABER requirement and metric types, online per-run evaluation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sim_schema.workspace = true
+sim_core = { workspace = true, optional = true }
+
+[features]
+default = ["ecs"]
+ecs = ["dep:sim_core"]

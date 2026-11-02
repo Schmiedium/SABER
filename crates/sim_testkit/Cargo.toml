@@ -1,0 +1,17 @@
+[package]
+name = "sim_testkit"
+description = "SABER test helpers: Tol comparators, run_case, convergence, state hashes, RefCase loader."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sim_core.workspace = true
+sim_models.workspace = true
+sim_schema.workspace = true
