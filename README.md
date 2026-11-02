@@ -5,8 +5,9 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: workspace skeleton. The crates compile and contain no physics yet. The roadmap is
-> `docs/design/subsystems-and-interfaces.md` §12.
+> Status: build step 1a. `sim_core` has its integrators (eight methods, fixed and adaptive), clock and
+> random streams; the ECS kernel and bodies come next. The build order is [`docs/build-plan.md`](docs/build-plan.md),
+> derived from the roadmap in `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout
 
@@ -26,6 +27,7 @@ aircraft.
 | `crates/sim_testkit` | Test helpers (dev-dependency only) | verification §9.1 |
 | `python/saber` | Python package: sweep, campaign, analyze, verify, report, testing | §5.7 |
 | `tests/reference` | Reference cases, synthetic or published data only | verification §9.2 |
+| `tests/shared` | Test vectors checked by both Rust and Python (e.g. `Tol`) | verification §3.2 |
 | `docs/design` | The design: the source of truth for interfaces, names and decisions | |
 
 ## Build and test

@@ -15,3 +15,7 @@ workspace = true
 sim_core.workspace = true
 sim_models.workspace = true
 sim_schema.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

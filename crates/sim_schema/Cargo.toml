@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-
+serde.workspace = true
 
 [[bin]]
 name = "export-schemas"

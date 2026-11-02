@@ -22,6 +22,19 @@ sim_studio_ui = { path = "crates/sim_studio_ui" }
 sim_query = { path = "crates/sim_query" }
 sim_testkit = { path = "crates/sim_testkit" }
 
+# External crates. Anything that changes numerics (RNG, hashing) is pinned exactly, because
+# exact state-hash goldens depend on it (verification-and-test-strategy.md §11).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+ron = "0.12.3"
+blake3 = "=1.8.7"
+rand_core = "=0.10.1"
+rand_chacha = "=0.10.0"
+# Test-only: exact rational arithmetic for the tableau order conditions.
+num-bigint = "0.4.8"
+num-rational = "0.4.2"
+num-traits = "0.2"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
@@ -34,3 +47,10 @@ all = { level = "warn", priority = -1 }
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+# Exact-arithmetic tableau tests (verification §5.4.1) are slow in an unoptimised build.
+[profile.dev.package.num-bigint]
+opt-level = 3
+
+[profile.dev.package.num-integer]
+opt-level = 3

@@ -22,6 +22,9 @@ section gets its own `visual_hash`, collision shapes can be derived from a model
 and OBJ import with conversion to glTF/GLB is a stretch goal.
 v0.9 (2026-11-02) applies D18: the project is renamed SABER, and every `sabers` identifier (Python package,
 `saber-cli`, `~/.saber`, `saber://` links, `saber.workspace.ron`, `saber_version`) drops the S.
+v0.10 (2026-11-02, build step 1a) adds the `CrashKind` and `IntegratorKind` on-disk enums to `sim_schema`
+(§5.4), `SubstepLimit` as a `CrashedSolver` cause (§10.2), and the integrator's `StateLayout` (§5.1). The
+build order for the roadmap (§12) is in `docs/build-plan.md`.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -288,7 +291,7 @@ flowchart LR
 | `Core.Resolver` | Tick-0 expansion: apply `Bind*Param`, sample `*Uncertainty`, expand spawners, validate. | `ParamTable`, `ResolveReport` |
 | `Core.Schedule` | Holds `SimTickSchedule` with `SimSet` chain (§6). Single-threaded executor. | `SimSet` enum |
 | `SimClock` | Tick counter + fixed dt + multi-rate dividers so controllers/sensors can run at e.g. 1/10 physics rate deterministically. | `RateDivider(u32)` |
-| `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Tableau<S>`, `trait Stepper`, `trait OdeSystem`, `TickReport` |
+| `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Integrator`, `Tableau<S>`, `trait OdeSystem`, `StateLayout`, `TickReport`, `IntegratorStats`, `SolverFailure` |
 | `SimRng` | Root RNG + **named substreams** (`rng.stream("wind")`) so adding a new noise source doesn't shift every other random draw. | `SimRng`, `RngStream` |
 | `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. | `RunningStats`, `SimEvent`, `SnapshotSampler` |
 | `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). | `FlightRecorder` |
@@ -394,7 +397,7 @@ Stage split:
 | `FileHeader` | `magic`, `format`, `schema_version` (semver), `saber_version`, `build_id` (git sha + rustc + target + feature flags), `campaign_id`, `scene_hash`, `req_set_hash`, `created_utc` |
 | Arrow schemas | `SUMMARY_SCHEMA` (fixed + dynamic `param_*`, `metric_*`, `req_*` columns), `EVENTS_SCHEMA`, `SNAPSHOTS_SCHEMA`, `VERDICTS_SCHEMA`, `MANIFEST_SCHEMA` |
 | `CrashDump` | header + run identity + `SimStatus` + `CrashReason` + chronological `Vec<TickFrame>` + optional panic message/backtrace |
-| `SimStatus`, `CrashReason`, `EventType`, `Verdict` | `#[repr(u8)]` enums with stable discriminants, exported to Python |
+| `SimStatus`, `CrashKind`, `IntegratorKind`, `EventType`, `Verdict` | `#[repr(u8)]` enums with stable discriminants, exported to Python. `CrashKind` is the `kind` of a `CrashReason { kind, sim_id, tick, detail }` and the summaries' `crash_reason u8`: `0 NonFinite`, `1 EnergyBound`, `2 Panic`, `3 StepSizeUnderflow`, `4 SubstepLimit`, `5 ContactCapacity`; each maps to one crashed `SimStatus`. `IntegratorKind` is the summaries' `integrator u8` (`0 SemiImplicitEuler` … `7 DormandPrince853`, `physics-engine-tradeoffs.md` §10.1) |
 | `export-schemas` bin | Writes `schemas/*.json` (JSON Schema + Arrow IPC schema) for Python |
 
 ### 5.5 `sim_studio` — GUI
@@ -1367,7 +1370,8 @@ flowchart LR
 
 `SimStatus` (`#[repr(u8)]`): `0 Completed`, `1 Terminated` (stop condition / early-fail), `2 CrashedNaN`,
 `3 CrashedEnergy`, `4 Panicked`, `5 Timeout`, `6 SetupError`, `7 CrashedSolver` (new, D13/D14: adaptive step
-underflow, contact buffer overflow; detail in `crash_reason`). Crashed runs of this kind follow the same crash
+underflow, more than `max_substeps_per_tick` step attempts in a tick, contact buffer overflow; detail in
+`crash_reason`). A non-finite integrator error norm is a `CrashedNaN`, not a solver crash. Crashed runs of this kind follow the same crash
 capture and campaign crash policy as `CrashedNaN`.
 
 ### 10.3 Units & frames
@@ -1443,7 +1447,8 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 
 ## 12. Revised roadmap
 
-Phases from the draft, with new work inserted where it unblocks verification early.
+Phases from the draft, with new work inserted where it unblocks verification early. `docs/build-plan.md`
+breaks these phases into reviewable steps, one pull request each, in build order.
 
 ```mermaid
 gantt
