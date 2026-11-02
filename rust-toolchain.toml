@@ -1,0 +1,5 @@
+# Pinned because exact state-hash goldens change with the toolchain
+# (verification-and-test-strategy.md §11). Upgrade on purpose, in its own PR.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

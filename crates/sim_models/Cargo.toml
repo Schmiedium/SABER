@@ -1,0 +1,15 @@
+[package]
+name = "sim_models"
+description = "SABER domain plugins (environment, rigid body, aero-ballistics, fixed-wing, rotorcraft, sensors, control, actuators)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sim_core.workspace = true

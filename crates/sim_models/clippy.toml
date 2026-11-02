@@ -1,0 +1,10 @@
+# Determinism guards (verification-and-test-strategy.md §4.3).
+# Grows as dependencies arrive (rand::thread_rng, f64::mul_add outside the FMA module, rayon in a World).
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "wall time breaks determinism; use SimClock" },
+    { path = "std::time::SystemTime::now", reason = "wall time breaks determinism; use SimClock" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is random; use IndexMap or a sorted Vec" },
+    { path = "std::collections::HashSet", reason = "iteration order is random; use IndexSet or a sorted Vec" },
+]

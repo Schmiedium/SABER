@@ -1,0 +1,19 @@
+[package]
+name = "sim_schema"
+description = "SABER on-disk formats: Arrow schemas, CrashDump, file headers, versions (single source of truth)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+
+[[bin]]
+name = "export-schemas"
+path = "src/bin/export_schemas.rs"
