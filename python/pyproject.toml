@@ -9,8 +9,9 @@ description = "SABER sweep generation, campaign submission, analysis, verificati
 requires-python = ">=3.11"
 license = "Apache-2.0"
 # pyarrow reads and writes the Parquet tables (saber.schema); the column definitions come from
-# saber/schemas/*.json, exported by sim_schema.
-dependencies = ["pyarrow>=15"]
+# saber/schemas/*.json, exported by sim_schema. numpy draws sweeps and scipy.stats.qmc gives the
+# Sobol sequence (saber.sweep).
+dependencies = ["pyarrow>=15", "numpy>=1.24", "scipy>=1.10"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

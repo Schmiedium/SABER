@@ -366,6 +366,24 @@ mod tests {
     }
 
     #[test]
+    fn python_writes_the_same_defaults() {
+        // `saber.campaign.CampaignConfig` with every default, as Python writes it
+        // (python/tests/test_campaign.py checks its output equals this file), so the Python mirror
+        // cannot drift from these defaults.
+        let c =
+            CampaignConfig::from_toml(include_str!("../../../tests/shared/campaign/defaults.toml"))
+                .unwrap();
+        assert_eq!(c.execution, Execution::default());
+        assert_eq!(c.crash_policy, CrashPolicy::default());
+        assert_eq!(c.checkpoint, Checkpoint::default());
+        assert_eq!(c.output.scratch_dir, default_scratch());
+        assert_eq!(
+            (c.campaign.requirements, c.campaign.expected_build_id),
+            (None, None)
+        );
+    }
+
+    #[test]
     fn variables_expand() {
         assert!(expand("${SABER_TEST_SURELY_UNSET_VAR}/x").is_err());
         assert!(expand("${TMPDIR").is_err());

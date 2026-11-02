@@ -43,6 +43,18 @@ pub enum PreflightError {
 }
 
 impl PreflightError {
+    /// The variant's name, for `--json` output.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PreflightError::Config(_) => "Config",
+            PreflightError::Scene(_) => "Scene",
+            PreflightError::Requirements(_) => "Requirements",
+            PreflightError::Manifest(ManifestError::SceneMismatch { .. }) => "SceneMismatch",
+            PreflightError::Manifest(_) => "Manifest",
+            PreflightError::BuildMismatch { .. } => "BuildMismatch",
+        }
+    }
+
     /// The process exit code (IB-04): `3` for a build mismatch, `2` otherwise.
     pub fn exit_code(&self) -> ExitCode {
         match self {

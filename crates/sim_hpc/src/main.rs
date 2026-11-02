@@ -80,7 +80,12 @@ fn main() -> std::process::ExitCode {
             if args.json {
                 println!(
                     "{}",
-                    json!({"ok": false, "exit": e.exit_code().code(), "error": e.to_string()})
+                    json!({
+                        "ok": false,
+                        "exit": e.exit_code().code(),
+                        "kind": e.kind(),
+                        "error": e.to_string(),
+                    })
                 );
             } else {
                 eprintln!("sim_hpc: {e}");
@@ -105,6 +110,8 @@ fn main() -> std::process::ExitCode {
                     "build_id": campaign.build_id,
                     "scene_hash": format!("{:016x}", campaign.scenario.scene_hash()),
                     "manifest_hash": format!("{:016x}", campaign.manifest.hash),
+                    "req_set_hash": campaign.requirements.as_ref().map(|r| format!("{:016x}", r.hash())),
+                    "param_keys": campaign.manifest.param_keys,
                     "summary_columns": campaign.summary_columns,
                     "warnings": campaign.warnings,
                 })
@@ -129,6 +136,8 @@ fn main() -> std::process::ExitCode {
             json!({
                 "ok": r.exit == ExitCode::Ok,
                 "exit": r.exit.code(),
+                "campaign_id": campaign.config.campaign.id,
+                "threads": r.threads,
                 "runs": r.runs,
                 "crashes": r.crashes,
                 "crash_dumps": r.dumps,
