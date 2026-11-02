@@ -45,6 +45,8 @@ parquet = { version = "59.2", default-features = false, features = ["arrow", "zs
 # Crash-dump frames (`*_crashes.zst`, IB-07): zstd around bincode, pinned because the bytes are on disk.
 zstd = "0.13"
 bincode = { version = "=2.0.1", default-features = false, features = ["std", "serde"] }
+# campaign.toml (IB-04), read by sim_hpc.
+toml = "1.1.8"
 # Test-only: exact rational arithmetic for the tableau order conditions.
 num-bigint = "0.4.8"
 num-rational = "0.4.2"

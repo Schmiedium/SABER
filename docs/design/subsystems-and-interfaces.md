@@ -42,6 +42,9 @@ v0.14 (2026-11-02, build step 3a) records `sim_schema`'s on-disk formats as buil
 column order, nullability and dynamic families, the `saber.header` Parquet footer, the row types, the crash-dump
 stream with its index footer, `build_id`, and the JSON export for Python (§5.4, IB-02, IB-07, IB-10, IB-12). Events
 carry their declared name instead of an `EventType` enum, and the kernel never builds Arrow (§4 rules).
+v0.15 (2026-11-02, build step 3b) records `sim_hpc --local` as built: preflight, worker threads with World reuse,
+crash and panic capture with the dump quota, `IO.Mux` rolling parts and the summaries-last commit by `IO.Stager`,
+`_MANIFEST.json` and the exit codes (§5.6, IB-04, IB-06, IB-07), and the kernel's Tier 2 and 3 run log (§5.1).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -315,7 +318,7 @@ flowchart LR
 | `SimClock` | Tick counter + fixed dt + multi-rate dividers so controllers/sensors can run at e.g. 1/10 physics rate deterministically. | `RateDivider(u32)` |
 | `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Integrator`, `Tableau<S>`, `trait OdeSystem`, `StateLayout`, `TickReport`, `IntegratorStats`, `SolverFailure` |
 | `SimRng` | Root RNG + **named substreams** (`rng.stream("wind")`) so adding a new noise source doesn't shift every other random draw. | `SimRng`, `RngStream` |
-| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
+| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). As built (step 3b): after the recorder in `SimSet::Record`, `TelemetryLog` copies this tick's events (with the body's position from the frame just recorded) and, every `snapshot_every` ticks from Tick 0, every body's state; buffers are sized at Tick 0 from `TelemetryConfig { max_events, snapshot_every, max_snapshots }` (a campaign setting, not in `sim_config_hash`), so overflow is counted, never allocated, and `RunOutput` adds the final state when it was off the cadence. Adaptive snapshot ramp-up is not built yet. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
 | `FieldPath`, `CheckCatalog` | Kernel support for verification that model plugins can reach without depending on `sim_verify` (§4): `FieldPath` reads a number or `bool` from `Component.field.path` through a path parsed once (no allocation per read); `CheckCatalog` holds the named custom requirement checks plugins register with `SimAppBuilder::register_check` (step 2). | `FieldPath`, `FieldReadError`, `CustomCheck`, `CheckState`, `CheckCatalog` |
 | `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). | `FlightRecorder` |
 | `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). | `CollisionShape`, `ContactPairs`, `TerrainBvh` |
@@ -540,6 +543,20 @@ flowchart LR
 
 There is no separate `Checkpointer`: checkpointing is the IO.Mux part roll plus the IO.Stager commit, and
 resume is a Rank0.Dispatcher function (G11, IB-07).
+
+**As built (step 3b), `sim_hpc --local`.** `Campaign::load` is `Preflight`: it reads `campaign.toml`, checks
+`expected_build_id` (the whole `build_id`, or at least seven leading digits of its git commit), loads the scenario
+with the model library, parses the requirement set, reads and checks the manifest (IB-02 errors; unbound columns
+are warnings), runs Tick 0 with the defaults and compiles the requirement set against it. The local dispatcher
+cuts the manifest into `chunk_size` chunks and hands them out in the canary order rank 0 will use (the first
+`canary_chunks` bit-reversed across the manifest, then the rest); `threads` worker threads (std scoped threads
+pulling from that queue, the shape the MPI receive loop will feed in 4a; rayon is not needed) each build one
+World and reuse it with `reset`. A run is `start_with_params` plus `run` inside `catch_unwind`: a watchdog crash
+keeps the World, a panic drops it and the next run rebuilds it, and either keeps a `CrashDump` (the recorder's
+frames, the panic message) while the node's `Quota` for that `param_set_id` is below `M`. The summary row merges
+the kernel's `RunOutput`, the `RunVerdictRow` and the manifest row; `SetupError` and `Panicked` rows carry `NaN`
+statistics and `Inconclusive` verdicts. The campaign crash policy (storm abort) is rank 0's and arrives with 4a;
+SIGTERM drain and `--resume` with 4b.
 
 ### 5.7 `saber` Python package
 
@@ -1189,6 +1206,7 @@ shared_out = "campaigns/drn-hover-a/out"
 | Scheduler | `saber.campaign` renders PBS Pro templates first and Slurm templates as a second target (D5). The walltime used for `drain_margin_s` comes from `PBS_WALLTIME`/the Slurm job end time. |
 | Owner | `sim_hpc` (config struct), mirrored by `saber.campaign`. |
 | Errors | Exit codes: `0` ok (or nothing left to resume), `2` config/validation error (incl. resume mismatch), `3` build_id mismatch, `4` I/O / stage-out failure (some parts not committed), `5` partial (drained before walltime or runs missing; resumable), `6` aborted by crash policy (`CrashStorm` or `SetupErrors`; evidence committed), `70` internal. Python maps exit codes to campaign status. `auto_resume` resubmits after `4`, `5` or a killed job, and stops on `2`, `3` or `6`, or when the last attempt made no progress. |
+| As built (step 3b) | `sim_hpc::CampaignConfig` reads every key above (unknown keys are errors) plus `execution.max_events_per_run` (default 4096) and `execution.threads` (default: available parallelism); paths are relative to the file, and `scratch_dir`/`shared_out` expand `${VAR}` (`${TMPDIR}` falls back to the system temp directory). `flight_recorder_ticks` overrides the scenario's `recorder_frames` (not hashed). `snapshot_policy.adaptive` is accepted with a warning and sampling stays at `base_every`. CLI: `--local` and `--validate-only` (`--json` for both, `--threads N`); without `--local` the binary exits `64` until MPI lands (4a), and `--resume` / `--override-crash-policy` exit `64` until 4b. Exit `64` is a usage error. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
 
@@ -1234,6 +1252,7 @@ pub trait RunSink {
 | Channel | `crossbeam_channel::bounded(io_channel_capacity)`. **Bounded = backpressure**: if NVMe is slow, workers block rather than OOM the node. |
 | Ownership | Worker moves buffers into the message; IO.Mux returns emptied `RecordBatch` builders through a second "recycle" channel so steady state is allocation-free. |
 | Errors | IO.Mux write failure → sets a node-wide `IoFailed` flag; workers finish the current run then stop; RankN.Main reports to Rank 0; exit code 4. Disconnected channel = IO thread panicked → same path. |
+| As built (step 3b) | `IoMsg::{Run(Box<RunRecord>), EndOfStream}` over `std::sync::mpsc::sync_channel(io_channel_capacity)` (bounded, so backpressure as designed, without crossbeam). A `RunRecord` carries the summary row, event and snapshot rows and the optional crash dump of one run, so a dump never arrives without its row; `IO.Mux` buffers rows and writes a batch per table every 65,536 rows and at part close. Rows are moved per run; recycling builders back to the workers is left for when profiling asks for it. `RunSink` stays the kernel's interface for the studio; `sim_hpc` reads `RunOutput` directly. |
 
 ### IB-07 · Output files (IO.Mux → NVMe → shared FS)
 
@@ -1274,6 +1293,18 @@ earlier file, and the `*_summaries.parquet` globs still match.
 
 Floats are `f64` unless marked. Footer keys are `saber.header`, `saber.run_ids` (`[[first, last], ...]`) and
 `saber.crash_counts` (`{"param_set_id": count}`); writing them is `IO.Mux`'s job (3b).
+
+**As built (step 3b).** `IO.Mux` opens a part when its first run arrives (so an idle node writes no empty parts),
+writes all four files of it in the scratch directory `<scratch_dir>/saber-<campaign_id>/a<attempt>-r<rank>/`
+as `.partial`, and closes it `checkpoint_interval_s` after it opened (also while idle) and at the end of the
+stream: footers, fsync, rename. Every part has a `crashes.zst`, empty when nothing crashed. `IO.Stager` copies
+events, snapshots and crashes, then summaries, each as `.tmp` with fsync and rename, retrying 4 times with
+doubling backoff, deletes the scratch copies of a committed part, keeps a failed part in scratch, and writes
+`_SUCCESS.{rank}` only when every part committed. `_MANIFEST.json` (written atomically at the end of the attempt
+for now; kept current per commit with 4a) holds `campaign_id`, `build_id`, `scene_hash`, `req_set_hash`,
+`manifest_hash`, `runs`, `status` (`complete`, `partial`, `io_failed`), `committed` and `missing` run ranges,
+crash, dump and setup-error counts, and per attempt and rank the committed parts (files, run ranges, crash
+counts, rows per table) and the failed ones.
 
 **Commit rule.** A part is committed when its summaries file appears under its final name. IO.Stager
 copies events, snapshots, impacts and crashes as `.tmp` and renames them first, then copies, fsyncs and renames

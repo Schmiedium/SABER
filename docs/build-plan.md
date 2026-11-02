@@ -1,6 +1,6 @@
 # SABER build plan
 
-Status: v1.4 (2026-11-02; v1.1 marks steps 1a and 1b done, adds O8 and records D19; v1.2 marks step 1c done, moves `FileHeader` from 3a to 1c, and adds Earth rotation to 5a; v1.3 marks step 2 done, which also brought the kernel's in-memory event channel forward from the telemetry work; v1.4 marks step 3a done). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
+Status: v1.4 (2026-11-02; v1.1 marks steps 1a and 1b done, adds O8 and records D19; v1.2 marks step 1c done, moves `FileHeader` from 3a to 1c, and adds Earth rotation to 5a; v1.3 marks step 2 done, which also brought the kernel's in-memory event channel forward from the telemetry work; v1.4 marks step 3a done; v1.5 marks step 3b done, which also brought the kernel's Tier 2 and 3 run log forward). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
 steps, one reviewable pull request each, in the order they are built. Each step names its scope, the
 design sections it implements, and the test that proves it done (its exit criterion, in the roadmap's
 style). Design changes ride in the same PR as the code (`CONTRIBUTING.md`).
@@ -81,3 +81,4 @@ flowchart LR
 | 1c Scenario file, Resolver and samplers, `EnvironmentPlugin`, `AeroTable`, `saber-cli validate` | #4 |
 | 2 Requirement sets, metrics, per-run monitor, early stop, verdict row, `saber-cli` requirement JSON | #5 |
 | 3a Output tables and Parquet I/O, crash-dump stream, `build_id`, schema export, `saber.schema`, golden files | #6 |
+| 3b `sim_hpc --local`: preflight, worker threads with World reuse, crash and panic capture, `IO.Mux` parts, stager, `_MANIFEST.json`, exit codes; kernel event and snapshot log | this PR |

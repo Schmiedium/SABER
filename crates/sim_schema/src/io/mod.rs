@@ -551,38 +551,106 @@ pub fn write_parquet<W: std::io::Write + Send>(
     batches: &[RecordBatch],
     extra: &[(&str, String)],
 ) -> Result<(), TableError> {
-    header
-        .check(table.name(), table.schema_version())
-        .map_err(TableError::Header)?;
-    let schema = match batches.first() {
-        Some(b) => b.schema(),
-        None => table.arrow_schema(&[])?,
+    let dynamic = match batches.first() {
+        Some(b) => table.check_schema(&b.schema())?,
+        None => Vec::new(),
     };
-    table.check_schema(&schema)?;
-    let mut kv = vec![KeyValue::new(
-        HEADER_KEY.to_owned(),
-        serde_json::to_string(header).expect("a header serialises"),
-    )];
-    kv.extend(
-        extra
-            .iter()
-            .map(|(k, v)| KeyValue::new((*k).to_owned(), v.clone())),
-    );
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .set_key_value_metadata(Some(kv))
-        .build();
-    let mut writer = ArrowWriter::try_new(out, schema.clone(), Some(props))?;
+    let mut w = TableWriter::new(out, table, header, &dynamic)?;
     for b in batches {
-        if b.schema() != schema {
-            return Err(TableError::Schema(
-                "all batches of a file need the same schema".to_owned(),
-            ));
-        }
-        writer.write(b)?;
+        w.write(b)?;
     }
-    writer.close()?;
+    w.finish(extra)?;
     Ok(())
+}
+
+/// A Parquet file of a table written batch by batch (`IO.Mux` keeps one per table and part).
+/// The header goes into the footer when the writer is created; [`TableWriter::finish`] adds the
+/// entries only known at the end (`saber.run_ids`, `saber.crash_counts`).
+pub struct TableWriter<W: std::io::Write + Send> {
+    writer: ArrowWriter<W>,
+    table: Table,
+    schema: SchemaRef,
+    dynamic: Vec<String>,
+    rows: u64,
+}
+
+impl<W: std::io::Write + Send> TableWriter<W> {
+    /// Start a file of `table` with these dynamic columns.
+    pub fn new(
+        out: W,
+        table: Table,
+        header: &FileHeader,
+        dynamic: &[String],
+    ) -> Result<Self, TableError> {
+        header
+            .check(table.name(), table.schema_version())
+            .map_err(TableError::Header)?;
+        let schema = table.arrow_schema(dynamic)?;
+        let kv = vec![KeyValue::new(
+            HEADER_KEY.to_owned(),
+            serde_json::to_string(header).expect("a header serialises"),
+        )];
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_key_value_metadata(Some(kv))
+            .build();
+        let writer = ArrowWriter::try_new(out, schema.clone(), Some(props))?;
+        Ok(Self {
+            writer,
+            table,
+            schema,
+            dynamic: dynamic.to_vec(),
+            rows: 0,
+        })
+    }
+
+    /// Append a batch with the file's schema.
+    pub fn write(&mut self, batch: &RecordBatch) -> Result<(), TableError> {
+        if batch.schema() != self.schema {
+            return Err(TableError::Schema(format!(
+                "{}: a batch's columns differ from the file's",
+                self.table.name()
+            )));
+        }
+        self.writer.write(batch)?;
+        self.rows += batch.num_rows() as u64;
+        Ok(())
+    }
+
+    /// Append rows.
+    pub fn write_rows<R: TableRow>(&mut self, rows: &[R]) -> Result<(), TableError> {
+        if R::TABLE != self.table {
+            return Err(TableError::Schema(format!(
+                "{} rows for a {} file",
+                R::TABLE.name(),
+                self.table.name()
+            )));
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = R::to_batch(rows, &self.dynamic)?;
+        self.write(&batch)
+    }
+
+    /// Rows written so far.
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    /// The dynamic column names.
+    pub fn dynamic(&self) -> &[String] {
+        &self.dynamic
+    }
+
+    /// Add footer entries, write the footer and hand back the output.
+    pub fn finish(mut self, extra: &[(&str, String)]) -> Result<W, TableError> {
+        for (k, v) in extra {
+            self.writer
+                .append_key_value_metadata(KeyValue::new((*k).to_owned(), v.clone()));
+        }
+        Ok(self.writer.into_inner()?)
+    }
 }
 
 /// A table read back.

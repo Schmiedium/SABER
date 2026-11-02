@@ -2,14 +2,14 @@
 //!
 //! The kernel never knows whether it runs in the studio or on a cluster. `sim_hpc` implements the
 //! sink with the bounded channel to `IO.Mux` (build step 3b), the studio with an in-memory store;
-//! [`MemorySink`] is that store. `RunOutput` grows the requirement columns and Tier 2 and 3 batches
-//! with `sim_verify` (step 2) and the output schemas (step 3a).
+//! [`MemorySink`] is that store. `RunOutput` carries Tier 1 statistics and the Tier 2 and 3 logs;
+//! the requirement columns come from `sim_verify::run_verdicts`.
 
 use sim_schema::{CrashReason, IntegratorKind, SimStatus, TickFrame};
 
 use crate::app::RunSeed;
 use crate::integrator::IntegratorStats;
-use crate::telemetry::RunningStats;
+use crate::telemetry::{LoggedEvent, RunningStats, SnapshotSample};
 
 /// Everything the kernel knows about a finished run.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +34,12 @@ pub struct RunOutput {
     pub crash: Option<CrashReason>,
     /// The stop condition that terminated the run.
     pub stop_reason: Option<&'static str>,
+    /// Tier 2 events, in emission order.
+    pub events: Vec<LoggedEvent>,
+    /// Events not kept.
+    pub events_dropped: u64,
+    /// Tier 3 snapshots (with the final state when snapshots are on).
+    pub snapshots: Vec<SnapshotSample>,
     /// Flight-recorder frames, oldest first, when the caller asked for them (crash capture).
     pub frames: Vec<TickFrame>,
 }

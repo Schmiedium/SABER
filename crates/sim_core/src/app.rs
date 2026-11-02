@@ -38,7 +38,10 @@ use crate::rng::{RngStreams, SimRng};
 use crate::scene::Scenario;
 use crate::schedule::{SimSet, new_tick_schedule};
 use crate::sink::{RunOutput, RunSink, SinkError};
-use crate::telemetry::{RunningStats, TickEnergy, telemetry_system, update_energy};
+use crate::telemetry::{
+    RunningStats, TelemetryConfig, TelemetryLog, TickEnergy, log_tick, telemetry_system,
+    update_energy,
+};
 use crate::watchdog::{
     MaxTicksOutcome, RunStatus, StopRequests, TerminationPolicy, WatchdogConfig, WatchdogSettings,
     termination_system, watchdog_system,
@@ -358,7 +361,7 @@ impl SimAppBuilder {
         b.add_systems(SimSet::Environment, clear_events)
             .add_systems(SimSet::Integrate, integrate_system)
             .add_systems(SimSet::Telemetry, telemetry_system)
-            .add_systems(SimSet::Record, record_frame)
+            .add_systems(SimSet::Record, (record_frame, log_tick))
             .add_systems(
                 SimSet::Watchdog,
                 (
@@ -493,6 +496,8 @@ impl SimAppBuilder {
         world.insert_resource(WatchdogSettings(config.watchdog));
         world.insert_resource(RunningStats::default());
         world.insert_resource(TickEnergy::default());
+        world.init_resource::<TelemetryConfig>();
+        world.insert_resource(TelemetryLog::default());
         world.insert_resource(FlightRecorder::default());
         world.insert_resource(RngStreams::new(SimRng::new(0, 0)));
         world.insert_resource(WorldFrame::default());
@@ -684,6 +689,9 @@ impl SimWorld {
             .resource_mut::<FlightRecorder>()
             .ensure(config.recorder_frames as usize, n);
         record_frame(world);
+        let telemetry = *world.resource::<TelemetryConfig>();
+        world.resource_mut::<TelemetryLog>().start(&telemetry, n);
+        log_tick(world);
         if world.contains_resource::<RollingHash>() {
             let h = state_hash(world);
             world.resource_mut::<RollingHash>().restart(h, 0);
@@ -749,6 +757,17 @@ impl SimWorld {
         bodies.index_of(id).map(|i| bodies.entries()[i].entity)
     }
 
+    /// Flight-recorder frames `K` from the next `start` on (a campaign setting that overrides the
+    /// scenario's; not part of `sim_config_hash`, because it never changes results).
+    pub fn set_recorder_frames(&mut self, frames: u32) {
+        self.config.recorder_frames = frames.max(1);
+    }
+
+    /// How much Tier 2 and Tier 3 telemetry runs keep, from the next `start` on.
+    pub fn set_telemetry(&mut self, config: TelemetryConfig) {
+        self.world.insert_resource(config);
+    }
+
     /// Fold every tick's state hash into a rolling hash from the next `start` on (test builds and
     /// divergence bisection; costs one state hash per tick). With `keep_history` every tick's value
     /// is kept.
@@ -770,6 +789,7 @@ impl SimWorld {
     /// If the run has not ended.
     pub fn output(&self, with_frames: bool) -> RunOutput {
         let status = self.status();
+        let log = self.world.resource::<TelemetryLog>();
         RunOutput {
             seed: self.seed,
             status: status.status().expect("the run has not ended"),
@@ -781,6 +801,12 @@ impl SimWorld {
             stats: *self.world.resource::<RunningStats>(),
             crash: status.crash().cloned(),
             stop_reason: status.stop_reason(),
+            events: log.events.clone(),
+            events_dropped: log.events_dropped,
+            snapshots: log.snapshots_with_final(
+                self.world.resource::<TelemetryConfig>(),
+                self.world.resource::<FlightRecorder>(),
+            ),
             frames: if with_frames {
                 self.world
                     .resource::<FlightRecorder>()
