@@ -13,3 +13,10 @@ workspace = true
 
 [dependencies]
 sim_core.workspace = true
+sim_schema.workspace = true
+bevy_ecs.workspace = true
+bevy_reflect.workspace = true
+glam.workspace = true
+
+[dev-dependencies]
+sim_testkit.workspace = true

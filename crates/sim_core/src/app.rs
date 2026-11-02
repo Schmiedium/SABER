@@ -10,7 +10,10 @@
 //!                  → reset() [despawn run entities, keep buffers]
 //! ```
 
+use std::sync::Arc;
+
 use bevy_ecs::prelude::*;
+use bevy_ecs::reflect::ReflectComponent;
 use bevy_ecs::resource::IsResource;
 use bevy_ecs::schedule::ScheduleConfigs;
 use bevy_ecs::system::ScheduleSystem;
@@ -21,14 +24,16 @@ use sim_schema::SimStatus;
 use crate::body::{MassProps, PointMass3, RigidBody6, SimId};
 use crate::clock::SimClock;
 use crate::dynamics::{Dynamics, integrate_system};
-use crate::environment::{Environment, SimEnvironment, UniformEnvironment};
+use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldFrame};
 use crate::force::ForceModel;
 use crate::hash::{
     CONFIG_CONTEXT, RollingHash, RunIdentity, finish, rolling_hash_system, state_hash,
 };
 use crate::integrator::{IntegratorConfig, IntegratorConfigError, StepMode};
+use crate::parametric::{ParamBindings, ParamValues, ResolveReport, Uncertainties};
 use crate::recorder::{FlightRecorder, record_frame};
 use crate::rng::{RngStreams, SimRng};
+use crate::scene::Scenario;
 use crate::schedule::{SimSet, new_tick_schedule};
 use crate::sink::{RunOutput, RunSink, SinkError};
 use crate::telemetry::{RunningStats, TickEnergy, telemetry_system, update_energy};
@@ -221,6 +226,30 @@ pub enum SetupError {
     },
     /// A non-finite initial state.
     NonFiniteState(u32),
+    /// A run's parameter values lack a key the scene binds (seq §6).
+    MissingParam(String),
+    /// A parameter value outside its binding's bounds.
+    ParamOutOfBounds {
+        /// The `param_key`.
+        key: String,
+        /// The value given.
+        value: f64,
+        /// Lower bound.
+        lo: f64,
+        /// Upper bound.
+        hi: f64,
+    },
+    /// A parameter binding or uncertainty that does not resolve on its entity.
+    BadBinding {
+        /// The entity.
+        sim_id: u32,
+        /// The target path.
+        target: String,
+        /// Why.
+        reason: String,
+    },
+    /// The scenario does not fit this World (a component type its registry lacks).
+    Scene(String),
     /// A plugin or force model rejected the scenario.
     Model {
         /// The plugin or force model.
@@ -249,6 +278,19 @@ impl std::fmt::Display for SetupError {
                 write!(f, "body {sim_id} attitude quaternion has length {norm}")
             }
             NonFiniteState(id) => write!(f, "body {id} has a non-finite initial state"),
+            MissingParam(key) => write!(f, "the run has no value for param_key {key:?}"),
+            ParamOutOfBounds { key, value, lo, hi } => {
+                write!(
+                    f,
+                    "param {key:?} = {value} is outside its bounds [{lo}, {hi}]"
+                )
+            }
+            BadBinding {
+                sim_id,
+                target,
+                reason,
+            } => write!(f, "SimId {sim_id}: binding {target:?}: {reason}"),
+            Scene(m) => write!(f, "the scenario does not fit this World: {m}"),
             Model { model, message } => write!(f, "{model}: {message}"),
         }
     }
@@ -256,8 +298,8 @@ impl std::fmt::Display for SetupError {
 
 impl std::error::Error for SetupError {}
 
-/// Every reflected component a scenario may contain (G4). `DynamicScene` loading (build step 1c)
-/// resolves types through it, so it must be identical in every binary of a build.
+/// Every reflected component a scenario may contain (G4). Scenario files (IB-01) resolve types
+/// through it, so it must be identical in every binary of a build.
 #[derive(Resource, Clone, Default)]
 pub struct SimTypeRegistry(pub TypeRegistryArc);
 
@@ -306,7 +348,9 @@ impl SimAppBuilder {
         b.register_type::<SimId>()
             .register_type::<RigidBody6>()
             .register_type::<PointMass3>()
-            .register_type::<MassProps>();
+            .register_type::<MassProps>()
+            .register_type::<ParamBindings>()
+            .register_type::<Uncertainties>();
         b.add_systems(SimSet::Integrate, integrate_system)
             .add_systems(SimSet::Telemetry, telemetry_system)
             .add_systems(SimSet::Record, record_frame)
@@ -370,6 +414,18 @@ impl SimAppBuilder {
         self
     }
 
+    /// The type registry, shared with the World this builder makes. Parse scenario files with it
+    /// before `build` when the configuration comes from the file.
+    pub fn type_registry(&self) -> TypeRegistryArc {
+        self.registry.clone()
+    }
+
+    /// Replace the configuration (for example with a scenario's, before `build`).
+    pub fn set_config(&mut self, config: SimConfig) -> &mut Self {
+        self.config = config;
+        self
+    }
+
     /// The World being built, for plugin resources.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
@@ -416,6 +472,8 @@ impl SimAppBuilder {
         world.insert_resource(TickEnergy::default());
         world.insert_resource(FlightRecorder::default());
         world.insert_resource(RngStreams::new(SimRng::new(0, 0)));
+        world.insert_resource(WorldFrame::default());
+        world.insert_resource(ResolveReport::default());
         world.insert_resource(RunIdentity {
             scene_hash: 0,
             sim_config_hash: config.hash(0),
@@ -434,6 +492,7 @@ impl SimAppBuilder {
             infrastructure,
             seed: RunSeed::default(),
             started: false,
+            scenario: None,
         })
     }
 }
@@ -447,6 +506,7 @@ pub struct SimWorld {
     infrastructure: Vec<Entity>,
     seed: RunSeed,
     started: bool,
+    scenario: Option<Arc<Scenario>>,
 }
 
 impl SimWorld {
@@ -476,16 +536,87 @@ impl SimWorld {
         self.world.spawn((id, bundle)).id()
     }
 
-    /// Record the scene file hash that `sim_config_hash` covers (build step 1c sets it from the
-    /// scenario envelope). Takes effect at the next `start`.
+    /// Record the scene hash that `sim_config_hash` covers, for a World built in code. Takes
+    /// effect at the next `start`. `set_scenario` sets it from the file.
     pub fn set_scene_hash(&mut self, scene_hash: u64) {
         self.world.resource_mut::<RunIdentity>().scene_hash = scene_hash;
     }
 
-    /// Tick 0: seed the random streams, run each plugin's `start`, build the body table and the
-    /// integrator, set up the force models, size the recorder and record the initial frame.
-    /// Everything that allocates happens here.
+    /// The `SimTypeRegistry` (for parsing and exporting scenario files).
+    pub fn type_registry(&self) -> TypeRegistryArc {
+        self.world.resource::<SimTypeRegistry>().0.clone()
+    }
+
+    /// Adopt a scenario (IB-01): its `SimConfig`, world frame and scene hash. From now on every
+    /// `start` spawns its entities before resolving them, so a World reused across runs (G5) gets
+    /// a fresh copy each run. Call between runs only.
+    pub fn set_scenario(&mut self, scenario: Arc<Scenario>) -> Result<(), SetupError> {
+        if self.started {
+            return Err(SetupError::AlreadyStarted);
+        }
+        scenario.config().validate()?;
+        {
+            let registry = self.world.resource::<SimTypeRegistry>().0.read();
+            for e in scenario.entities() {
+                for c in &e.components {
+                    let known = registry
+                        .get(c.as_ref().type_id())
+                        .is_some_and(|r| r.data::<ReflectComponent>().is_some());
+                    if !known {
+                        return Err(SetupError::Scene(format!(
+                            "{} is not registered in this World",
+                            c.reflect_type_path()
+                        )));
+                    }
+                }
+            }
+        }
+        let config = scenario.config().clone();
+        self.world.insert_resource(TerminationPolicy {
+            max_ticks: config.max_ticks,
+            at_max_ticks: config.at_max_ticks,
+        });
+        self.world
+            .insert_resource(WatchdogSettings(config.watchdog));
+        self.world.insert_resource(WorldFrame(scenario.frame()));
+        self.world.insert_resource(RunIdentity {
+            scene_hash: scenario.scene_hash(),
+            sim_config_hash: scenario.sim_config_hash(),
+        });
+        self.config = config;
+        self.scenario = Some(scenario);
+        Ok(())
+    }
+
+    /// The adopted scenario, if any.
+    pub fn scenario(&self) -> Option<&Arc<Scenario>> {
+        self.scenario.as_ref()
+    }
+
+    /// Tick 0 with the bindings' default values (a local run without a manifest row). See
+    /// [`SimWorld::start_with_params`].
     pub fn start(&mut self, seed: RunSeed) -> Result<(), SetupError> {
+        self.start_inner(seed, None)
+    }
+
+    /// Tick 0 (seq §6): seed the random streams, spawn the scenario if one is set, resolve
+    /// parameter bindings from `params` and draw uncertainties (`Core.Resolver`), run each
+    /// plugin's `start`, build the body table and the integrator, set up the force models, size the
+    /// recorder and record the initial frame. Everything that allocates happens here. On error the
+    /// World must be `reset` before the next attempt.
+    pub fn start_with_params(
+        &mut self,
+        seed: RunSeed,
+        params: &ParamValues,
+    ) -> Result<(), SetupError> {
+        self.start_inner(seed, Some(params))
+    }
+
+    fn start_inner(
+        &mut self,
+        seed: RunSeed,
+        params: Option<&ParamValues>,
+    ) -> Result<(), SetupError> {
         if self.started {
             return Err(SetupError::AlreadyStarted);
         }
@@ -504,6 +635,11 @@ impl SimWorld {
             id.sim_config_hash = config.hash(id.scene_hash);
         }
 
+        if let Some(scenario) = &self.scenario {
+            let registry = world.resource::<SimTypeRegistry>().0.clone();
+            scenario.spawn(world, &registry.read());
+        }
+        crate::parametric::resolve(world, params)?;
         for plugin in &self.plugins {
             plugin.start(world)?;
         }

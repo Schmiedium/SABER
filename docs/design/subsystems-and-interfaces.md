@@ -29,6 +29,11 @@ v0.11 (2026-11-02, build step 1b) records the kernel as built: `SimAppBuilder` �
 `ForceModel` and `Environment` (§5.1, IB-08), one `Integrate` system for every authored body (§6), World reuse
 (G5), the watchdog's energy bound and the `TickFrame` in `sim_schema` (§5.4), and D19 (was O8): reaching
 `max_ticks` ends a run as the scenario's `at_max_ticks`, `Completed` by default (§10.2, §11).
+v0.12 (2026-11-02, build step 1c) records the scenario file, Resolver and environment as built: SABER reads and
+writes the `scene:` section itself with `bevy_reflect` serde instead of `DynamicScene` (IB-01), `scene_hash` is over
+the canonical sim section, `config:` carries the `SimConfig` (§7), uncertainties have named fields with optional
+truncation and `Add` (§7), `FileHeader` and `Semver` exist (§5.4), `EnvironmentPlugin` (§5.2), frame origins and
+ECEF without rotation until step 5a (§10.3), and the plugin rule against `Query` caches on Tick 1 (IB-08).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -292,7 +297,7 @@ flowchart LR
 | Component | Responsibility | Key types |
 |---|---|---|
 | `SimAppBuilder` | Only sanctioned way to construct a World; both binaries call it. Guarantees identical registration and plugin order. Builds a `SimWorld`, which owns the World and its schedule and runs the per-run lifecycle (`start` = Tick 0, `step`/`run`, `output`, `reset`). | `SimConfig`, `SimPlugin`, `SimAppBuilder::build() -> Result<SimWorld, SetupError>`, `SimWorld` |
-| `Core.Resolver` | Tick-0 expansion: apply `Bind*Param`, sample `*Uncertainty`, expand spawners, validate. | `ParamTable`, `ResolveReport` |
+| `Core.Resolver` | Tick-0 expansion, after the scenario is spawned and before any plugin starts: parse each binding and uncertainty target once into a typed setter, write the manifest row's values (or the defaults) for every entity in `SimId` order, then draw the uncertainties in `SimId` order with one uniform each from the named stream (inverse CDF, §7), then remove both components so the running World holds only resolved values. Spawners arrive with the step that needs them. | `ParamBindings`, `Uncertainties`, `ParamValues`, `Distribution`, `Sampler`, `ResolveReport` |
 | `Core.Schedule` | Holds `SimTickSchedule` with `SimSet` chain (§6). Single-threaded executor, set explicitly (Bevy defaults to multi-threaded when any crate in the build enables it). | `SimSet` enum, `SimTickSchedule` |
 | `SimClock` | Tick counter + fixed dt + multi-rate dividers so controllers/sensors can run at e.g. 1/10 physics rate deterministically. | `RateDivider(u32)` |
 | `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Integrator`, `Tableau<S>`, `trait OdeSystem`, `StateLayout`, `TickReport`, `IntegratorStats`, `SolverFailure` |
@@ -357,6 +362,19 @@ scenario can never attach projectile aero to an airframe or the reverse. Sources
 Johnson; Beard and McLain; DATCOM and OpenVSP for tables; JSBSim as the cross-check
 (`flight-dynamics-sources.md` §2).
 
+**As built (step 1c).** `EnvironmentPlugin` reads up to one each of `Gravity` (`None`, `Flat { g }` in ENU or
+NED, `J2` in ECEF: the WGS 84 central field plus J2, no centrifugal term), `Atmosphere` (`Vacuum`,
+`Uniform { density, pressure, temperature }`, `Ussa1976` by altitude, isothermal above 86 km) and `Wind`
+(`Calm`, `Constant { velocity }`; Dryden turbulence with step 5c) from any entities at every Tick 0, after the
+Resolver, so their fields can be swept or drawn; a missing one means none, vacuum or calm, and two of one kind
+is a `SetupError`. It installs the kernel's `Environment` for the world frame (§10.3). `GroundImpactStop
+{ altitude_m }` on a body ends the run as `Terminated` with reason `ground_impact` at the end of the first tick
+at or below that altitude; the plugin lists the watched bodies at Tick 0, so a stop added during a run is not
+watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
+fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
+`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0) is the version
+scenarios check against (IB-01).
+
 `Controller` boundary (in-process, deterministic):
 
 ```rust
@@ -399,7 +417,7 @@ Stage split:
 
 | Item | Content |
 |---|---|
-| `FileHeader` | `magic`, `format`, `schema_version` (semver), `saber_version`, `build_id` (git sha + rustc + target + feature flags), `campaign_id`, `scene_hash`, `req_set_hash`, `created_utc` |
+| `FileHeader` | `magic`, `format`, `schema_version` (semver), `saber_version`, `build_id` (git sha + rustc + target + feature flags), `campaign_id`, `scene_hash`, `req_set_hash`, `created_utc`. As built (step 1c): a serde struct whose last five fields are optional (left out when unset); `FileHeader::check(format, supported)` checks the magic, the format and the version, and `Semver::satisfies` is Cargo's caret rule (same major, at least the required version, and the same minor below 1.0). |
 | Arrow schemas | `SUMMARY_SCHEMA` (fixed + dynamic `param_*`, `metric_*`, `req_*` columns), `EVENTS_SCHEMA`, `SNAPSHOTS_SCHEMA`, `VERDICTS_SCHEMA`, `MANIFEST_SCHEMA` |
 | `CrashDump` | header + run identity + `SimStatus` + `CrashReason` + chronological `Vec<TickFrame>` + optional panic message/backtrace |
 | `TickFrame`, `BodySnapshot`, `CrashReason` | The flight-recorder frame (`tick`, `t_s`, `total_energy`, bodies in `SimId` order with `sim_id`, `pos`, `quat_wxyz`, `lin_vel`, `ang_vel` (body rates), `force_mag`, `flags`), the `FLAG_*` bits, and `CrashReason { kind, sim_id, tick, detail }`. Plain `f64` arrays, so the crate needs no maths library (step 1b). |
@@ -754,7 +772,7 @@ run time; it only loads the converted glTF. Batch use: `saber-cli model convert 
 converted outside SABER (D17).
 
 **Headless rule.** `sim_hpc`, `sim_explorer` and Python never link `sim_assets` and never open a glTF. The
-scenario envelope reads `visual` as an opaque value (`serde::de::IgnoredAny`), and `scene_hash` covers only the
+scenario envelope reads `visual` as an opaque value (borrowed raw RON, hashed but never parsed), and `scene_hash` covers only the
 sim section and geometry sidecars; the `visual:` section has its own `visual_hash`. Replacing, moving or deleting
 a model therefore never changes a campaign, a replay's `scene_hash` check or a determinism result.
 
@@ -837,8 +855,7 @@ classDiagram
       scene_hash
       units = SI
       frame: NED|ENU|ECEF
-      dt: f64
-      max_ticks: u64
+      config: SimConfig (dt, max_ticks, at_max_ticks, integrator)
       entities
     }
     class ModelInstance {
@@ -854,8 +871,10 @@ classDiagram
     }
     class UncertaintySpec {
       target: reflect path
-      distribution: Normal|Uniform|LogNormal|Table
-      rng_stream
+      distribution: Normal|Uniform|LogNormal|Triangular
+      stream
+      truncate [lo, hi]
+      apply: Set|Add
     }
     class TwinProfile {
       status = deferred
@@ -901,14 +920,33 @@ pub struct ParamBinding {
     pub bounds: Option<(f64, f64)>,   // validated at preflight & Tick 0
 }
 
-#[derive(Reflect, Clone)]
+#[derive(Reflect, Clone, Copy)]
 pub enum Distribution { Normal { mean: f64, std: f64 }, Uniform { lo: f64, hi: f64 },
-                        LogNormal { mu: f64, sigma: f64 }, Truncated(Box<Distribution>, f64, f64) }
+                        LogNormal { mu: f64, sigma: f64 }, Triangular { lo: f64, mode: f64, hi: f64 } }
 
 #[derive(Component, Reflect, Clone)]
 #[reflect(Component)]
-pub struct Uncertainties(pub Vec<(String /*reflect path*/, Distribution, String /*rng stream*/)>);
+pub struct Uncertainties(pub Vec<Uncertainty>);
+
+#[derive(Reflect, Clone)]
+pub struct Uncertainty {
+    pub target: String,                   // reflect path, e.g. "PointMass3.velocity.x"
+    pub distribution: Distribution,
+    pub stream: String,                   // SimRng substream
+    #[reflect(default)] pub truncate: Option<(f64, f64)>,  // draw only inside [lo, hi]
+    #[reflect(default)] pub apply: Apply, // Set (default) or Add to the bound value
+}
 ```
+
+As built (step 1c), a target is `Component.field.path` on the same entity, where `Component` is the short type
+path (the full one when the short one is ambiguous) and the path ends at an `f64`. Each uncertainty takes
+exactly one 53-bit uniform `u` in (0, 1) from its stream and returns the inverse CDF at `u` (Acklam's normal
+quantile with one Halley step on `erfc`); truncation maps `u` into `[F(lo), F(hi)]`, through the mirrored
+distribution when that interval is in the upper tail, so a draw never loops and adding an uncertainty never
+shifts another stream. A binding's value outside its `bounds`, a manifest row without a bound key, an
+unresolvable target, or a truncation with zero probability is a `SetupError` at Tick 0. The draft's
+`Truncated(Box<Distribution>, ..)` became the `truncate` field, since a boxed distribution cannot be `Copy`
+and only one level of truncation is meaningful.
 
 (These are the generic `BindParam` / `Stochastic` components from the GUI doc; held as `Vec`s so one
 entity can carry several bindings.)
@@ -1019,11 +1057,12 @@ flowchart LR
 | | |
 |---|---|
 | Direction | Written by `Studio.Builder`; read by `Core.Resolver` in LocalRun, Replay, and Rank 0. |
-| Contract | Bevy `DynamicScene` RON **wrapped** in a SABER envelope: `(header: FileHeader, units: "SI", frame, dt, max_ticks, model_library_version, scene: <DynamicScene>)`. Only components registered in `SimTypeRegistry` may appear; render-only data lives under a separate `visual:` section (`VisualModel` per `SimId`, `Scenery`, §5.10) that `sim_hpc` reads as an opaque value and ignores. Triangle-mesh collision shapes reference `geometry/<blake3>.geom` sidecars. |
+| Contract | Bevy's reflected scene RON **wrapped** in a SABER envelope: `(header: FileHeader, units: "SI", frame, model_library_version, config: SimConfig, scene: (entities: {…}), visual: (…))`, `visual` optional. Only components registered in `SimTypeRegistry` may appear; render-only data lives under a separate `visual:` section (`VisualModel` per `SimId`, `Scenery`, §5.10) that `sim_hpc` reads as an opaque value and ignores. Triangle-mesh collision shapes reference `geometry/<blake3>.geom` sidecars. |
 | Owner | `sim_core` (types, envelope), `sim_schema` (header). |
 | Validation | Parse with `SimTypeRegistry`; unknown type paths, missing `SimId`, duplicate `SimId`, binding targets that don't resolve, bounds violations. `scene_hash` = BLAKE3 of the canonicalised sim section plus geometry sidecars; the `visual:` section has its own `visual_hash`, so a model change never changes `scene_hash` (D17). |
-| Errors | `SceneError::{UnknownType{path}, DuplicateSimId, BadBinding{entity, path}, VersionMismatch{found, supported}}`. In Studio: shown in the validation panel, export blocked. In sim_hpc: preflight abort before any work is dispatched. |
+| Errors | `SceneError::{Parse{line, col}, BadHeader, VersionMismatch{what, found, supported}, UnknownType{entity, path}, BadValue{entity, path}, MissingSimId{entity}, DuplicateSimId{sim_id}, BadBinding{sim_id, path, reason}, BadConfig}`. In Studio: shown in the validation panel, export blocked. In sim_hpc: preflight abort before any work is dispatched. |
 | Versioning | `model_library_version` must be compatible (semver) with the binary's library; migration functions per major version live in `sim_models::migrate`. |
+| As built (step 1c) | `sim_core::Scenario` reads and writes the `scene:` section with `bevy_reflect`'s typed serde against the `SimTypeRegistry`, in the shape of Bevy's world RON (entities keyed by a file-local number, components by full type path). Bevy 0.20 moved `DynamicScene` to `bevy_world_serialization`, which pulls `bevy_app`, `bevy_asset` and render types into the kernel and `sim_hpc`; reading the section directly keeps them on `bevy_ecs` alone. Export then import is exact (f64 printed shortest round-trip). `scene_hash` is BLAKE3 (derive-key context `SABER 2026-11-02 scene hash v1`) over compact RON of `units`, `frame`, `model_library_version` and the entities in `SimId` order with components in type-path order, so comments, formatting, entity keys and component order never change it; `config` is not in it but goes, with `scene_hash`, into `sim_config_hash`; `visual_hash` (context `SABER 2026-11-02 visual hash v1`) is over the visual section's text as written. The header's own `scene_hash` is informative: it is filled on export, and `saber-cli validate` notes when it is stale. Model library compatibility uses the caret rule (`Semver::satisfies`). Geometry sidecars join `scene_hash` with step 5d. `saber-cli validate <file> [--json]` parses, checks and runs Tick 0 with the defaults; exit `0` valid, `2` invalid, `64` usage. |
 
 ### IB-02 · Sweep manifest `sweep_manifest.parquet` (saber.sweep → sim_hpc)
 
@@ -1159,7 +1198,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 
 | | |
 |---|---|
-| Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). |
+| Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). A system with a `Query` parameter fills Bevy's archetype cache on its first run after Tick 0 spawned the scenario, which allocates on Tick 1 of every fresh World, so model systems are exclusive (`fn(&mut World)`) and read lists of entities built in `SimPlugin::start`, as the kernel's own systems and `EnvironmentPlugin`'s ground-impact check do (step 1c). |
 | As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrive with the first model that needs them (step 5c). |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
@@ -1391,7 +1430,10 @@ capture and campaign crash policy as `CrashedNaN`.
 
 ### 10.3 Units & frames
 SI throughout the kernel; the Studio may display other units. Every scenario declares a world frame
-(`NED`, `ENU`, or `ECEF` for long-range ballistics). Signal metadata (`ModelMeta.signals`) carries unit
+(`NED`, `ENU`, or `ECEF` for long-range ballistics). ENU and NED have their origin at mean sea level, so
+altitude is `z` in ENU and `−z` in NED; in ECEF altitude is the WGS 84 geodetic height (Heikkinen's closed
+form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. ECEF is treated as non-rotating until step 5a
+adds Earth rotation (Coriolis and centrifugal terms). Signal metadata (`ModelMeta.signals`) carries unit
 and frame so requirement thresholds can be unit-checked at validation (IB-03).
 
 ### 10.4 Versioning

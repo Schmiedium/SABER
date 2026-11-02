@@ -3,7 +3,8 @@
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.4, §10.2, §10.4.
 //! This crate holds the `#[repr(u8)]` enums whose discriminants are written to disk and exported to
 //! Python, and the flight-recorder frame and crash reason that a `CrashDump` carries (build step 1b).
-//! Arrow schemas, `FileHeader`, `CrashDump` and upgraders land in build step 3a
+//! Step 1c adds `FileHeader`, `Semver` and the world `Frame` for the scenario file (IB-01). Arrow
+//! schemas, `CrashDump` and upgraders land in build step 3a
 //! (`docs/build-plan.md`).
 
 use serde::{Deserialize, Serialize};
@@ -246,4 +247,24 @@ mod tests {
             .collect();
         assert_eq!(adaptive.len(), 5);
     }
+}
+
+mod header;
+pub use header::{FileHeader, HeaderError, MAGIC, SCENE_FORMAT, SCENE_SCHEMA_VERSION, Semver};
+
+/// The world frame a scenario declares (subsystems §10.3). The kernel works in this frame
+/// throughout; the environment derives "down" and altitude from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Frame {
+    /// Local flat-Earth frame: x east, y north, z up, origin at mean sea level.
+    #[default]
+    #[serde(rename = "ENU")]
+    Enu,
+    /// Local flat-Earth frame: x north, y east, z down, origin at mean sea level.
+    #[serde(rename = "NED")]
+    Ned,
+    /// Earth-centred, Earth-fixed (WGS 84), for long-range ballistics. Until Earth rotation arrives
+    /// with step 5a the kernel treats it as non-rotating (no Coriolis or centrifugal terms).
+    #[serde(rename = "ECEF")]
+    Ecef,
 }

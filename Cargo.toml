@@ -35,6 +35,8 @@ rand_chacha = "=0.10.0"
 bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std", "bevy_reflect"] }
 bevy_reflect = { version = "=0.20.1", default-features = false, features = ["std", "glam"] }
 glam = { version = "0.33.12", features = ["serde"] }
+# Pure-Rust erf/erfc for the inverse-CDF samplers (Tick 0 uncertainties); pinned like the RNG.
+libm = "=0.2.16"
 # Test-only: exact rational arithmetic for the tableau order conditions.
 num-bigint = "0.4.8"
 num-rational = "0.4.2"

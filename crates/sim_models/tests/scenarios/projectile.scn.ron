@@ -1,0 +1,61 @@
+// A point-mass projectile in a flat-Earth ENU frame with standard gravity and the 1976 standard
+// atmosphere (no aerodynamics yet, so the trajectory is the vacuum parabola). The vertical muzzle
+// velocity is swept as `muzzle_vz`; the horizontal one gets a per-replicate jitter. The run ends at
+// ground impact. Used by the step 1c tests and `saber-cli validate`.
+(
+    header: (
+        magic: "SABER",
+        format: "scenario",
+        schema_version: "1.0.0",
+    ),
+    units: "SI",
+    frame: ENU,
+    model_library_version: "0.1.0",
+    config: (
+        dt: 0.01,
+        max_ticks: 3000,
+        at_max_ticks: Timeout,
+    ),
+    scene: (
+        entities: {
+            0: (
+                components: {
+                    "sim_core::body::SimId": (100),
+                    "sim_models::environment::Gravity": Flat(g: 9.80665),
+                    "sim_models::environment::Atmosphere": Ussa1976,
+                    "sim_models::environment::Wind": Calm,
+                },
+            ),
+            1: (
+                components: {
+                    "sim_core::body::SimId": (1),
+                    "sim_core::body::PointMass3": (
+                        position: (0.0, 0.0, 0.0),
+                        velocity: (70.71067811865476, 0.0, 70.71067811865476),
+                    ),
+                    "sim_core::body::MassProps": (
+                        mass: 0.0435,
+                        inertia: (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    ),
+                    "sim_models::environment::GroundImpactStop": (altitude_m: 0.0),
+                    "sim_core::parametric::ParamBindings": ([
+                        (
+                            param_key: "muzzle_vz",
+                            target: "PointMass3.velocity.z",
+                            default: 70.71067811865476,
+                            bounds: Some((10.0, 200.0)),
+                        ),
+                    ]),
+                    "sim_core::parametric::Uncertainties": ([
+                        (
+                            target: "PointMass3.velocity.x",
+                            distribution: Normal(mean: 0.0, std: 0.5),
+                            stream: "muzzle",
+                            apply: Add,
+                        ),
+                    ]),
+                },
+            ),
+        },
+    ),
+)

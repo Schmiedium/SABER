@@ -180,13 +180,13 @@ sequenceDiagram
     alt Blocking errors
         Builder-->>Analyst: Export refused, list of errors with entity links
     else Valid
-        Builder->>Registry: Serialize World to DynamicScene RON
+        Builder->>Registry: Serialize World to reflected scene RON (Scenario::from_world, IB-01)
         Builder->>Disk: Write scenarios/experiment_A.scn.ron
         Builder->>Disk: Write experiment_A.params.json (param keys, units, bounds, sim settings) (proposed)
         opt Requirements edited alongside
             Builder->>Disk: Write experiment_A.req.ron
         end
-        Builder->>Builder: Compute scene_hash = blake3(scn bytes)
+        Builder->>Builder: Compute scene_hash = blake3(canonical sim section), not the file bytes (IB-01)
         Builder-->>Analyst: Exported, scene_hash shown
     end
 ```
@@ -877,7 +877,7 @@ sequenceDiagram
         Replay-->>Analyst: Error with dump version and expected version
     end
     Replay->>SharedFS: Load .scn.ron referenced by the campaign
-    Replay->>Replay: Compare blake3(scene) with CrashDump.scene_hash
+    Replay->>Replay: Compare the scene's canonical scene_hash with CrashDump.scene_hash
     alt Hash mismatch
         Replay-->>Analyst: Warn, scene changed since the run. Continue read-only or locate original
     end
