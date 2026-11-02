@@ -134,7 +134,7 @@ The UI vocabulary maps one-to-one onto the architecture so a user can move betwe
 |---------|-------------------------|-------|
 | **Workspace** | Repo-like folder (`scenarios/`, `campaigns/`, `scripts/`) as in `Architecture.md` §2 | Opened in the Launcher. Studio state lives in `saber.workspace.ron` **(new)**. |
 | **Scenario** | `scenarios/<name>.scn.ron` (`DynamicScene`) | The system model / digital twin plus its environment. |
-| **Entity** | ECS entity with `SimId(u32)` | `SimId` is shown everywhere an entity is named so it matches Parquet `entity_a` / `entity_b`. |
+| **Entity** | ECS entity with `SimId(u32)` | `SimId` is shown everywhere an entity is named so it matches the Parquet `sim_id` / `other_sim_id` columns. |
 | **Parameter** | A `param_key` string referenced by `Bind*Param` components and spawner `*_param_key` fields | Has a name, unit, nominal value, range or distribution. |
 | **Uncertainty** | Stochastic components (`PositionUncertainty`, jitter fields) resolved from `SimRng` at Tick 0 | Per-replicate randomness, distinct from swept parameters. |
 | **Requirement** | `requirements/<name>.req.ron` (`sim_verify`) | Predicate over a metric + a probability target. |

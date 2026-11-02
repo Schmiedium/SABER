@@ -1,0 +1,107 @@
+{
+  "columns": [
+    {
+      "doc": "run",
+      "name": "run_id",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "time of impact, s",
+      "name": "t_s",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "tick it was found in",
+      "name": "tick",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "fragment",
+      "name": "fragment_sim_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "body it came from",
+      "name": "parent_sim_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "body it hit; null for the ground",
+      "name": "target_sim_id",
+      "nullable": true,
+      "type": "uint32"
+    },
+    {
+      "doc": "impact point, world frame, m",
+      "name": "point_world_x",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "impact point, world frame, m",
+      "name": "point_world_y",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "impact point, world frame, m",
+      "name": "point_world_z",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "impact point, target body frame, m",
+      "name": "point_target_body_x",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "impact point, target body frame, m",
+      "name": "point_target_body_y",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "impact point, target body frame, m",
+      "name": "point_target_body_z",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "velocity relative to the target, world frame, m/s",
+      "name": "rel_vel_x",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "velocity relative to the target, world frame, m/s",
+      "name": "rel_vel_y",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "velocity relative to the target, world frame, m/s",
+      "name": "rel_vel_z",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "fragment mass, kg",
+      "name": "fragment_mass",
+      "nullable": false,
+      "type": "float64"
+    }
+  ],
+  "dynamic": [],
+  "format": "impacts",
+  "schema_version": "1.0.0",
+  "sort_key": [
+    "run_id",
+    "tick"
+  ]
+}

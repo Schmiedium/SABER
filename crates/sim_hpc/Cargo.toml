@@ -15,7 +15,7 @@ workspace = true
 sim_core.workspace = true
 sim_models.workspace = true
 sim_verify = { workspace = true, features = ["ecs"] }
-sim_schema.workspace = true
+sim_schema = { workspace = true, features = ["io"] }
 
 [[bin]]
 name = "sim_hpc"

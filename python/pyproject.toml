@@ -8,13 +8,18 @@ version = "0.0.0"
 description = "SABER sweep generation, campaign submission, analysis, verification and reports"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-dependencies = []
+# pyarrow reads and writes the Parquet tables (saber.schema); the column definitions come from
+# saber/schemas/*.json, exported by sim_schema.
+dependencies = ["pyarrow>=15"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 include = ["saber*"]
+
+[tool.setuptools.package-data]
+saber = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

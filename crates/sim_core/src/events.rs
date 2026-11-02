@@ -8,7 +8,7 @@
 //!
 //! The buffer holds [`SimEvents::CAPACITY`] events per tick, reserved when the World is built;
 //! further events in the same tick are counted as dropped, never stored, so emitting never
-//! allocates. Writing events to `events.parquet` arrives with the event schema (step 3a).
+//! allocates. The `events.parquet` row is `sim_schema::EventRow` (step 3a); `IO.Mux` writes it with step 3b.
 
 use bevy_ecs::prelude::*;
 

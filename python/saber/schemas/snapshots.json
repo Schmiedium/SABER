@@ -1,0 +1,126 @@
+{
+  "columns": [
+    {
+      "doc": "parameter row",
+      "name": "param_set_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "run",
+      "name": "run_id",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "tick",
+      "name": "tick",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "simulation time, s",
+      "name": "t_s",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "body",
+      "name": "sim_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "position, world frame, m",
+      "name": "pos_x",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "position, world frame, m",
+      "name": "pos_y",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "position, world frame, m",
+      "name": "pos_z",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "attitude, body to world",
+      "name": "quat_w",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "attitude, body to world",
+      "name": "quat_x",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "attitude, body to world",
+      "name": "quat_y",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "attitude, body to world",
+      "name": "quat_z",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "velocity, world frame, m/s",
+      "name": "vel_x",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "velocity, world frame, m/s",
+      "name": "vel_y",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "velocity, world frame, m/s",
+      "name": "vel_z",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "body rates, body frame, rad/s",
+      "name": "angvel_x",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "body rates, body frame, rad/s",
+      "name": "angvel_y",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "body rates, body frame, rad/s",
+      "name": "angvel_z",
+      "nullable": false,
+      "type": "float64"
+    }
+  ],
+  "dynamic": [
+    {
+      "doc": "model-declared extra channel",
+      "prefix": "ch_",
+      "type": "float64"
+    }
+  ],
+  "format": "snapshots",
+  "schema_version": "1.0.0",
+  "sort_key": [
+    "param_set_id",
+    "run_id",
+    "tick"
+  ]
+}

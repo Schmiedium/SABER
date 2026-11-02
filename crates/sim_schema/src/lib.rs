@@ -3,8 +3,10 @@
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.4, §10.2, §10.4.
 //! This crate holds the `#[repr(u8)]` enums whose discriminants are written to disk and exported to
 //! Python, and the flight-recorder frame and crash reason that a `CrashDump` carries (build step 1b).
-//! Step 1c adds `FileHeader`, `Semver` and the world `Frame` for the scenario file (IB-01). Arrow
-//! schemas, `CrashDump` and upgraders land in build step 3a
+//! Step 1c adds `FileHeader`, `Semver` and the world `Frame` for the scenario file (IB-01). Step 3a
+//! adds the row types of every output table, `CrashDump`, `build_id`, and behind the `io` feature
+//! (off by default, so the kernel never builds Arrow) the Arrow schemas, Parquet reading and
+//! writing with header checks, the crash-dump frame stream and the schema export for Python
 //! (`docs/build-plan.md`).
 
 use serde::{Deserialize, Serialize};
@@ -147,17 +149,53 @@ impl IntegratorKind {
     }
 }
 
-/// Per-requirement outcome (subsystems §8.2). Numeric discriminants are fixed with the summaries
-/// schema in build step 3a.
+/// Per-requirement outcome (subsystems §8.2): the summaries' `req_* u8` and the verdicts'
+/// `verdict u8` columns. Discriminants are stable and exported to Python.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Verdict {
     /// The requirement holds.
-    Pass,
+    Pass = 0,
     /// The requirement is violated.
-    Fail,
+    Fail = 1,
     /// Undecidable, e.g. the run crashed (a numerical failure is not a system failure).
-    Inconclusive,
+    Inconclusive = 2,
 }
+
+impl Verdict {
+    /// Every verdict, in discriminant order.
+    pub const ALL: [Verdict; 3] = [Verdict::Pass, Verdict::Fail, Verdict::Inconclusive];
+}
+
+/// The on-disk `u8` of an enum, and back (summaries columns, exported to Python).
+pub trait DiskEnum: Copy + Sized + 'static {
+    /// Every value, in discriminant order (discriminant = index).
+    const VALUES: &'static [Self];
+    /// The type's name in the exported `enums.json`.
+    const NAME: &'static str;
+    /// The stored byte.
+    fn to_u8(self) -> u8;
+    /// The value of a stored byte, if valid.
+    fn from_u8(v: u8) -> Option<Self> {
+        Self::VALUES.get(v as usize).copied()
+    }
+}
+
+macro_rules! disk_enum {
+    ($t:ty, $name:literal) => {
+        impl DiskEnum for $t {
+            const VALUES: &'static [Self] = &<$t>::ALL;
+            const NAME: &'static str = $name;
+            fn to_u8(self) -> u8 {
+                self as u8
+            }
+        }
+    };
+}
+disk_enum!(SimStatus, "SimStatus");
+disk_enum!(CrashKind, "CrashKind");
+disk_enum!(IntegratorKind, "IntegratorKind");
+disk_enum!(Verdict, "Verdict");
 
 /// Why a crashed run stopped (subsystems §5.4, IB-10): written into a `CrashDump` and, as
 /// `crash_reason u8` and `crash_tick`, into the summaries.
@@ -236,6 +274,21 @@ mod tests {
     }
 
     #[test]
+    fn disk_enums_round_trip_their_bytes() {
+        fn check<T: DiskEnum + PartialEq + std::fmt::Debug>() {
+            for (i, v) in T::VALUES.iter().enumerate() {
+                assert_eq!(v.to_u8() as usize, i, "{}", T::NAME);
+                assert_eq!(T::from_u8(i as u8), Some(*v));
+            }
+            assert_eq!(T::from_u8(T::VALUES.len() as u8), None);
+        }
+        check::<SimStatus>();
+        check::<CrashKind>();
+        check::<IntegratorKind>();
+        check::<Verdict>();
+    }
+
+    #[test]
     fn integrator_kind_discriminants_are_stable() {
         for (i, k) in IntegratorKind::ALL.iter().enumerate() {
             assert_eq!(*k as u8 as usize, i);
@@ -249,7 +302,31 @@ mod tests {
     }
 }
 
+mod crash;
 mod header;
+#[cfg(feature = "io")]
+pub mod io;
+mod rows;
+pub use crash::{CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump};
+pub use rows::{CampaignVerdictRow, EventRow, ImpactRow, ManifestRow, SnapshotRow, SummaryRow};
+
+/// This crate's version, which is SABER's (`FileHeader::saber_version`).
+pub const SABER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// `FileHeader::build_id` of this binary: the SABER version, git commit, rustc version, target and
+/// profile it was built from (subsystems §5.4; stamped by `build.rs`). Bit-identical results are
+/// only promised between runs of one build (D1), so readers compare it.
+pub fn build_id() -> String {
+    format!(
+        "saber {} git {} {} target {} profile {}",
+        SABER_VERSION,
+        env!("SABER_BUILD_GIT_SHA"),
+        env!("SABER_BUILD_RUSTC"),
+        env!("SABER_BUILD_TARGET"),
+        env!("SABER_BUILD_PROFILE"),
+    )
+}
+
 pub use header::{
     FileHeader, HeaderError, MAGIC, REQ_FORMAT, REQ_SCHEMA_VERSION, SCENE_FORMAT,
     SCENE_SCHEMA_VERSION, Semver,
