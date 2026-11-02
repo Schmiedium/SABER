@@ -77,4 +77,4 @@ flowchart LR
 |---|---|
 | Scaffold (workspace, CI, design-change loop, D18 rename) | #1 |
 | 1a Integrators, clock, random streams, schema enums, `Tol` | #2 |
-| 1b ECS kernel, 6DOF and 3DOF bodies, watchdog, recorder, state hash | this step's PR |
+| 1b ECS kernel, 6DOF and 3DOF bodies, watchdog, recorder, state hash | #3 |
