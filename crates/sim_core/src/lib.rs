@@ -63,8 +63,9 @@ pub use body::{BodyState, BodyTable, FRAGMENT_BASE, MassProps, PointMass3, Rigid
 pub use checks::{CheckCatalog, CheckFactory, CheckState, CustomCheck};
 pub use clock::{RateDivider, SimClock};
 pub use contact::{
-    CONTACT, CONTACT_END, ContactConfig, ContactMaterial, ContactModel, ContactOverride,
-    ContactOverrides, ContactPoint, ContactPoints, Contacts, DampingLaw, GearPoint,
+    CONTACT, CONTACT_DEFERRED, CONTACT_END, CONTACT_PROJECTED, ContactConfig, ContactMaterial,
+    ContactModel, ContactOverride, ContactOverrides, ContactPoint, ContactPoints, Contacts,
+    DampingLaw, GearPoint, IMPACT,
 };
 pub use distribution::{Distribution, Sampler};
 pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment, WorldFrame};

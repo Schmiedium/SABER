@@ -1,4 +1,5 @@
-//! `ContactSolver`: contact detection and compliant response (IB-19, physics §9, build step 5d).
+//! `ContactSolver`: contact detection, compliant and impulsive response (IB-19, physics §9, build
+//! step 5d).
 //!
 //! Every entity with a [`CollisionShape`] takes part: on a body the shape moves with it, on an entity
 //! without a body it is a static collider. Each tick the solver runs a broad phase on swept bounding
@@ -31,12 +32,18 @@
 //! otherwise the colliders' [`ContactMaterial`]s, the one if only one has a material, combined if
 //! both do (stiffness and damping in series, friction the geometric mean, the larger slip speed;
 //! both must have the same exponent and damping law); a pair with no material, or with an
-//! `EventOnly` material, only reports contact. `Impulsive` contact arrives with part 2 of step 5d.
+//! `EventOnly` material, only reports contact. A pair is `Impulsive` only when every material it
+//! has is; two impulsive materials take the geometric mean of their restitution and friction and
+//! the larger rest speed. `Impulsive` pairs are rigid: their impacts are located inside the tick and
+//! resolved with impulses (see `impact`), and below their rest speed they rest on their compliance.
 //!
 //! At the end of each tick (`SimSet::Constraints`) the solver evaluates the contacts once more at the
 //! tick's final state into [`Contacts`], and emits `contact` (value: approach speed, m/s) when a
 //! pair or gear point starts touching and `contact_end` (value: the largest total normal force seen
-//! at a tick end, N) when it stops, with both `SimId`s and the deepest point.
+//! at a tick end, N) when it stops, with both `SimId`s and the deepest point. Then it pushes
+//! overlapping `Impulsive` pairs apart (at most `contact.max_projection` per tick, logged as
+//! `contact_projected`) and looks for `EventOnly` pairs that met and parted inside the tick along
+//! the interpolated motion (logged as `contact` with the time of the touch).
 
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
@@ -54,10 +61,20 @@ use crate::geometry::{CollisionShape, Hit, Narrow, Owner, Part, Placement};
 use crate::parametric::ResolveReport;
 use crate::watchdog::RunStatus;
 
+mod impact;
+
+pub(crate) use impact::{ImpactKind, Probe, energy_grew};
+
 /// `contact`: a pair or gear point started touching.
 pub const CONTACT: &str = "contact";
 /// `contact_end`: it stopped.
 pub const CONTACT_END: &str = "contact_end";
+/// `impact`: an `Impulsive` pair collided (value: approach speed, m/s; with the located time).
+pub const IMPACT: &str = "impact";
+/// `contact_deferred`: an impact past `max_events_per_tick`, resolved at the end of the tick.
+pub const CONTACT_DEFERRED: &str = "contact_deferred";
+/// `contact_projected`: an overlapping `Impulsive` pair was pushed apart (value: distance, m).
+pub const CONTACT_PROJECTED: &str = "contact_projected";
 
 /// Standard gravity for the Tick-0 stiffness check, m/s².
 const G0: f64 = 9.806_65;
@@ -68,7 +85,8 @@ pub enum ContactModel {
     /// Spring–damper normal force and regularised friction inside every stage.
     #[default]
     Compliant,
-    /// Rigid impact with restitution at the located time of impact (step 5d, part 2).
+    /// Rigid impact with restitution at the located time of impact; rests on its compliance below
+    /// `rest_speed`.
     Impulsive,
     /// Detection and events only.
     EventOnly,
@@ -122,7 +140,7 @@ pub struct ContactMaterial {
     /// `v_ε`, m/s: the tangential speed at which friction reaches 76 % of `μ F_n`.
     #[reflect(default = "default_slip")]
     pub slip_speed: f64,
-    /// Newton restitution `e` (`Impulsive`, step 5d part 2).
+    /// Newton restitution `e` (`Impulsive`).
     #[reflect(default)]
     pub restitution: f64,
     /// Below this approach speed an `Impulsive` pair rests on its compliant parameters, m/s.
@@ -150,14 +168,12 @@ impl ContactMaterial {
     /// Check the values.
     pub fn validate(&self) -> Result<(), String> {
         let nonneg = |v: f64| v.is_finite() && v >= 0.0;
-        if self.model == ContactModel::Impulsive {
-            return Err("Impulsive contact arrives with part 2 of build step 5d".into());
-        }
-        if self.model == ContactModel::Compliant
+        if self.model != ContactModel::EventOnly
             && !(self.stiffness.is_finite() && self.stiffness > 0.0)
         {
             return Err(format!(
-                "a compliant material needs a finite stiffness > 0, not {}",
+                "a compliant or impulsive material needs a finite stiffness > 0 (impulsive pairs \
+                 rest on it), not {}",
                 self.stiffness
             ));
         }
@@ -265,6 +281,14 @@ fn default_max_pairs() -> u32 {
     1024
 }
 
+fn default_max_events() -> u32 {
+    4
+}
+
+fn default_max_projection() -> f64 {
+    1e-3
+}
+
 /// Contact settings in the run configuration (`config.contact`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -273,12 +297,21 @@ pub struct ContactConfig {
     /// `CrashedSolver(ContactCapacity)`.
     #[serde(default = "default_max_pairs")]
     pub max_contact_pairs: u32,
+    /// Impacts located inside one tick; later ones are resolved at the tick's end and logged as
+    /// `contact_deferred` (physics §9.4).
+    #[serde(default = "default_max_events")]
+    pub max_events_per_tick: u32,
+    /// The most an overlapping `Impulsive` pair is pushed apart per tick, m.
+    #[serde(default = "default_max_projection")]
+    pub max_projection: f64,
 }
 
 impl Default for ContactConfig {
     fn default() -> Self {
         Self {
             max_contact_pairs: default_max_pairs(),
+            max_events_per_tick: default_max_events(),
+            max_projection: default_max_projection(),
         }
     }
 }
@@ -326,15 +359,16 @@ struct Law {
 }
 
 impl Law {
-    fn of(m: &ContactMaterial) -> Option<Law> {
-        (m.model == ContactModel::Compliant).then_some(Law {
+    /// A material's compliance (for an `Impulsive` material, its resting compliance).
+    fn of(m: &ContactMaterial) -> Law {
+        Law {
             k: m.stiffness,
             n: m.exponent,
             c: m.damping,
             linear: m.damping_law == DampingLaw::Linear,
             mu: m.friction,
             slip: m.slip_speed,
-        })
+        }
     }
 
     /// Normal force for overlap `d` closing at `d_dot`.
@@ -349,20 +383,66 @@ impl Law {
     }
 }
 
-/// Combine two materials into a pair's law (`None`: events only).
-fn combine(
-    a: Option<&ContactMaterial>,
-    b: Option<&ContactMaterial>,
-) -> Result<Option<Law>, String> {
-    let (a, b) = match (a, b) {
-        (None, None) => return Ok(None),
-        (Some(m), None) | (None, Some(m)) => return Ok(Law::of(m)),
-        (Some(a), Some(b)) => (a, b),
+/// The rigid-impact law of an `Impulsive` pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ImpulseLaw {
+    /// Newton restitution.
+    e: f64,
+    /// Coulomb friction coefficient of the impulse.
+    mu: f64,
+    /// Below this approach speed the pair rests on its compliance instead, m/s.
+    rest: f64,
+}
+
+/// What a pair does: a compliant law (always, or for an `Impulsive` pair only while it rests) and
+/// an impact law. Neither: events only.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PairLaw {
+    law: Option<Law>,
+    impulse: Option<ImpulseLaw>,
+}
+
+/// Resolve a pair's law from its two materials (physics §9.2: the more specific model wins,
+/// `EventOnly` over `Compliant` over `Impulsive`). An override is passed as `a` alone.
+fn combine(a: Option<&ContactMaterial>, b: Option<&ContactMaterial>) -> Result<PairLaw, String> {
+    let events_only = PairLaw::default();
+    let (law, models) = match (a, b) {
+        (None, None) => return Ok(events_only),
+        (Some(m), None) | (None, Some(m)) => (Law::of(m), [Some(m), None]),
+        (Some(a), Some(b)) => {
+            if a.model == ContactModel::EventOnly || b.model == ContactModel::EventOnly {
+                return Ok(events_only);
+            }
+            (combine_laws(a, b)?, [Some(a), Some(b)])
+        }
     };
-    if a.model == ContactModel::EventOnly || b.model == ContactModel::EventOnly {
-        return Ok(None);
+    let present = models.iter().flatten();
+    if present.clone().any(|m| m.model == ContactModel::EventOnly) {
+        return Ok(events_only);
     }
-    let (la, lb) = (Law::of(a).unwrap(), Law::of(b).unwrap());
+    let impulse = if present.clone().all(|m| m.model == ContactModel::Impulsive) {
+        let mean = |f: fn(&ContactMaterial) -> f64| match models {
+            [Some(a), Some(b)] => (f(a) * f(b)).sqrt(),
+            [Some(m), _] | [_, Some(m)] => f(m),
+            [None, None] => 0.0,
+        };
+        Some(ImpulseLaw {
+            e: mean(|m| m.restitution),
+            mu: mean(|m| m.friction),
+            rest: present.map(|m| m.rest_speed).fold(0.0, f64::max),
+        })
+    } else {
+        None
+    };
+    Ok(PairLaw {
+        law: Some(law),
+        impulse,
+    })
+}
+
+/// Two materials' compliance in series.
+fn combine_laws(a: &ContactMaterial, b: &ContactMaterial) -> Result<Law, String> {
+    let (la, lb) = (Law::of(a), Law::of(b));
     if la.n != lb.n {
         return Err(format!(
             "materials with exponents {} and {} cannot be combined; give the pair a \
@@ -378,14 +458,14 @@ fn combine(
         );
     }
     let series = |x: f64, y: f64| if x + y > 0.0 { x * y / (x + y) } else { 0.0 };
-    Ok(Some(Law {
+    Ok(Law {
         k: series(la.k, lb.k),
         n: la.n,
         c: series(la.c, lb.c),
         linear: la.linear,
         mu: (la.mu * lb.mu).sqrt(),
         slip: la.slip.max(lb.slip),
-    }))
+    })
 }
 
 struct Collider {
@@ -416,7 +496,25 @@ struct Gear {
 struct Pair {
     a: usize,
     b: usize,
-    law: Option<Law>,
+    rule: PairLaw,
+    /// An `Impulsive` pair resting on its compliance (until it separates).
+    resting: bool,
+}
+
+impl Pair {
+    /// The compliant law acting now: a `Compliant` pair's, or a resting `Impulsive` pair's.
+    fn law(&self) -> Option<Law> {
+        if self.rule.impulse.is_some() && !self.resting {
+            None
+        } else {
+            self.rule.law
+        }
+    }
+
+    /// An `Impulsive` pair that is not resting: its impacts are located.
+    fn impacts(&self) -> bool {
+        self.rule.impulse.is_some() && !self.resting
+    }
 }
 
 /// What identifies a contact from tick to tick: a shape pair `(0, a, b)` or a gear point on a
@@ -447,6 +545,13 @@ pub(crate) struct ContactSolver {
     active: Vec<Active>,
     next_active: Vec<Active>,
     overflowed: bool,
+    /// `Impulsive` pairs (collider indices) resting on their compliance.
+    resting: Vec<(usize, usize)>,
+    /// The bodies at the start of the tick (for swept `EventOnly` checks), and whether they are set.
+    start_states: Vec<BodyState>,
+    started_tick: bool,
+    /// Impact location and resolution (`impact.rs`).
+    impact: impact::Buffers,
 }
 
 impl ContactSolver {
@@ -572,9 +677,10 @@ impl ContactSolver {
                         ));
                     }
                     g.material.validate().map_err(bad)?;
-                    let Some(law) = Law::of(&g.material) else {
+                    if g.material.model != ContactModel::Compliant {
                         return Err(bad("gear points are compliant".into()));
-                    };
+                    }
+                    let law = Law::of(&g.material);
                     if !(g.brake.is_finite()
                         && g.steer.is_finite()
                         && g.rolling_resistance.is_finite()
@@ -628,9 +734,13 @@ impl ContactSolver {
         self.pairs = Vec::with_capacity(cap);
         self.gear_targets = Vec::with_capacity(cap);
         self.states = vec![BodyState::ZERO; bodies.len()];
+        self.start_states = vec![BodyState::ZERO; bodies.len()];
+        self.started_tick = false;
         // Touching shape pairs plus touching gear points.
         self.active = Vec::with_capacity(2 * cap);
         self.next_active = Vec::with_capacity(2 * cap);
+        self.resting = Vec::with_capacity(cap);
+        self.impact.setup(bodies.len(), cap);
         let parts: Vec<&Part> = self.colliders.iter().flat_map(|c| c.parts.iter()).collect();
         self.narrow.warm_up(&parts);
         let points_cap = 8 * cap + self.gears.len();
@@ -668,7 +778,7 @@ impl ContactSolver {
             // (stiffness k · points, exponent, damping, linear) per spring set on this body.
             let mut sets: Vec<(f64, f64, f64, bool, String)> = Vec::new();
             if let Some(c) = self.body_collider[slot].map(|k| &self.colliders[k])
-                && let Some(m) = c.material.filter(|m| m.model == ContactModel::Compliant)
+                && let Some(m) = c.material.filter(|m| m.model != ContactModel::EventOnly)
             {
                 let points: u32 = c.parts.iter().map(Part::plane_points).sum();
                 sets.push((
@@ -779,7 +889,8 @@ impl ContactSolver {
                     self.pairs.push(Pair {
                         a: i.min(j),
                         b: i.max(j),
-                        law: None,
+                        rule: PairLaw::default(),
+                        resting: false,
                     });
                 }
             }
@@ -802,7 +913,8 @@ impl ContactSolver {
                     self.pairs.push(Pair {
                         a: i.min(j),
                         b: i.max(j),
-                        law: None,
+                        rule: PairLaw::default(),
+                        resting: false,
                     });
                 }
             }
@@ -820,10 +932,13 @@ impl ContactSolver {
                 .find(|(o, _)| *o == cb.sim_id.0)
                 .or_else(|| cb.overrides.iter().find(|(o, _)| *o == ca.sim_id.0))
                 .map(|(_, m)| *m);
-            p.law = match over {
-                Some(m) => Law::of(&m),
-                None => combine(ca.material.as_ref(), cb.material.as_ref()).unwrap_or(None),
-            };
+            p.rule = match over {
+                Some(m) => combine(Some(&m), None),
+                None => combine(ca.material.as_ref(), cb.material.as_ref()),
+            }
+            .unwrap_or_default();
+            let key = (p.a, p.b);
+            p.resting = self.resting.contains(&key);
         }
         // Gear rays against static colliders near their body.
         for (g, gear) in self.gears.iter().enumerate() {
@@ -858,6 +973,8 @@ impl ContactSolver {
             return;
         }
         read_states(world, bodies, &mut self.states);
+        self.start_states.copy_from_slice(&self.states);
+        self.started_tick = true;
         let states = std::mem::take(&mut self.states);
         let ok = self.broad(&states, dt);
         self.states = states;
@@ -933,11 +1050,11 @@ impl ContactSolver {
             let a_slot = ca.body.expect("a is a body");
             for part_a in &ca.parts {
                 for part_b in &cb.parts {
-                    narrow.contacts(part_a, &pa, part_b, &pb, &mut |hit: Hit| {
+                    narrow.contacts(part_a, &pa, part_b, &pb, 0.0, &mut |hit: Hit| {
                         let rel =
                             point_velocity(ca.body, hit.point) - point_velocity(cb.body, hit.point);
                         let approach = -rel.dot(hit.normal);
-                        let (normal_force, friction) = match &pair.law {
+                        let (normal_force, friction) = match &pair.law() {
                             Some(law) => {
                                 let fn_ = law.normal(hit.depth, approach);
                                 let vt = rel + hit.normal * approach;
@@ -1041,6 +1158,7 @@ impl ContactSolver {
             return;
         }
         read_states(world, bodies, &mut self.states);
+        self.keep_swept();
         let states = std::mem::take(&mut self.states);
         let ok = self.broad(&states, 0.0);
         let frame_rotation = world.resource::<SimEnvironment>().0.frame_rotation();
@@ -1068,6 +1186,7 @@ impl ContactSolver {
                     sim_id: Some(deepest.a),
                     other: Some(deepest.b),
                     pos: Some(deepest.point),
+                    time: None,
                     value: deepest.approach,
                 });
             }
@@ -1119,14 +1238,19 @@ impl ContactSolver {
                     sim_id: Some(sim_id),
                     other: Some(other),
                     pos: None,
+                    time: None,
                     value: a.peak,
                 });
             }
         }
+        // Resting `Impulsive` pairs that no longer overlap have separated.
+        self.resting
+            .retain(|&(a, b)| next.iter().any(|n| n.key == (0, a as u32, b as u32)));
         world.resource_mut::<Contacts>().points = contacts;
         self.next_active = active;
         self.active = next;
         self.states = states;
+        self.after_tick(world, bodies, frame_rotation);
         if overflow && !self.overflowed {
             self.overflowed = true;
             let tick = world.resource::<SimClock>().tick;

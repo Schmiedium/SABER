@@ -160,7 +160,8 @@ impl Default for TelemetryConfig {
 pub struct LoggedEvent {
     /// The tick it was emitted in.
     pub tick: u64,
-    /// Simulation time at the end of that tick, s.
+    /// When it happened, s: the event's own time when it has one (a located impact), else the end
+    /// of the tick.
     pub t_s: f64,
     /// The declared event name.
     pub name: &'static str,
@@ -286,7 +287,7 @@ pub(crate) fn log_tick(world: &mut World) {
             });
             log.events.push(LoggedEvent {
                 tick: clock.tick,
-                t_s: clock.time(),
+                t_s: e.time.unwrap_or_else(|| clock.time()),
                 name: e.name,
                 sim_id: e.sim_id,
                 other: e.other,

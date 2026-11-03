@@ -15,12 +15,13 @@
 //! - **Otherwise** through Parry, one point per pair of parts: the deepest point, from GJK and,
 //!   when the shapes overlap, EPA. Height fields and triangle meshes are searched triangle by
 //!   triangle under the other part's bounding box, keeping the deepest. The EPA buffers are the
-//!   caller's ([`Narrow`]), reused from tick to tick, because Parry's own contact query builds a
+//!   caller's (`Narrow`), reused from tick to tick, because Parry's own contact query builds a
 //!   new EPA, which allocates, whenever two polyhedra overlap.
 //!
 //! Every query works in f64 on poses built from the body's `DVec3` position and `DQuat` attitude.
 
 use glam::{DQuat, DVec3};
+use parry3d_f64::bounding_volume::BoundingVolume;
 use parry3d_f64::math::{Pose as PPose, Vector};
 use parry3d_f64::query::epa::EPA;
 use parry3d_f64::query::gjk::{self, CsoPoint, GJKResult, VoronoiSimplex};
@@ -431,14 +432,15 @@ impl Placement {
     };
 }
 
-/// One contact point between a part of `A` and a part of `B`.
+/// One contact point (or, within a margin, one near point) between a part of `A` and a part of `B`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Hit {
     /// Midway between the two surfaces, world frame, m.
     pub(crate) point: DVec3,
     /// Unit normal from `B` into `A`, world frame.
     pub(crate) normal: DVec3,
-    /// Overlap along the normal, m (> 0).
+    /// Overlap along the normal, m: positive when the parts overlap, negative for a gap (the
+    /// signed distance, negated).
     pub(crate) depth: f64,
 }
 
@@ -460,30 +462,54 @@ impl Narrow {
                     position: DVec3::new(1e-3, 2e-3, 3e-3) * part.reach.max(1e-3),
                     rotation: DQuat::from_rotation_z(0.3),
                 };
-                let _ = self.pair(part, &here, part, &near);
+                let _ = self.pair(part, &here, part, &near, 0.0);
             }
+        }
+        // Two overlapping balls never converge (the difference is curved), so the EPA runs its
+        // full 100 iterations: about the most its buffers ever grow.
+        let ball = Ball::new(1.0);
+        let pos12 = PPose::from_translation(Vector::new(0.3, 0.2, 0.1));
+        let mut simplex = VoronoiSimplex::new();
+        simplex.reset(CsoPoint::from_shapes(&pos12, &ball, &ball, Vector::X));
+        if let GJKResult::Intersection =
+            gjk::closest_points(&pos12, &ball, &ball, 0.0, true, &mut simplex)
+        {
+            let _ = self
+                .epa
+                .get_or_insert_with(EPA::new)
+                .closest_points(&pos12, &ball, &ball, &simplex);
         }
     }
 
     /// Contact points of part `a` (on owner placement `pa`) against part `b` (on `pb`), passed to
-    /// `out` one by one. `b` may be a half-space; `a` may not.
+    /// `out` one by one: the points where the parts overlap, and with `margin > 0` also the points
+    /// closer than `margin` (with a negative depth). `b` may be a half-space; `a` may not.
     pub(crate) fn contacts(
         &mut self,
         a: &Part,
         pa: &Placement,
         b: &Part,
         pb: &Placement,
+        margin: f64,
         out: &mut impl FnMut(Hit),
     ) {
         if let Some((p0, n)) = b.plane(pb) {
-            plane_points(a, &a.placed(pa), p0, n, out);
-        } else if let Some(hit) = self.pair(a, pa, b, pb) {
+            plane_points(a, &a.placed(pa), p0, n, margin, out);
+        } else if let Some(hit) = self.pair(a, pa, b, pb, margin) {
             out(hit);
         }
     }
 
-    /// The deepest point between two Parry parts.
-    fn pair(&mut self, a: &Part, pa: &Placement, b: &Part, pb: &Placement) -> Option<Hit> {
+    /// The deepest (or, apart, the closest) point between two Parry parts, if they are closer than
+    /// `margin`.
+    fn pair(
+        &mut self,
+        a: &Part,
+        pa: &Placement,
+        b: &Part,
+        pb: &Placement,
+        margin: f64,
+    ) -> Option<Hit> {
         let sa = a.parry()?;
         let sb = b.parry()?;
         let pose_a = a.parry_pose(&a.placed(pa));
@@ -491,7 +517,7 @@ impl Narrow {
         let mut best: Option<Contact> = None;
         let mut keep = |c: Option<Contact>| {
             if let Some(c) = c
-                && c.dist < 0.0
+                && c.dist < margin
                 && best.is_none_or(|b| c.dist < b.dist)
             {
                 best = Some(c);
@@ -499,19 +525,19 @@ impl Narrow {
         };
         match &b.shape {
             PartShape::HeightField(hf) => {
-                let aabb = sa.compute_aabb(&pose_b.inv_mul(&pose_a));
+                let aabb = sa.compute_aabb(&pose_b.inv_mul(&pose_a)).loosened(margin);
                 hf.map_elements_in_local_aabb(&aabb, &mut |_, tri: &Triangle| {
-                    keep(self.convex(&pose_a, sa, &pose_b, tri));
+                    keep(self.convex(&pose_a, sa, &pose_b, tri, margin));
                 });
             }
             PartShape::TriMesh(mesh) => {
-                let aabb = sa.compute_aabb(&pose_b.inv_mul(&pose_a));
+                let aabb = sa.compute_aabb(&pose_b.inv_mul(&pose_a)).loosened(margin);
                 for i in mesh.bvh().intersect_aabb(&aabb) {
                     let tri = mesh.triangle(i);
-                    keep(self.convex(&pose_a, sa, &pose_b, &tri));
+                    keep(self.convex(&pose_a, sa, &pose_b, &tri, margin));
                 }
             }
-            _ => keep(self.convex(&pose_a, sa, &pose_b, sb)),
+            _ => keep(self.convex(&pose_a, sa, &pose_b, sb, margin)),
         }
         best.map(|c| Hit {
             point: (c.point1 + c.point2) * 0.5,
@@ -520,17 +546,18 @@ impl Narrow {
         })
     }
 
-    /// Contact between two convex shapes, world frame, or `None` when apart.
+    /// Contact between two convex shapes, world frame, or `None` when further apart than `margin`.
     fn convex(
         &mut self,
         pos1: &PPose,
         s1: &dyn Shape,
         pos2: &PPose,
         s2: &dyn Shape,
+        margin: f64,
     ) -> Option<Contact> {
         if s1.as_ball().is_some() || s2.as_ball().is_some() {
             // Parry's ball paths project a point and never allocate.
-            return parry3d_f64::query::contact(pos1, s1, pos2, s2, 0.0)
+            return parry3d_f64::query::contact(pos1, s1, pos2, s2, margin)
                 .ok()
                 .flatten();
         }
@@ -540,7 +567,7 @@ impl Narrow {
         let dir = pos12.translation.try_normalize().unwrap_or(Vector::X);
         let mut simplex = VoronoiSimplex::new();
         simplex.reset(CsoPoint::from_shapes(&pos12, g1, g2, dir));
-        let (p1, p2_1, n1) = match gjk::closest_points(&pos12, g1, g2, 0.0, true, &mut simplex) {
+        let (p1, p2_1, n1) = match gjk::closest_points(&pos12, g1, g2, margin, true, &mut simplex) {
             GJKResult::ClosestPoints(p1, p2_1, n1) => (p1, p2_1, n1),
             GJKResult::Intersection => self
                 .epa
@@ -592,11 +619,18 @@ impl Narrow {
 }
 
 /// Contact points of a convex part (world placement `p`) against the plane through `p0` with
-/// outward unit normal `n`.
-fn plane_points(a: &Part, p: &Placement, p0: DVec3, n: DVec3, out: &mut impl FnMut(Hit)) {
+/// outward unit normal `n`: every point closer than `margin` (below the plane for `margin = 0`).
+fn plane_points(
+    a: &Part,
+    p: &Placement,
+    p0: DVec3,
+    n: DVec3,
+    margin: f64,
+    out: &mut impl FnMut(Hit),
+) {
     let sphere = |centre: DVec3, radius: f64, out: &mut dyn FnMut(Hit)| {
         let d = (centre - p0).dot(n) - radius;
-        if d < 0.0 {
+        if d < margin {
             out(Hit {
                 point: centre - n * (radius + 0.5 * d),
                 normal: n,
@@ -606,7 +640,7 @@ fn plane_points(a: &Part, p: &Placement, p0: DVec3, n: DVec3, out: &mut impl FnM
     };
     let vertex = |v: DVec3, out: &mut dyn FnMut(Hit)| {
         let d = (v - p0).dot(n);
-        if d < 0.0 {
+        if d < margin {
             out(Hit {
                 point: v - n * (0.5 * d),
                 normal: n,

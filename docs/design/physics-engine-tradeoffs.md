@@ -10,6 +10,8 @@ semi-implicit Euler uses state classes, and the interface as built (§10.7). Den
 contact step.
 v1.2 (2026-11-02, build step 1b): §4.3 records the kernel's rigid-body dynamics and force-model interface
 as built; §10.2 names the body behind a `SubstepLimit`; §10.3 gives the packed state layout.
+v1.3 (2026-11-03, build step 5d): §9.7a and §9.7b record geometry, compliant and impulsive contact as
+built; §10.4 records that impact location re-integrates the bodies instead of using dense output.
 Companion to `subsystems-and-interfaces.md` (§5.1 `sim_core`, §5.2 `sim_models`, §6 tick pipeline,
 IB-16 fragmentation, G8) and `flight-dynamics-sources.md`.
 
@@ -567,9 +569,9 @@ exactly and is part of `build_id`.
 ### 9.7a As built (step 5d, part 1)
 
 `sim_core::geometry` and `sim_core::contact` (build step 5d-1) implement §9.2–§9.6 for `Compliant` and
-`EventOnly` pairs. `Impulsive` contact, event location, swept `EventOnly` casts, penetration recovery and
-the contact watchdog checks are step 5d-2; until then a material with `model: Impulsive` is a
-`SetupError`. Differences from the sketch above:
+`EventOnly` pairs. `Impulsive` contact, event location, swept `EventOnly` checks and penetration recovery
+followed in step 5d-2 (§9.7b); range sensors and the persistent-penetration watchdog are step 5d-3.
+Differences from the sketch above:
 
 - **Shapes.** `CollisionShape { parts: Vec<ShapePart> }`, each part a `ShapeDesc` (ball, capsule,
   cuboid, cylinder, convex hull; static only: half-space, height field, triangle mesh) at a `Pose`, so a
@@ -621,6 +623,73 @@ the contact watchdog checks are step 5d-2; until then a material with `model: Im
   BVH iterator, whose stack is inline for the mesh depths tested. The allocation test covers every shape
   on a half-space, a height field and a mesh, overlapping boxes, gear points and contacts starting and
   ending, under RK4 and adaptive Dormand–Prince (O-P3).
+
+### 9.7b As built (step 5d, part 2)
+
+`sim_core::contact::impact` adds `Impulsive` contact. Differences from §9.4 and the additions:
+
+- **Which pairs.** A pair is `Impulsive` only when every material it has is (`EventOnly` wins over
+  `Compliant`, which wins over `Impulsive`). Two impulsive materials take the geometric mean of their
+  restitution and friction and the larger rest speed; their stiffness and damping (in series) are the
+  compliance the pair rests on, and get the Tick-0 stiffness check like a `Compliant` pair's.
+- **Locating the impact, without dense output.** `Dynamics` integrates the whole tick first. The
+  candidates are the `Impulsive` near pairs overlapping at the end, plus those whose gaps at the two ends
+  add up to less than the distance their surfaces could close in the interval (a speed bound: 1.1 times
+  the relative centre speed plus each body's spin times its reach, plus the change of the relative
+  velocity across the interval), which catches a fast body passing through a thin one. A pair touching
+  and moving apart at the start of the interval (it has just bounced) is not a candidate until the next
+  tick; to come back inside the same tick it would have to part slower than about `a dt / 2`, far under
+  any useful rest speed, and if it does it starts the next tick touching and approaching and is resolved
+  there. For each candidate the search probes times; each probe re-integrates **every body** from the
+  start of the interval to that time (the adaptive controller's memory restored, so every probe and the
+  final re-integration take the same steps), and reads the pair's gap, its rate and the contact normal.
+  While the normals at the two ends of the search agree, a cubic through the two ends and their rates
+  models the gap: if it stays open the pair does not touch, else the next probe is its first root. When
+  they disagree (passing through a thin body) the ends advance conservatively by turns (no contact
+  within `gap / speed` of a sample). Once a probe finds the surfaces overlapping, the Illinois method
+  brackets the root. `t*` is taken on the open side, within 1 nm or 10⁻⁹ of the interval, so bodies never
+  overlap after an impact. Every body is then re-integrated to `t*`, the impulses applied, and the rest of
+  the tick integrated from there. Typical cost: two to five probes per impact; a body through a thin
+  plate takes a few dozen. Because the impact restarts integration at `t*` with the selected method, the
+  method's order holds on both sides of the impact and no dense output or Hermite interpolation of the
+  step is needed (§10.4); Parry's `cast_shapes_nonlinear` is not used either, since bodies under forces do
+  not move with constant velocities.
+- **Impulses.** All `Impulsive` pairs within 1 µm of touching and approaching at `t*` are resolved
+  together. Their points (several against a half-space, so a box landing flat has four) get 32 fixed
+  sequential-impulse sweeps in pair order, with accumulated, clamped impulses: the normal impulse never
+  pulls and drives each point's separating speed to `e` times its approach speed (Newton); the friction
+  impulse stops sliding inside the cone `|J_t| ≤ μ J_n`. Newton's rule with friction can add energy (Kane
+  and Levinson's paradox; the tumbling-box test meets it), so when kinetic energy grows the impact is
+  solved again with Poisson's rule (a plastic impact, then `e` times each point's compression impulse),
+  and if that also adds energy, as a plastic impact. Energy still growing after that is a solver fault
+  and ends the run `CrashedEnergy` (`CrashKind::EnergyBound`). Each resolved pair logs `impact` (value:
+  approach speed, with the other entity, the point and the time `t*`).
+- **Resting.** A pair approaching slower than its `rest_speed` (default 0.05 m/s) gets no impulse and
+  rests on its compliance from then on, with forces in every stage like a `Compliant` pair, until it is no
+  longer touching at a tick end. A bouncing ball therefore ends at the static deflection `m g / k`.
+- **Deferred impacts.** `config.contact.max_events_per_tick` (default 4) bounds the impacts located in one
+  tick. Past it, the remaining impacts are resolved at the tick's end, where the bodies overlap, and logged
+  as `contact_deferred` (value: approach speed). Zero resolves every impact at the tick's end.
+- **Penetration recovery.** In `SimSet::Constraints`, after `Contacts` is filled, an `Impulsive` pair
+  still overlapping (a deferred impact, or an overlap in the scenario) is pushed apart along its normal by
+  at most `config.contact.max_projection` per tick (default 1 mm; 0 turns it off), split by inverse mass,
+  positions only, and logged as `contact_projected` (value: the distance). Not at Tick 0, so the recorded
+  Tick-0 state is the scenario's. `Contacts` shows the overlap before the push.
+- **Swept `EventOnly` checks.** The tick's event-only near pairs (from the swept broad phase) that are
+  apart at both ends of the tick are searched along the motion interpolated between the tick's start and
+  end (positions and velocities linear, attitudes by slerp) with the same search, and log `contact` at the
+  time of the first touch (value: approach speed). Such a touch has no `contact_end`.
+- **Events and configuration.** `SimEvent` gains `time: Option<f64>`, used by the event log's `t_s`
+  instead of the tick's end. `max_events_per_tick` and `max_projection` join `sim_config_hash`;
+  `max_projection` must be finite and ≥ 0.
+- **Not built here.** The persistent-penetration watchdog (`max_penetration` for N ticks) and range
+  sensors are step 5d-3. Known limits: a grazing touch shorter than about 10⁻⁶ of the interval can be
+  missed, and when a corner rolls over an edge (the closest feature changes) the cubic model can miss a
+  shallow graze; both leave at most a sub-tick overlap that the next tick resolves or projects.
+- **Allocation.** Every buffer is sized at Tick 0; the reused EPA is warmed up with two overlapping balls,
+  which run its full 100 iterations, so later overlaps never grow it. The allocation test drops tumbling
+  boxes and balls onto the ground and each other, defers an impact, projects an overlap, and fires fast
+  balls at a thin plate (one rigid, one event-only), under RK4 and adaptive Dormand–Prince.
 
 ### 9.8 Effort
 
@@ -742,12 +811,13 @@ flowchart LR
 - **Compliant contact.** Contact forces are part of the right-hand side, so they are evaluated at every
   stage of whatever method is selected. In adaptive mode the step shrinks during touchdown and grows again
   in free flight, which is exactly where the accuracy is needed.
-- **Impulsive contact.** Event location (§9.4) uses the method's **dense output** where it has one
-  (`DormandPrince54`, `DormandPrince853`, `BogackiShampine32`) to evaluate positions inside the step for
-  the time-of-impact search, then restarts the step at `t*`. For methods without dense output the kernel
-  uses cubic Hermite interpolation from the step's end points and derivatives. After an impulse the FSAL
-  stage is discarded (the derivative jumped). Dense output is built with contact in build step 5d; the
-  integrators of step 1a do not have it yet.
+- **Impulsive contact.** ~~Event location (§9.4) uses the method's dense output where it has one, or
+  cubic Hermite interpolation, to evaluate positions inside the step.~~ As built (step 5d-2, §9.7b): the
+  time-of-impact search re-integrates every body with the selected method from the start of the
+  interval to each probed time, and integration restarts at `t*` after the impulses, so every method keeps
+  its order on both sides of an impact and no dense output is needed. The adaptive controller's memory is
+  restored before each re-integration. The FSAL stage is discarded at the start of every integration
+  (it already was at every tick start).
 
 ### 10.5 Determinism and allocation
 

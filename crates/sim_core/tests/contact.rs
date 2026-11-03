@@ -1139,7 +1139,7 @@ fn invalid_contact_setups_are_setup_errors() {
             }),
         ),
         (
-            "part 2 of build step 5d",
+            "restitution must be in [0, 1]",
             Box::new(move |sim| {
                 sim.spawn(
                     SimId(1),
@@ -1148,6 +1148,7 @@ fn invalid_contact_setups_are_setup_errors() {
                         ball(0.1),
                         ContactMaterial {
                             model: ContactModel::Impulsive,
+                            restitution: 1.5,
                             ..spring(1e3, 0.0)
                         },
                     ),
