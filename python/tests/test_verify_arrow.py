@@ -39,6 +39,8 @@ RUNS = {
     6: (2, 160.0, "Timeout", 1305.0, NAN, (I, I, I, I)),
     7: (2, 160.0, "CrashedNaN", NAN, NAN, (I, I, I, I)),
     8: (2, 160.0, "SetupError", NAN, NAN, (I, I, I, I)),
+    # Only ever written under a .tmp name, so no reader may count it.
+    9: (2, 160.0, "Terminated", 1305.0, 32.6, (P, P, F, F)),
 }
 
 
