@@ -23,6 +23,9 @@ toml.workspace = true
 bincode.workspace = true
 mpi = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook.workspace = true
+
 [features]
 # MPI cluster runs (IB-05). Needs an MPI library (OpenMPI or MPICH) and libclang to build; without
 # it `sim_hpc` runs only with `--local`.

@@ -499,10 +499,32 @@ fn the_binary_runs_and_validates() {
         // Without the mpi feature, a run that is neither local nor a validation is a usage error.
         assert_eq!(run(&["--campaign", toml]).0, Some(64));
     }
+    // The output now holds a campaign: a fresh run is refused, a resume has nothing left to run.
+    let (code, out) = run(&["--campaign", toml, "--local", "--json"]);
+    assert_eq!(code, Some(2), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["kind"], "OutputExists");
+    let (code, out) = run(&["--campaign", toml, "--validate-only", "--resume", "--json"]);
+    assert_eq!(code, Some(0), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(
-        run(&["--campaign", toml, "--local", "--resume"]).0,
-        Some(64)
+        (v["attempt"].as_u64(), v["missing_runs"].as_u64()),
+        (Some(1), Some(0))
     );
+    let (code, out) = run(&["--campaign", toml, "--local", "--resume", "--json"]);
+    assert_eq!(code, Some(0), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (v["attempt"].as_u64(), v["runs"].as_u64()),
+        (Some(1), Some(0))
+    );
+    assert_eq!(summaries(&s.out()).len(), 4);
+    for usage in [
+        &["--campaign", toml, "--local", "--override-crash-policy"][..],
+        &["--campaign", toml, "--local", "--deadline", "soon"],
+    ] {
+        assert_eq!(run(usage).0, Some(64), "{usage:?}");
+    }
     let bad = Setup::new("bin-bad", SCENE, &[500.0], 1, "");
     let (code, out) = run(&[
         "--campaign",

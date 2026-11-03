@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use sim_core::{
@@ -138,6 +139,20 @@ impl<'a> Worker<'a> {
 
     /// Run one manifest row to its end and turn it into rows.
     pub fn run(&mut self, row: &ManifestRow, at: Placement, quota: &Quota) -> RunRecord {
+        self.run_unless(row, at, quota, &AtomicBool::new(false))
+            .expect("a run without a stop flag is never abandoned")
+    }
+
+    /// [`Self::run`], checking `stop` between ticks: once it is set the run is abandoned (`None`,
+    /// no rows, no dump), the World is reset for reuse, and `--resume` runs it again from tick 0
+    /// (SIGTERM, seq §7).
+    pub fn run_unless(
+        &mut self,
+        row: &ManifestRow,
+        at: Placement,
+        quota: &Quota,
+        stop: &AtomicBool,
+    ) -> Option<RunRecord> {
         let started = Instant::now();
         let seed = RunSeed::new(row.param_set_id, row.replicate_seed);
         let params = self.campaign.manifest.params(row);
@@ -145,18 +160,32 @@ impl<'a> Worker<'a> {
             Some(sim) => sim,
             None => match self.campaign.build_world() {
                 Ok(sim) => sim,
-                Err(e) => return self.setup_error(row, at, started, &e),
+                Err(e) => return Some(self.setup_error(row, at, started, &e)),
             },
         };
         if sim.is_started() {
             sim.reset();
         }
-        let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<SimStatus, SetupError> {
-            sim.start_with_params(seed, &params)?;
-            Ok(sim.run())
-        }));
-        match outcome {
-            Ok(Ok(status)) => {
+        let outcome = catch_unwind(AssertUnwindSafe(
+            || -> Result<Option<SimStatus>, SetupError> {
+                sim.start_with_params(seed, &params)?;
+                loop {
+                    if let Some(status) = sim.step() {
+                        return Ok(Some(status));
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(None);
+                    }
+                }
+            },
+        ));
+        Some(match outcome {
+            Ok(Ok(None)) => {
+                sim.reset();
+                self.sim = Some(sim);
+                return None;
+            }
+            Ok(Ok(Some(status))) => {
                 let out = sim.output(false);
                 let verdicts = run_verdicts(sim.world_mut());
                 let dump = (status.is_crash() && quota.try_keep(row.param_set_id)).then(|| {
@@ -218,7 +247,7 @@ impl<'a> Worker<'a> {
                     setup_error: None,
                 }
             }
-        }
+        })
     }
 
     /// A summary row with the run's identity and no results (`NaN` statistics, inconclusive

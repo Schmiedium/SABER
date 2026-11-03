@@ -12,6 +12,7 @@ skip, unless `SABER_REQUIRE_BINARIES=1` (set in CI's end-to-end job), where they
 """
 
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -140,3 +141,34 @@ def test_a_crash_storm_is_aborted(tmp_path, scene):
     assert set(schema.enum_name("SimStatus", v) for v in t.column("status").to_pylist()) == {"CrashedEnergy"}
     with pytest.raises(CampaignError, match="crash policy"):
         run.check()
+
+
+def test_resume_finishes_a_campaign_that_lost_parts_or_drained(tmp_path, scene):
+    """Step 4b from Python (R6): a campaign that lost committed parts, or drained before its
+    walltime, is finished by `resume=True` with every run once and the same results."""
+    s = sweep.generate(scene, {"muzzle_vz": sweep.Uniform(30, 90)}, sweep.LatinHypercube(8), replicates=2, seed=3)
+    toml = make(tmp_path, "resume", s, checkpoint=campaign.Checkpoint(checkpoint_interval_s=0.0))
+    first = campaign.run_local(toml, threads=2).check()
+    full = first.read("summaries").sort_by("run_id")
+    first.files("summaries")[0].unlink()
+    (first.shared_out / "_MANIFEST.json").unlink()
+
+    with pytest.raises(CampaignError) as e:
+        campaign.preflight(toml)
+    assert (e.value.status, e.value.kind) == (Status.INVALID, "OutputExists")
+    pf = campaign.preflight(toml, resume=True)
+    assert pf.attempt == 1 and 0 < pf.missing_runs < 16
+    run = campaign.run_local(toml, resume=True, threads=2).check()
+    assert (run.report["attempt"], run.report["runs"]) == (1, pf.missing_runs)
+    t = run.read("summaries").sort_by("run_id")
+    assert t.column("run_id").to_pylist() == list(range(16))
+    assert t.column("final_state_hash").to_pylist() == full.column("final_state_hash").to_pylist()
+    assert [a["attempt"] for a in run.manifest["attempts"]] == [0, 1]
+    assert run.manifest["attempts"][0]["rebuilt_from_footers"] is True
+
+    # A deadline already inside drain_margin_s: nothing is dispatched, the attempt is partial.
+    drained = make(tmp_path, "drain", s)
+    run = campaign.run_local(drained, deadline=time.time())
+    assert run.status is Status.PARTIAL and run.status.resumable
+    assert (run.report["stopped"], run.report["runs"], run.report["missing_runs"]) == ("walltime", 0, 16)
+    assert campaign.run_local(drained, resume=True).check().report["runs"] == 16

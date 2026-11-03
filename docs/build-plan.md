@@ -1,6 +1,6 @@
 # SABER build plan
 
-Status: v1.7 (2026-11-03; v1.1 marks steps 1a and 1b done, adds O8 and records D19; v1.2 marks step 1c done, moves `FileHeader` from 3a to 1c, and adds Earth rotation to 5a; v1.3 marks step 2 done, which also brought the kernel's in-memory event channel forward from the telemetry work; v1.4 marks step 3a done; v1.5 marks step 3b done, which also brought the kernel's Tier 2 and 3 run log forward; v1.6 marks step 3c done and adds a CI job where Python drives freshly built binaries; v1.7 marks step 4a done, built on the recommended answer to O8, and adds a CI job that runs `sim_hpc` under `mpiexec`). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
+Status: v1.8 (2026-11-03; v1.1 marks steps 1a and 1b done, adds O8 and records D19; v1.2 marks step 1c done, moves `FileHeader` from 3a to 1c, and adds Earth rotation to 5a; v1.3 marks step 2 done, which also brought the kernel's in-memory event channel forward from the telemetry work; v1.4 marks step 3a done; v1.5 marks step 3b done, which also brought the kernel's Tier 2 and 3 run log forward; v1.6 marks step 3c done and adds a CI job where Python drives freshly built binaries; v1.7 marks step 4a done, built on the recommended answer to O8, and adds a CI job that runs `sim_hpc` under `mpiexec`; v1.8 marks step 4b done and closes O8 as D20). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
 steps, one reviewable pull request each, in the order they are built. Each step names its scope, the
 design sections it implements, and the test that proves it done (its exit criterion, in the roadmap's
 style). Design changes ride in the same PR as the code (`CONTRIBUTING.md`).
@@ -69,7 +69,6 @@ flowchart LR
 | T1: which McCoy projectiles have complete data for M3 | The M3 part of 5a | verification §13 |
 | T2: exact `H`, `T` definitions and signs for the M2 linear-theory oracle | The M2 part of 5a | verification §13 |
 | T4: access to STANAG 4355 | An optional modified-point-mass reference in 5a | verification §13 |
-| O8: does a `Timeout` run count against the crash policy (reaching `max_ticks` itself is decided, D19: `at_max_ticks`, default `Completed`) | Step 4c's verdict statistics. Step 4a is built on the recommended answer (counts toward the storm rule, `Inconclusive` in statistics); another answer changes one function, `sim_hpc::protocol::counts_toward_storm` | subsystems §11 |
 
 ## Done
 
@@ -84,3 +83,4 @@ flowchart LR
 | 3b `sim_hpc --local`: preflight, worker threads with World reuse, crash and panic capture, `IO.Mux` parts, stager, `_MANIFEST.json`, exit codes; kernel event and snapshot log | #7 |
 | 3c `saber.sweep` (samplers, replicate seeds, manifest writer), local `saber.campaign` (`campaign.toml`, preflight, `run_local`, statuses), scene-hash check in preflight, end-to-end CI job | #8 |
 | 4a MPI dispatch over a `Transport` (rsmpi behind the `mpi` feature), init broadcast with BLAKE3 checks and `build_id` gather, campaign-wide dump quota, crash-storm and setup-error aborts (exit 6), `campaign_status.json`, `saber.campaign.read_heartbeat`, MPI CI job | #10 |
+| 4b Resume from committed footers (attempts, campaign-wide counts restored, refusals), walltime drain, SIGTERM, fresh-output check, `saber.campaign` resume, PBS and Slurm job scripts with `auto_resume` resubmissions | #11 |

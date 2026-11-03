@@ -53,7 +53,12 @@ v0.17 (2026-11-03, build step 4a) records MPI dispatch and the crash policy as b
 `Transport` (MPI behind the `mpi` feature, one rank for `--local`, threads for tests), the init broadcast with
 BLAKE3 checks and the `build_id` gather, the message rules that leave no message unread (IB-05), the crash-storm
 and setup-error aborts with exit 6, and the `campaign_status.json` heartbeat with `output.heartbeat_s` (IB-15,
-IB-04). `Timeout` counts toward the crash-storm rule, the recommended answer to O8, pending Alex.
+IB-04). `Timeout` counts toward the crash-storm rule (D20, was O8).
+v0.18 (2026-11-03, build step 4b) records resume, the walltime drain and SIGTERM as built (§5.6, IB-04, IB-07,
+IB-15): rank 0 plans each attempt from the committed summaries footers alone, refuses another campaign's or
+build's parts, dispatches only the missing runs with the earlier counts restored, drains before the walltime, and
+`saber.campaign` renders PBS and Slurm job scripts whose queued resubmissions run only while resuming helps. A fresh
+campaign now refuses an output directory that already holds one. Adds D20 (was O8).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -585,7 +590,7 @@ several ranks it runs one fewer worker thread. The `Quota` view is the campaign-
 `ChunkAssign` (for the parameter sets the rank reported, and every set whose quota is used up) plus the dumps kept
 since. The crash policy runs on every request: more than `abort_max_setup_errors` `SetupError` runs trip
 `SetupErrors`; at least `abort_min_runs` finished runs of which more than `abort_crash_fraction` crashed or timed
-out trip `CrashStorm` (`Timeout` counts, O8). On a trip the dispatcher answers every further request with
+out trip `CrashStorm` (`Timeout` counts, D20). On a trip the dispatcher answers every further request with
 `Terminate`, `Abort` reaches the ranks still waiting for work, every rank stops taking runs (a run in progress
 finishes; the 1024-tick in-run check is not built) and commits its open part, so the evidence is kept. Every rank
 then sends a `NodeReport` (its full tally, parts, failed parts, finished chunks, kept dumps), rank 0 writes
@@ -596,6 +601,30 @@ resolve), `4` (a write or stage-out failed), `5` (runs missing), `0`. A rank who
 work (`done` on its request); its chunks are not re-queued, they are listed as missing for `--resume` (4b). Rank 0
 writes `campaign_status.json` (IB-15) when the run starts, every `output.heartbeat_s`, and at the end from the
 ranks' final reports.
+
+**As built (step 4b), resume, drain and SIGTERM** (`sim_hpc::resume`, `sim_hpc::rank`). `start` plans the attempt
+on rank 0 before the broadcast (`resume::prepare`). A fresh campaign (no `--resume`) is refused with exit 2
+(`OutputExists`) when its output directory already holds part files or `_MANIFEST.json`, so attempt 0 never
+overwrites anything. `--resume` lists the output directory once, reads every committed `*_summaries.parquet`
+footer (never row data) and checks its header against the campaign (`campaign_id`, `scene_hash`, `req_set_hash`
+and the footer's `saber.manifest_hash`: exit 2, `ResumeMismatch`; `build_id`: exit 3, `BuildMismatch`; an
+unreadable footer: exit 4, `ResumeRead`). The attempt is one more than the largest in `_MANIFEST.json` or in any
+part file name. The committed runs are the union of the footers' `run_id` ranges, and the counts (runs, runs by
+`SimStatus`, crashes and kept dumps by `param_set_id`) are summed from their footers; `_MANIFEST.json`'s attempts
+are kept and an attempt it does not list (a job killed before writing it) is rebuilt from its parts
+(`rebuilt_from_footers`). An index whose status is `aborted` refuses with exit 6 (`Aborted`) unless
+`--override-crash-policy`, which turns the abort rules off for that attempt (the dump quota still applies). Rank 0's
+`Dispatcher` is built over the missing runs only (each missing range cut into slices of at most `chunk_size`, in
+the canary order) and starts from the restored counts, so the crash policy and the dump quota stay campaign-wide;
+the next attempt number reaches rank N in the `Init` broadcast, and a resumed job may have another rank count.
+Nothing missing is an attempt that runs nothing and exits 0. Drain: with a walltime deadline (`--deadline`, else
+`SABER_WALLTIME_END`, else `SLURM_JOB_END_TIME`, all Unix seconds), rank 0 stops dispatch once the deadline is
+within `checkpoint.drain_margin_s`; every later request gets `Terminate`, the ranks finish the chunks they hold and
+commit, and the job exits 5. SIGTERM (or SIGINT) sets a flag: the rank's workers abandon the run in progress (they
+check between ticks; an abandoned run writes nothing and the next attempt runs it again), the rank says `done` on
+its next request, rank 0 also stops dispatch, the open part closes and commits, and the job exits 5; a second
+signal ends the process at once with 128 + the signal. A rank's `RunReport` names the attempt and why dispatch
+stopped (`walltime` or `signal`); rank 0's `committed_runs` covers every attempt.
 
 ### 5.7 `saber` Python package
 
@@ -1266,6 +1295,7 @@ heartbeat_s = 15                 # campaign_status.json (IB-15)
 | Errors | Exit codes: `0` ok (or nothing left to resume), `2` config/validation error (incl. resume mismatch), `3` build_id mismatch, `4` I/O / stage-out failure (some parts not committed), `5` partial (drained before walltime or runs missing; resumable), `6` aborted by crash policy (`CrashStorm` or `SetupErrors`; evidence committed), `70` internal. Python maps exit codes to campaign status. `auto_resume` resubmits after `4`, `5` or a killed job, and stops on `2`, `3` or `6`, or when the last attempt made no progress. |
 | As built (step 3b) | `sim_hpc::CampaignConfig` reads every key above (unknown keys are errors) plus `execution.max_events_per_run` (default 4096) and `execution.threads` (default: available parallelism); paths are relative to the file, and `scratch_dir`/`shared_out` expand `${VAR}` (`${TMPDIR}` falls back to the system temp directory). `flight_recorder_ticks` overrides the scenario's `recorder_frames` (not hashed). `snapshot_policy.adaptive` is accepted with a warning and sampling stays at `base_every`. CLI: `--local` and `--validate-only` (`--json` for both, `--threads N`); without `--local` the binary exits `64` until MPI lands (4a), and `--resume` / `--override-crash-policy` exit `64` until 4b. Exit `64` is a usage error. |
 | As built (step 3c) | `saber.campaign` maps exit codes to statuses: `0` completed, `2` invalid, `3` build mismatch, `4` I/O error, `5` partial, `6` aborted, `64` usage, `70` (or any other code) internal, and a signal (a negative code from Python, or 129–159 from a shell) killed; `4`, `5` and killed are resumable. With `--json`, `sim_hpc` prints one object: on a refusal `{ok: false, exit, kind, error}` with `kind` one of `Config`, `Scene`, `Requirements`, `Manifest`, `SceneMismatch`, `BuildMismatch`; `--validate-only` adds `req_set_hash` and `param_keys` to step 3b's fields; `--local` adds `campaign_id` and `threads`. |
+| As built (step 4b) | CLI: `sim_hpc --campaign c.toml [--local \| --validate-only] [--resume [--override-crash-policy]] [--deadline UNIX_S] [--threads N] [--json]`; `--override-crash-policy` without `--resume` is a usage error (64). Without `--resume` an output directory that already holds a campaign is refused (exit 2, `OutputExists`), also by `--validate-only`; with it, `--validate-only` adds `attempt`, `committed_runs` and `missing_runs` (the plan, refused as the run would be). The walltime deadline is `--deadline`, else `SABER_WALLTIME_END`, else `SLURM_JOB_END_TIME`. `--json` adds `attempt`, `committed_runs` and `missing_runs` (every attempt), and `stopped` (`walltime`, `signal` or null). New refusal kinds: `OutputExists`, `ResumeMismatch` (2), `BuildMismatch` (3, from a part footer), `ResumeRead` (4), `Aborted` (6). `saber.campaign`: `preflight` and `run_local` take `resume` and `override_crash_policy` (`run_local` also `deadline`); `Resources` (nodes, cpus per node, walltime, queue, account, threads, setup lines, launcher and its flags, the cluster's `sim_hpc` path, extra directives), `render_job` (PBS Pro, or Slurm with `scheduler="slurm"`; one rank per node; the job exports `SABER_WALLTIME_END` from the walltime) and `submit` (preflight, `qsub` or `sbatch --parsable`, then `auto_resume` resubmissions each with `depend=afterany` / `--dependency=afterany` on the one before). A resubmission reads the job directory's `ledger.tsv` (each job's start with the committed part count, and its end with `sim_hpc`'s exit from the JSON report, since a launcher killed by SIGTERM exits with its own code) and exits 0 at once if the attempt before it ended `0`, `2`, `3`, `6`, `64` or `70`, or committed no new parts. `submit` refuses a `drain_margin_s` as long as the walltime. |
 | As built (step 4a) | Without `--local` or `--validate-only`, `sim_hpc --campaign c.toml` is one rank of an MPI job (`mpiexec -n N sim_hpc --campaign c.toml [--threads N] [--json]`); a binary built without the `mpi` feature refuses that with `64`. Every rank exits with the code rank 0 broadcasts; only rank 0 prints. `--json` adds `ranks`, `abort` (`{reason, detail}`), an `error` sentence for an abort, and `status` (the heartbeat's path). New key `output.heartbeat_s` (default 15, positive, at most a day), mirrored by `saber.campaign.Output`. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
@@ -1389,6 +1419,16 @@ for now; kept current per commit with 4a) holds `campaign_id`, `build_id`, `scen
 crash, dump and setup-error counts, and per attempt and rank the committed parts (files, run ranges, crash
 counts, rows per table) and the failed ones.
 
+**As built (step 4b).** The summaries footer adds `saber.status_counts` (`{"SimStatus name": n}`),
+`saber.dump_counts` (`{"param_set_id": kept dumps}`) and `saber.manifest_hash` (16 hex digits), so resume restores
+the campaign's counts from footers alone (`sim_schema::io::read_parquet_footer` reads a footer without its rows).
+`_MANIFEST.json` is written at the end of each attempt (not per commit; a killed job's attempt is rebuilt from its
+footers by the next `--resume`). Its top level covers the whole campaign (committed and missing ranges, crash and
+status counts, kept dumps of every attempt); `attempts` lists every attempt with `status`, `runs`, `stopped`,
+`override_crash_policy`, `abort` and its ranks' parts. A part whose summaries never committed may leave its other
+files under their final names; readers take a part only with its summaries file (`saber.campaign.LocalRun.files`
+lists parts from `_MANIFEST.json`).
+
 **Commit rule.** A part is committed when its summaries file appears under its final name. IO.Stager
 copies events, snapshots, impacts and crashes as `.tmp` and renames them first, then copies, fsyncs and renames
 the summaries file last. A run is done if and only if its `run_id` is in a committed summaries footer.
@@ -1470,6 +1510,7 @@ truth until a requirements repository exists (D3).
 | Owner | `sim_schema::CampaignStatus` (JSON Schema exported for Python and Studio). |
 | Errors | Readers treat `updated_utc` older than 3 × `heartbeat_s` as *stale* (job may be dead; check scheduler). A rank whose `last_seen_utc` lags is flagged *suspect*. |
 | As built (step 4a) | `sim_schema::CampaignStatus` (serde; no JSON Schema export yet) with the fields above plus `format: "saber-campaign-status"`, `heartbeat_s`, `ranks`, `crashes` and `abort_detail`; `per_rank[].last_seen_utc` is `null` before a rank's first request, and status names are `SimStatus` variant names. `heartbeat_s` is `output.heartbeat_s` in `campaign.toml`. Rank 0 writes it when the run starts, every `heartbeat_s`, and at the end with the ranks' final counts (`Done`, or `Failed` after an abort or with runs not committed); `Starting` is not written yet. `--local` writes it too. `saber.campaign.read_heartbeat` reads it, with `Heartbeat.stale()` for the 3 × rule. |
+| As built (step 4b) | A resumed attempt reports its own `attempt`; `runs_done`, `runs_committed`, `crashes`, `setup_errors`, `crashes_by_param_set` and `status_counts` cover every attempt (earlier attempts' counts restored from their footers). `state` is `Draining` once rank 0 stops dispatch before the walltime or on SIGTERM; an attempt that ends with runs missing ends `Failed` (its exit code, `5`, says it can be resumed). |
 
 
 ### IB-16 · Fragmentation hook (fragmentation model → sim_core)
@@ -1701,14 +1742,14 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | D16 | Contact scope | No built-in contact material library, and no penetration or deformable-terrain models, for now (Alex, 2026-11-02; was O3). Implicit integrators are not needed either, given the adaptive explicit methods (was O4). | `ContactMaterial` values are entered per body in the scenario (IB-19); terrain is rigid, contact is surface-only; `physics-engine-tradeoffs.md` §12. |
 | D17 | 3D models | Entities can be linked to 3D models in glTF 2.0 / GLB, Bevy's native format. Defaults live in the code base and users can bring their own. OBJ import with conversion to glTF and GLB is a nice-to-have stretch goal. Other engineering model formats are out of scope; conversion happens elsewhere (Alex, 2026-11-02). Campaigns keep a copy of the workspace and library-root models they use, up to 2 GB per campaign (was O5). Spinning rotors and moving control surfaces come later; v1 models are rigid (was O7). Extra library folders (`model_roots`) stay as an option; Import still copies into the workspace by default (was O6). | `sim_assets` crate (§1, §3, §4, §5.10) with the built-in library in `crates/sim_assets/builtin/`; `Studio.Assets` (§5.5); `visual:` section with its own `visual_hash` (IB-01); IB-20; derived collision shapes (IB-19); IB-13 row; G18; roadmap P2v and P6b; `sim_studio_ux.md` §7.11; `sequence-diagrams.md` §2.1–2.3. |
 | D18 | Project name | The project is SABER (was SABERS), and identifiers follow: Python package `saber`, `saber-cli`, `~/.saber/`, `saber://` deep links, `saber.workspace.ron`, `FileHeader.saber_version` (Alex, 2026-11-02). | Renamed across all design docs; the code uses the new names from the first commit. |
-| D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy stays open as O8. |
+| D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy was O8, decided as D20. |
+| D20 | `Timeout` and the crash policy | A run that ends `Timeout` counts toward the campaign's crash-storm rule, and is `Inconclusive`, not a failure, in `saber.verify`'s statistics (Alex, 2026-11-03; was O8). | `sim_hpc::protocol::counts_toward_storm` (§5.6, step 4a); seq §8.2 and §11; `saber.verify` (step 4c). |
 
 ### Still open
 
 | # | Question | Where |
 |---|---|---|
 | O1 | Fragmentation physics: trigger criteria, fragment mass and velocity distributions, fragment lifetime when nothing is hit. | IB-16 (designed separately) |
-| O8 | Whether a `Timeout` run counts as a failure in the campaign crash policy and in `saber.verify`'s statistics (seq §11 says yes by default; §8.2 treats it as inconclusive, not a crash). What reaching `max_ticks` means is decided (D19). Step 4a is built on the recommended answer, pending Alex: `Timeout` counts toward the crash-storm rule (`sim_hpc::protocol::counts_toward_storm`), and is `Inconclusive`, not a failure, in verdict statistics (step 4c). | §8.2, seq §11; step 4a (built on the recommendation), step 4c |
 
 ---
 

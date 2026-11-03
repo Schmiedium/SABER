@@ -136,12 +136,14 @@ pub fn summaries(out: &Path) -> Vec<SummaryRow> {
     rows
 }
 
-/// What must not depend on ranks, threads, chunks, dispatch order or part rolling (R3 to R5).
+/// What must not depend on ranks, threads, chunks, dispatch order, part rolling or resume (R3 to
+/// R6).
 pub fn deterministic(r: &SummaryRow) -> String {
     let r = SummaryRow {
         campaign_id: String::new(),
         wall_time_ms: 0.0,
         rank: 0,
+        attempt: 0,
         chunk_id: 0,
         part: 0,
         ..r.clone()

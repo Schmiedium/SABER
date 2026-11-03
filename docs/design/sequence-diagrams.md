@@ -427,6 +427,8 @@ sequenceDiagram
 
 The preflight `Allreduce` keeps one rank with a full `$TMPDIR` from silently stalling the whole job later.
 
+As built (step 4b): `saber.campaign.submit` preflights on the login node (with `--resume` when resuming), renders the job script (`render_job`: `#PBS -l select=N[:ncpus=C]:mpiprocs=1`, `place=scatter`, `walltime`; or `#SBATCH --nodes`, `--ntasks-per-node=1`, `--time`), and queues it with `qsub` (`sbatch --parsable`). The script runs the `setup` lines (`module load ...`), exports `SABER_WALLTIME_END`, and starts `mpiexec -n N --map-by ppr:1:node --bind-to none sim_hpc --campaign ... --json` (OpenMPI's flags by default; any launcher can be named). It logs to `jobs/job-JOBID.log` next to `campaign.toml`; making the output directory and `RAYON_NUM_THREADS` are not needed (`sim_hpc` creates the directory, and sizes its worker threads from the CPUs it may use or `--threads`).
+
 As built (step 3c): the scene-hash check runs in `sim_hpc`'s preflight (`ManifestError::SceneMismatch`, exit 2), which `saber.campaign.preflight` calls through `--validate-only` on the login node, so the same check also guards a job submitted by hand. Rendering the PBS script and `qsub` arrive with step 4b.
 
 ---
@@ -725,6 +727,8 @@ Because every part is renamed into place, a reader on `SharedFS` never sees a ha
 
 As built (step 3b, `sim_hpc --local`): this flow without the MPI main thread. A part opens with its first run and closes on the interval even while idle; the details are in subsystems IB-06 and IB-07. The SIGTERM path arrives with step 4b.
 
+As built (step 4b): SIGTERM (or SIGINT) sets a flag every rank's main thread polls. The workers abandon their runs in progress (checked between ticks, so the wait is at most one tick), the rank asks for no more work, `IO.Mux` closes the open part with the runs that finished and `IO.Stager` commits it, and the job exits 5. A second signal ends the process at once (128 + signal). Under OpenMPI 4.1, `mpiexec` forwards SIGTERM to the ranks, which drain as above, but exits with its own code, so the job script takes the exit code from `sim_hpc`'s JSON report. The walltime drain (section 12) is the primary path; SIGTERM covers a grace period the drain margin did not.
+
 ---
 
 
@@ -855,7 +859,7 @@ sequenceDiagram
 
 Exit code 6 is new, next to the subsystems doc's codes (0 ok, 2 config, 3 build mismatch, 4 I/O, 5 partial, 70 internal). `TAG_ABORT` previously covered only preflight and build mismatch. It now also carries `AbortReason::CrashStorm` and `AbortReason::SetupErrors`.
 
-As built (step 4a): "crashed" in the storm rule means crashed, panicked or timed out (`Timeout` counts, the recommended answer to O8, pending Alex); `SetupError` has only its own rule. The `ChunkRequest` delta also carries runs by `SimStatus` and verdict counts per requirement, which feed the heartbeat. `ChunkAssign` carries global dump counts for the parameter sets this rank reported and for every set whose quota is full, which is how "closed parameter sets" reach the other ranks. After a trip, a rank that is between requests gets `TAG_ABORT`, and a rank whose request is on its way gets `TAG_TERMINATE` with the abort reason as the reply; either way it stops taking runs. A run already started finishes (the 1024-tick in-run check is not built), the open part is committed, and the `NodeReport` and `_MANIFEST.json` follow as drawn. The local runner applies the same policy. Resume restoring the counts from `_MANIFEST.json`, and `--override-crash-policy`, arrive with step 4b.
+As built (step 4a): "crashed" in the storm rule means crashed, panicked or timed out (`Timeout` counts, D20); `SetupError` has only its own rule. The `ChunkRequest` delta also carries runs by `SimStatus` and verdict counts per requirement, which feed the heartbeat. `ChunkAssign` carries global dump counts for the parameter sets this rank reported and for every set whose quota is full, which is how "closed parameter sets" reach the other ranks. After a trip, a rank that is between requests gets `TAG_ABORT`, and a rank whose request is on its way gets `TAG_TERMINATE` with the abort reason as the reply; either way it stops taking runs. A run already started finishes (the 1024-tick in-run check is not built), the open part is committed, and the `NodeReport` and `_MANIFEST.json` follow as drawn. The local runner applies the same policy. Resume restoring the counts from `_MANIFEST.json`, and `--override-crash-policy`, arrive with step 4b.
 
 ---
 
@@ -1070,7 +1074,7 @@ sequenceDiagram
     loop Each requirement
         Verify->>DuckDB: Select req_x_metric, req_x_pass, status FROM summaries WHERE envelope filter
         DuckDB-->>Verify: Per-run results grouped by param_set_id
-        Verify->>Verify: Apply crash policy (CrashedNaN, CrashedEnergy, Panicked, Timeout count as failures by default, SetupError excluded and reported)
+        Verify->>Verify: Apply crash policy (CrashedNaN, CrashedEnergy, Panicked count as failures by default, Timeout is Inconclusive (D20), SetupError excluded and reported)
         alt Too few samples for requested confidence
             Verify->>Verify: Verdict = Inconclusive, report n needed
         else Enough samples
@@ -1172,6 +1176,8 @@ sequenceDiagram
 ```
 
 Cost of all this: one Parquet footer per file every ten minutes per node, and a background copy that would have happened at the end anyway. Lost work after a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the last part. Runs from an uncommitted part are redone, never duplicated, because only committed parts count.
+
+As built (step 4b): the flow above with these differences, detailed in subsystems §5.6 and IB-04. Rank 0 plans the attempt before the broadcast and always from the footers: it keeps `_MANIFEST.json`'s attempts, rebuilds those it lacks, and rewrites the index once, at the end of the attempt. The footers also carry runs by `SimStatus`, kept dumps by `param_set_id` and the sweep manifest's hash, so the restored counts match an uninterrupted campaign's. A fresh run into an output that already holds a campaign is refused (exit 2, `OutputExists`). The walltime is `SABER_WALLTIME_END`, which the rendered job script exports from its walltime at start (or `--deadline`, or Slurm's `SLURM_JOB_END_TIME`). Auto-resubmit queues all `auto_resume` jobs at submit time, each `afterany` the one before; a queued job decides at its start, from the job directory's `ledger.tsv`, whether the attempt before it can be resumed (it did not end `0`, `2`, `3`, `6`, `64` or `70`) and made progress (more committed summaries parts than when it started), and otherwise exits 0 without running.
 
 ---
 
