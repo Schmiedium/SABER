@@ -1,0 +1,84 @@
+{
+  "columns": [
+    {
+      "doc": "parameter row",
+      "name": "param_set_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "replicate seed",
+      "name": "replicate_seed",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "run",
+      "name": "run_id",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "tick it happened in",
+      "name": "tick",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "simulation time at the end of that tick, s",
+      "name": "t_s",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "declared event name",
+      "name": "event",
+      "nullable": false,
+      "type": "utf8"
+    },
+    {
+      "doc": "entity it happened to",
+      "name": "sim_id",
+      "nullable": true,
+      "type": "uint32"
+    },
+    {
+      "doc": "other entity, for a contact",
+      "name": "other_sim_id",
+      "nullable": true,
+      "type": "uint32"
+    },
+    {
+      "doc": "where, world frame, m",
+      "name": "pos_x",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "where, world frame, m",
+      "name": "pos_y",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "where, world frame, m",
+      "name": "pos_z",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "value that goes with it",
+      "name": "value",
+      "nullable": false,
+      "type": "float64"
+    }
+  ],
+  "dynamic": [],
+  "format": "events",
+  "schema_version": "1.0.0",
+  "sort_key": [
+    "param_set_id",
+    "run_id",
+    "tick"
+  ]
+}

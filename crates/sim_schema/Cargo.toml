@@ -7,13 +7,29 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+arrow-schema = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
+
+[features]
+# Arrow schemas, Parquet and crash-dump I/O. Off by default so the kernel never builds Arrow.
+io = ["dep:arrow-schema", "dep:arrow-array", "dep:parquet", "dep:zstd", "dep:bincode"]
 
 [[bin]]
 name = "export-schemas"
 path = "src/bin/export_schemas.rs"
+required-features = ["io"]
+
+[[test]]
+name = "io"
+required-features = ["io"]

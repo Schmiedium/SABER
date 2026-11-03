@@ -1,0 +1,188 @@
+{
+  "columns": [
+    {
+      "doc": "dense run number from the manifest",
+      "name": "run_id",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "parameter row",
+      "name": "param_set_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "replicate seed",
+      "name": "replicate_seed",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "campaign",
+      "name": "campaign_id",
+      "nullable": false,
+      "type": "utf8"
+    },
+    {
+      "doc": "MPI rank that ran it",
+      "name": "rank",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "attempt (resume counter)",
+      "name": "attempt",
+      "nullable": false,
+      "type": "uint16"
+    },
+    {
+      "doc": "output part within the attempt",
+      "name": "part",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "dispatch chunk",
+      "name": "chunk_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "SimStatus",
+      "name": "status",
+      "nullable": false,
+      "type": "uint8"
+    },
+    {
+      "doc": "stop condition of a Terminated run",
+      "name": "stop_reason",
+      "nullable": true,
+      "type": "utf8"
+    },
+    {
+      "doc": "ticks completed",
+      "name": "total_ticks",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "wall-clock time, ms; nondeterministic, never hashed",
+      "name": "wall_time_ms",
+      "nullable": false,
+      "type": "float32"
+    },
+    {
+      "doc": "mean total mechanical energy, J",
+      "name": "mean_energy",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "its variance, J^2",
+      "name": "var_energy",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "largest |E - E0|, J",
+      "name": "energy_drift_max",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "largest net applied force on a body, N",
+      "name": "peak_force",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "state_hash of the final state",
+      "name": "final_state_hash",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "hash of the scene and SimConfig",
+      "name": "sim_config_hash",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "IntegratorKind",
+      "name": "integrator",
+      "nullable": false,
+      "type": "uint8"
+    },
+    {
+      "doc": "accepted substeps",
+      "name": "substeps_total",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "rejected step attempts",
+      "name": "steps_rejected",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "smallest step not cut by a tick boundary, s (NaN without one)",
+      "name": "h_min_used",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "largest accepted step, s",
+      "name": "h_max_used",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "largest local error estimate",
+      "name": "err_est_max",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "mean local error estimate",
+      "name": "err_est_mean",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "tick of a crash",
+      "name": "crash_tick",
+      "nullable": true,
+      "type": "uint64"
+    },
+    {
+      "doc": "CrashKind of a crash",
+      "name": "crash_reason",
+      "nullable": true,
+      "type": "uint8"
+    }
+  ],
+  "dynamic": [
+    {
+      "doc": "swept parameter, one per param_key",
+      "prefix": "param_",
+      "type": "float64"
+    },
+    {
+      "doc": "requirement-set metric (NaN: inconclusive)",
+      "prefix": "metric_",
+      "type": "float64"
+    },
+    {
+      "doc": "per-run Verdict of a requirement",
+      "prefix": "req_",
+      "type": "uint8"
+    }
+  ],
+  "format": "summaries",
+  "schema_version": "1.0.0",
+  "sort_key": [
+    "run_id"
+  ]
+}

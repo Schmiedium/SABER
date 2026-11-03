@@ -1,0 +1,34 @@
+{
+  "columns": [
+    {
+      "doc": "dense, sorted, from 0",
+      "name": "run_id",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "parameter row",
+      "name": "param_set_id",
+      "nullable": false,
+      "type": "uint32"
+    },
+    {
+      "doc": "replicate seed",
+      "name": "replicate_seed",
+      "nullable": false,
+      "type": "uint64"
+    }
+  ],
+  "dynamic": [
+    {
+      "doc": "swept parameter, one per param_key",
+      "prefix": "param_",
+      "type": "float64"
+    }
+  ],
+  "format": "manifest",
+  "schema_version": "1.0.0",
+  "sort_key": [
+    "run_id"
+  ]
+}

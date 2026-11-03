@@ -1,0 +1,35 @@
+{
+  "CrashKind": [
+    "NonFinite",
+    "EnergyBound",
+    "Panic",
+    "StepSizeUnderflow",
+    "SubstepLimit",
+    "ContactCapacity"
+  ],
+  "IntegratorKind": [
+    "SemiImplicitEuler",
+    "Rk2Midpoint",
+    "Rk4",
+    "BogackiShampine32",
+    "Fehlberg45",
+    "CashKarp45",
+    "DormandPrince54",
+    "DormandPrince853"
+  ],
+  "SimStatus": [
+    "Completed",
+    "Terminated",
+    "CrashedNaN",
+    "CrashedEnergy",
+    "Panicked",
+    "Timeout",
+    "SetupError",
+    "CrashedSolver"
+  ],
+  "Verdict": [
+    "Pass",
+    "Fail",
+    "Inconclusive"
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "columns": [
+    {
+      "doc": "campaign",
+      "name": "campaign_id",
+      "nullable": false,
+      "type": "utf8"
+    },
+    {
+      "doc": "requirement",
+      "name": "req_id",
+      "nullable": false,
+      "type": "utf8"
+    },
+    {
+      "doc": "campaign rule: AllPass, Probability or Quantile",
+      "name": "aggregation",
+      "nullable": false,
+      "type": "utf8"
+    },
+    {
+      "doc": "runs counted",
+      "name": "n_runs",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "passing runs",
+      "name": "n_pass",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "failing runs",
+      "name": "n_fail",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "inconclusive runs",
+      "name": "n_inconclusive",
+      "nullable": false,
+      "type": "uint64"
+    },
+    {
+      "doc": "pass rate or quantile",
+      "name": "estimate",
+      "nullable": false,
+      "type": "float64"
+    },
+    {
+      "doc": "lower confidence bound",
+      "name": "lower_bound",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "its confidence level",
+      "name": "confidence",
+      "nullable": true,
+      "type": "float64"
+    },
+    {
+      "doc": "Verdict",
+      "name": "verdict",
+      "nullable": false,
+      "type": "uint8"
+    },
+    {
+      "doc": "upstream requirement ids",
+      "name": "trace_ids",
+      "nullable": false,
+      "type": "list<utf8>"
+    }
+  ],
+  "dynamic": [],
+  "format": "verdicts",
+  "schema_version": "1.0.0",
+  "sort_key": [
+    "req_id"
+  ]
+}

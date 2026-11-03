@@ -30,7 +30,7 @@ pub struct FileHeader {
     /// `saber_version` of the writer.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub saber_version: String,
-    /// `build_id` of the writer (git sha, rustc, target, features; step 3a).
+    /// `build_id` of the writer ([`crate::build_id`]: version, git sha, rustc, target, profile).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub build_id: String,
     /// Campaign the file belongs to.
