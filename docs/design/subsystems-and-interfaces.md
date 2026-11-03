@@ -79,6 +79,12 @@ limit, a first- or second-order lag and backlash; and `Imu`, `Gnss` and `Baromet
 random walk, quantisation, divided rates and latency. In the kernel: `FieldPath::write`, `Environment: Any`
 with `SimEnvironment::downcast_mut`, and `Default` for `RngStreams`. `LIBRARY_VERSION` 0.1.3. The rotorcraft
 and control plugins are part 2 of step 5c.
+v0.23 (2026-11-03, build step 5c, part 2) records the rotorcraft and control plugins as built (§5.2, IB-08):
+`Rotorcraft` with lumped rotors whose speeds are integrated states behind a first-order motor lag, frame and
+rotor drag, spin-up and gyroscopic moments, and `MixerCommand` through the minimum-norm inverse of the
+allocation matrix; `PidControl` loops that read and write fields by path, cascade and wrap angles; and the
+`Controller` trait as built (a component with observation and command components, run by
+`ControllerPlugin<C>`). `LIBRARY_VERSION` 0.1.4.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -424,7 +430,8 @@ at or below that altitude; the plugin lists the watched bodies at Tick 0, so a s
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
 `sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
-0.1.1 from step 5a, 0.1.2 from step 5b, 0.1.3 from step 5c) is the version scenarios check against (IB-01).
+0.1.1 from step 5a, 0.1.2 from step 5b, 0.1.3 from step 5c, 0.1.4 from step 5c part 2) is the version
+scenarios check against (IB-01).
 
 **As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
 `SetupError` names the body that breaks a rule:
@@ -503,7 +510,7 @@ moment data refer to; then thrust along body `x` at `thrust_point`. `FixedWingAe
 body is a `SetupError` (D9). Coefficients are copied at Tick 0 after the Resolver, so any term can be swept.
 The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lewis/f16/`) as a scenario file.
 
-**As built (step 5c, part 1).** Turbulence, servos and sensors; rotorcraft and control follow in part 2.
+**As built (step 5c, part 1).** Turbulence, servos and sensors.
 
 - `Wind::Dryden { mean, airspeed, heading, intensity, scale }` (local ENU or NED frames only): the MIL-F-8785C
   spectra `Φ_u = σ_u² (2L_u/π) / (1 + (L_uΩ)²)` and `Φ_v = σ_v² (L_v/π)(1 + 3(L_vΩ)²) / (1 + (L_vΩ)²)²` (`w`
@@ -516,7 +523,7 @@ The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lew
   the tick, so every integrator stage sees a continuous wind. A trim at Tick 0 trims into the gust at `t = 0`.
 - `Actuators { channels }`: each `Actuator { output, command, hold_start, min, max, rate_limit, lag, backlash,
   position }` drives an `f64` (or `f32`) field of a component on the same entity, named by its path
-  (`ControlSurfaces.elevator`, later `Rotorcraft.rotors[2].command`). In `SimSet::Actuation` it clamps the
+  (`ControlSurfaces.elevator`, `Rotorcraft.rotors[2].command`). In `SimSet::Actuation` it clamps the
   command, moves the lag toward it (`None`; `FirstOrder { time_constant }` with the rate limit solved in
   closed form; `SecondOrder { natural_frequency, damping }` by the matrix exponential of the error dynamics,
   with the rate limit capping the tick's change), applies backlash of total width `backlash`, clamps to the
@@ -539,18 +546,61 @@ The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lew
   another's draws. Every sensor field may be left out of a scenario file (a sample every tick, no latency,
   no noise).
 
-`Controller` boundary (in-process, deterministic):
+**As built (step 5c, part 2).** Rotorcraft and control. Rotor data in the tests are synthetic (TD1).
+
+- `Rotorcraft { rotors, drag_area, rotor_drag }` on a `RigidBody6` (D2: lumped rotors, rigid arms). Each
+  `Rotor { position, axis, spin, thrust_coefficient, torque_coefficient, time_constant, min_speed, max_speed,
+  inertia, command, speed }` sits at `r` from the centre of mass (body axes), thrusts along the unit `axis`
+  (default `−z`, so tilted rotors are allowed) and turns `Ccw` (angular velocity along the axis) or `Cw`. The
+  speed `ω` is an integrated state of the force model `rotorcraft/rotors` (IB-08), so every integrator
+  crosses it: `ω̇ = (c − ω)/τ` toward the command clamped to `[min_speed, max_speed]`, written back to
+  `speed` at the end of each tick. With `v` the air-relative velocity in body axes, the model adds thrust
+  `k_T ω² a`, rotor drag `−k_d ω (v − (v·a) a)` at each hub, frame drag `−½ρ|v| (C_D A ⊙ v)`, and the
+  moments `r × f`, the reaction `−s (k_Q ω² + I ω̇) a` to the rotor's torque and spin-up, and the gyroscopic
+  `−Ω × Σ s I ω a`. `k_T` and `k_Q` are constants (no density or inflow correction). Ground effect, battery,
+  blade flapping and motor saturation telemetry are not built yet.
+- `MixerCommand { thrust, moment }` on the same entity: in `SimSet::Actuation`, before the actuators, each
+  rotor's command becomes `√clamp((B⁺ c)_i, min², max²)`, where `B` maps rotor `ω²` to collective thrust
+  along the rotors' mean axis and the three body moments, and `B⁺ = Bᵀ(BBᵀ)⁻¹` is its minimum-norm right
+  inverse (exact for four rotors, least squares for six or eight). The mixers are built in `after_setup`, so a
+  `MixerCommand` a controller inserts at `start` is mixed. A layout that cannot set thrust and all three
+  moments independently is a `SetupError` only when it has a `MixerCommand`; without one, rotor commands are
+  whatever a controller, an actuator channel or the scenario writes.
+- `PidControl { loops }`: each `PidLoop { measurement, setpoint, output, kp, ki, kd, derivative_filter,
+  feedforward, min, max, rate_divider, wrap_angle, integral, value }` reads a numeric field and writes an `f64`
+  or `f32` field on its own entity by path (`Imu.gyro.x` to `MixerCommand.moment.x`), every `rate_divider`
+  ticks in `SimSet::Control`, in list order. The setpoint is `Constant(v)` (read every step, so it can be
+  moved during a run), `Field(path)`, or `Loop(j)`, the output of an earlier loop in the same tick, which
+  cascades loops. The derivative acts on the measurement through a first-order filter, so setpoint steps
+  do not kick it; the integral stops while the output sits on a limit and the error would push it further
+  (conditional integration); `wrap_angle` takes the error and the measurement change the short way round.
+  `value` and `integral` are written back as telemetry. Unknown or unwritable paths, a loop driving a
+  `PidControl` field, two loops on one output, a `Loop(j)` that is not earlier, and bad numbers are
+  `SetupError`s. A scenario gives only `measurement` and what it uses.
+- `tests/scenarios/quadrotor.scn.ron` is a worked example: a quad X climbing from 2 m to 10 m on two cascaded
+  loops on the GNSS fix (altitude to climb rate, limited to 3 m/s, then climb rate to thrust with `m·g` as
+  feedforward) and three rate-damping loops on the IMU gyro, all through the mixer.
+
+`Controller` boundary (in-process, deterministic), as built:
 
 ```rust
-/// Implemented by any flight/robot controller run inside the tick loop.
-pub trait Controller: Send + Sync + 'static {
-    type Obs: Reflect;      // what the sensors deliver
-    type Cmd: Reflect;      // what the actuators accept
-    fn rate_divider(&self) -> u32;               // runs every N physics ticks
-    fn reset(&mut self, rng: &mut RngStream);
-    fn step(&mut self, t: SimTime, obs: &Self::Obs) -> Self::Cmd; // must be pure f64, no I/O, no alloc
+/// A native controller run inside the tick loop: a component on the entity it controls.
+pub trait Controller: Component<Mutability = Mutable> + Sized {
+    type Obs: Component + Clone;                  // read from the same entity (a sensor, an estimate)
+    type Cmd: Component<Mutability = Mutable> + Default; // written to the same entity (MixerCommand, ControlSurfaces)
+    const NAME: &'static str;                     // errors, and its stream control/<NAME>/<SimId>
+    fn rate_divider(&self) -> u32;                // runs every N physics ticks
+    fn reset(&mut self, rng: &mut RngStream);     // Tick 0, with its own stream
+    fn step(&mut self, t: f64, obs: &Self::Obs) -> Self::Cmd; // pure f64, no I/O, no alloc
 }
 ```
+
+`ControllerPlugin::<C>::new()` runs every `C` in `SimSet::Control`, after the PID loops, in `SimId` order. It sets
+up in `start` (a controller needs a `SimId` and its `Obs`; a missing `Cmd` is inserted at its default) so the
+command component exists before other plugins' `after_setup`. The design sketch had `Obs` and `Cmd` as
+reflected values handed over by the kernel; as components on the controlled entity, a controller plugs into
+sensors, the mixer, actuators and PID loops with no glue, and its inputs and outputs are visible to field
+paths, probes and the recorder.
 
 Controllers are native Rust `Controller` implementations only. Real flight software in the loop is out of
 scope (D4).
@@ -1625,6 +1675,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
 | As built (step 5b) | A force model may own integrated states: `ForceModel::state_len` (read after `setup`, fixed for the run), `read_states`/`write_states` (World to packed vector at the start of each tick and back at its end) and `state_rhs(stage, dxdt)`, pure like `eval`, which sees its states as `Stage::model_states()`. They are packed after the bodies, one `StateClass::Model` error group per model, so every integrator crosses them (D14); a solver failure on them names no body. `SimPlugin::after_setup` runs at Tick 0 after the body table, integrator and force models are set up and before the first frame is recorded, for initial-condition solvers. `sim_core::dynamics::derivatives(world)` (and `SimWorld::derivatives`) evaluates the right-hand side once at the current state: each body's `ṗ`, `v̇`, `q̇`, `ω̇` and net applied wrench, and each model's states and rates; it runs every model's `prepare` first and allocates, so it belongs to Tick 0 and tests, not to the tick loop. `FixedWingPlugin` uses all three (engine power lag, trim). |
 | As built (step 5c) | `FieldPath::write(world, entity, value)` writes an `f64` or `f32` field through the same pre-parsed path as `read`, without allocating, so a model can drive another plugin's inputs by name (actuators). `Environment` has `Any` as a supertrait and `SimEnvironment::downcast_mut::<T>()` reaches the concrete model, so a system in `SimSet::Environment` can advance per-tick state such as turbulence; within the tick `sample` stays a fixed function of position and time. `RngStreams` implements `Default` (an empty placeholder) so tick systems take it out of the World with `sim_core::with_resource`: `World::resource_scope` allocated on the first ticks of each run in the allocation tests. |
+| As built (step 5c, part 2) | Systems added to one `SimSet` run in the order their plugins were added, and `sim_models::add_library` fixes that order: Environment, AeroBallistics, FixedWing, Rotorcraft, Actuator, Sensor, Control. So in `SimSet::Actuation` the rotorcraft mixer runs before the servo channels, and in `SimSet::Control` the PID loops run before any `ControllerPlugin<C>` added after the library. A plugin that inserts components other plugins look for does so in `start`; plugins that build per-run tables over such components (the mixer) do so in `after_setup`. |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 

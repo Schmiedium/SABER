@@ -1,0 +1,70 @@
+// A 1.2 kg quad X in a flat-Earth NED frame climbs from 2 m to 10 m and holds there. Synthetic
+// rotor data (TD1). Two cascaded PID loops on the GNSS fix set the collective thrust through the
+// mixer (altitude to climb-rate setpoint, limited to 3 m/s; climb rate to thrust, with the hover
+// thrust m·g as feedforward); three rate loops on the IMU gyro damp roll, pitch and yaw. Every
+// field left out takes its default (a rotor's axis is −z, up; a loop's limits are ±inf). Used by
+// the step 5c tests.
+(
+    header: (
+        magic: "SABER",
+        format: "scenario",
+        schema_version: "1.0.0",
+    ),
+    units: "SI",
+    frame: NED,
+    model_library_version: "0.1.4",
+    config: (
+        dt: 0.005,
+        max_ticks: 3000,
+        at_max_ticks: Completed,
+    ),
+    scene: (
+        entities: {
+            0: (
+                components: {
+                    "sim_core::body::SimId": (100),
+                    "sim_models::environment::Gravity": Flat(g: 9.80665),
+                    "sim_models::environment::Atmosphere": Ussa1976,
+                    "sim_models::environment::Wind": Calm,
+                },
+            ),
+            1: (
+                components: {
+                    "sim_core::body::SimId": (1),
+                    "sim_core::body::RigidBody6": (
+                        position: (0.0, 0.0, -2.0),
+                        velocity: (0.0, 0.0, 0.0),
+                        attitude: (0.0, 0.0, 0.0, 1.0),
+                        body_rates: (0.0, 0.0, 0.0),
+                    ),
+                    "sim_core::body::MassProps": (
+                        mass: 1.2,
+                        inertia: (0.012, 0.0, 0.0, 0.0, 0.012, 0.0, 0.0, 0.0, 0.022),
+                    ),
+                    "sim_models::rotorcraft::Rotorcraft": (
+                        rotors: [
+                            (position: (0.12, 0.12, 0.0), spin: Ccw, thrust_coefficient: 1.5e-5, torque_coefficient: 2.4e-7, time_constant: 0.04, max_speed: 900.0, inertia: 3e-5),
+                            (position: (-0.12, 0.12, 0.0), spin: Cw, thrust_coefficient: 1.5e-5, torque_coefficient: 2.4e-7, time_constant: 0.04, max_speed: 900.0, inertia: 3e-5),
+                            (position: (-0.12, -0.12, 0.0), spin: Ccw, thrust_coefficient: 1.5e-5, torque_coefficient: 2.4e-7, time_constant: 0.04, max_speed: 900.0, inertia: 3e-5),
+                            (position: (0.12, -0.12, 0.0), spin: Cw, thrust_coefficient: 1.5e-5, torque_coefficient: 2.4e-7, time_constant: 0.04, max_speed: 900.0, inertia: 3e-5),
+                        ],
+                        drag_area: (0.02, 0.02, 0.04),
+                        rotor_drag: 1e-4,
+                    ),
+                    "sim_models::rotorcraft::MixerCommand": (thrust: 0.0, moment: (0.0, 0.0, 0.0)),
+                    "sim_models::sensors::Gnss": (rate_divider: 4),
+                    "sim_models::sensors::Imu": (),
+                    "sim_models::control::PidControl": (
+                        loops: [
+                            (measurement: "Gnss.position.z", setpoint: Constant(-10.0), kp: 1.0, min: -3.0, max: 3.0, rate_divider: 4),
+                            (measurement: "Gnss.velocity.z", setpoint: Loop(0), output: "MixerCommand.thrust", kp: -3.0, ki: -1.5, feedforward: 11.76798, min: 0.0, max: 40.0, rate_divider: 4),
+                            (measurement: "Imu.gyro.x", output: "MixerCommand.moment.x", kp: 0.05, min: -0.5, max: 0.5),
+                            (measurement: "Imu.gyro.y", output: "MixerCommand.moment.y", kp: 0.05, min: -0.5, max: 0.5),
+                            (measurement: "Imu.gyro.z", output: "MixerCommand.moment.z", kp: 0.05, min: -0.2, max: 0.2),
+                        ],
+                    ),
+                },
+            ),
+        },
+    ),
+)

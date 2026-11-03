@@ -2,11 +2,13 @@
 //! sampling, the ground-impact check, and a scenario spawned and resolved from a file each run;
 //! with the aero-ballistics plugin (Mach tables, Earth rotation, `AeroState`); and with the
 //! fixed-wing plugin (the F-16's table buildup, the turbofan's integrated power lag, `AirData`,
-//! trim at Tick 0).
+//! trim at Tick 0); with turbulence, servos and sensors; and with rotorcraft, PID loops and a native
+//! controller.
 
 use std::sync::Arc;
 
 use sim_core::{RunSeed, Scenario, SimAppBuilder, SimConfig};
+use sim_models::rotorcraft::{Rotor, Rotorcraft, Spin};
 
 #[global_allocator]
 static ALLOC: sim_testkit::CountingAllocator = sim_testkit::CountingAllocator;
@@ -235,6 +237,122 @@ fn turbulence_actuators_and_sensors_never_allocate() {
         assert_eq!(n, 0, "run {seed} allocated");
         let imu = sim.world().get::<sim_models::sensors::Imu>(e).unwrap();
         assert!(imu.valid && imu.gyro != glam::DVec3::ZERO);
+        sim.reset();
+    }
+}
+
+/// A native controller for the allocation test: PD on the GNSS fix to the mixer.
+#[derive(bevy_ecs::component::Component, Clone)]
+struct Hover {
+    target: f64,
+    trim: f64,
+}
+
+impl sim_models::Controller for Hover {
+    type Obs = sim_models::sensors::Gnss;
+    type Cmd = sim_models::rotorcraft::MixerCommand;
+    const NAME: &'static str = "test/hover";
+
+    fn rate_divider(&self) -> u32 {
+        2
+    }
+
+    fn reset(&mut self, rng: &mut sim_core::RngStream) {
+        self.trim = rng.normal(0.0, 0.01);
+    }
+
+    fn step(&mut self, _t: f64, gnss: &Self::Obs) -> Self::Cmd {
+        let thrust = 1.2 * 9.80665 * (1.0 + self.trim) - 4.0 * (self.target - gnss.position.z)
+            + 3.0 * gnss.velocity.z;
+        sim_models::rotorcraft::MixerCommand {
+            thrust,
+            moment: glam::DVec3::new(0.001, -0.002, 0.0005),
+        }
+    }
+}
+
+/// Step 5c, part 2: the quadrotor scenario (rotor states, the mixer, five PID loops reading and
+/// writing fields by path) in Dryden turbulence with noisy sensors, next to a second quad flown by
+/// a native controller, never allocates per tick.
+#[test]
+fn rotorcraft_and_control_never_allocate() {
+    let noise = "(white: 0.01, bias: 0.001, bias_walk: 0.0001, resolution: 0.0005)";
+    let text = include_str!("scenarios/quadrotor.scn.ron")
+        .replace(
+            "\"sim_models::environment::Wind\": Calm",
+            "\"sim_models::environment::Wind\": Dryden(mean: (2.0, 1.0, 0.0), airspeed: 5.0, \
+             heading: 0.0, intensity: (1.0, 1.0, 0.7), scale: (200.0, 200.0, 50.0))",
+        )
+        .replace(
+            "\"sim_models::sensors::Gnss\": (rate_divider: 4)",
+            &format!(
+                "\"sim_models::sensors::Gnss\": (rate_divider: 4, latency: 3, \
+                 position_noise: {noise}, velocity_noise: {noise})"
+            ),
+        )
+        .replace(
+            "\"sim_models::sensors::Imu\": ()",
+            &format!("\"sim_models::sensors::Imu\": (gyro_noise: {noise}, accel_noise: {noise})"),
+        );
+    let mut b = SimAppBuilder::new(SimConfig::new(1.0, 1));
+    sim_models::add_library(&mut b);
+    b.add_plugin(sim_models::ControllerPlugin::<Hover>::new());
+    let registry = b.type_registry();
+    let scenario =
+        Scenario::from_ron(&text, &registry.read(), sim_models::LIBRARY_VERSION).unwrap();
+    b.set_config(scenario.config().clone());
+    let mut sim = b.build().unwrap();
+    sim.set_scenario(Arc::new(scenario)).unwrap();
+    let rotors: Vec<_> = [
+        (45.0f64, Spin::Ccw),
+        (135.0, Spin::Cw),
+        (225.0, Spin::Ccw),
+        (315.0, Spin::Cw),
+    ]
+    .into_iter()
+    .map(|(deg, spin)| {
+        let (s, c) = deg.to_radians().sin_cos();
+        Rotor {
+            position: glam::DVec3::new(0.17 * c, 0.17 * s, 0.0),
+            spin,
+            thrust_coefficient: 1.5e-5,
+            torque_coefficient: 2.4e-7,
+            time_constant: 0.04,
+            inertia: 3e-5,
+            speed: 440.0,
+            ..Rotor::default()
+        }
+    })
+    .collect();
+    for seed in [1, 2] {
+        // Spawned again after every reset, like the environment in the test above.
+        sim.spawn(
+            sim_core::SimId(2),
+            (
+                sim_core::RigidBody6 {
+                    position: glam::DVec3::new(5.0, 0.0, -3.0),
+                    ..sim_core::RigidBody6::default()
+                },
+                sim_core::MassProps::principal(1.2, 0.012, 0.012, 0.022),
+                Rotorcraft {
+                    rotors: rotors.clone(),
+                    drag_area: glam::DVec3::new(0.02, 0.02, 0.04),
+                    rotor_drag: 1e-4,
+                },
+                sim_models::sensors::Gnss::default(),
+                Hover {
+                    target: -4.0,
+                    trim: 0.0,
+                },
+            ),
+        );
+        sim.start(RunSeed::new(0, seed)).unwrap();
+        let n = sim_testkit::count_allocations(|| {
+            for _ in 0..500 {
+                assert!(sim.step().is_none(), "ended at tick {}", sim.tick());
+            }
+        });
+        assert_eq!(n, 0, "run {seed} allocated");
         sim.reset();
     }
 }
