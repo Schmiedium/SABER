@@ -564,6 +564,64 @@ Rules: `parry3d_f64` types never leave `sim_core::geometry`; shapes are authored
 contact, sensors (`SensorPlugin` range/lidar ray casts) and fragment impacts; the Parry version is pinned
 exactly and is part of `build_id`.
 
+### 9.7a As built (step 5d, part 1)
+
+`sim_core::geometry` and `sim_core::contact` (build step 5d-1) implement §9.2–§9.6 for `Compliant` and
+`EventOnly` pairs. `Impulsive` contact, event location, swept `EventOnly` casts, penetration recovery and
+the contact watchdog checks are step 5d-2; until then a material with `model: Impulsive` is a
+`SetupError`. Differences from the sketch above:
+
+- **Shapes.** `CollisionShape { parts: Vec<ShapePart> }`, each part a `ShapeDesc` (ball, capsule,
+  cuboid, cylinder, convex hull; static only: half-space, height field, triangle mesh) at a `Pose`, so a
+  compound collider is several parts rather than a Parry compound. On a `RigidBody6` or `PointMass3` the
+  poses are body axes about the centre of mass; on an entity without a body the collider is static and
+  the poses are world frame. Cylinders and height fields run along the part's `z` (Parry's run along
+  `y`; the module rotates them). Height fields are given row by row (`heights[r·cols + c]`, rows along
+  `y`). A convex hull whose points lie in a plane is a `SetupError`.
+- **Contact points.** Against a half-space (the usual flat ground) points are analytic and several per
+  part: every cuboid or hull vertex below the plane, both end spheres of a capsule, four rim points per
+  cylinder cap, the deepest point of a ball. Every other pair gets one point per pair of parts, the
+  deepest, from GJK and EPA; height fields and meshes are searched triangle by triangle under the other
+  part's box. So a box on a mesh (not on a half-space) presses with one point; give flat ground as a
+  half-space, or a body several small parts, where a contact patch matters.
+- **Damping laws.** `DampingLaw::HuntCrossley` (`c δⁿ δ̇`, default) or `DampingLaw::Linear` (`c δ̇`, a
+  dashpot whose force steps to `c v` at touchdown, as for a gear strut). Normal forces never pull
+  (`max(0, ·)`).
+- **Materials.** A pair uses, in order: a `ContactOverrides` entry on either entity naming the other;
+  the one material if only one entity has one; the two combined (stiffness and damping in series,
+  friction the geometric mean, the larger slip speed). Two materials with different exponents or
+  damping laws are a `SetupError` unless the pair has an override. `EventOnly` on either side, or no
+  material on both, makes the pair event-only.
+- **Gear points.** `ContactPoints { points: Vec<GearPoint> }` (a `Vec`, not a fixed array). Each point
+  uses only its own material, whatever the ground's: the strut's spring and damper and the tyre's
+  friction. The force acts at the hit point along the surface normal, so a strut on a slope also gets a
+  moment. A wheel (`rolling: true`) has rolling resistance plus `brake · brake_friction` along its
+  forward direction (turned by `steer`, right-handed about the strut axis) and the side friction across
+  it. `brake` and `steer` are plain fields, written by a controller or actuator through `FieldPath`,
+  rather than `SignalRef`s.
+- **Where it runs.** The solver lives in `Dynamics`. Its broad phase runs once per tick before the
+  integrator, on boxes swept over the tick (`reach + |v| dt + 1 cm`, sorted by `(min x, SimId)`); a
+  half-space pairs with every body. Contact forces are added after the force models in every stage of
+  every substep, so they reach `tick_wrench` and `derivatives` too. `SimSet::Constraints` evaluates the
+  contacts once more at the tick's final state into the `Contacts` resource and emits `contact` (value:
+  approach speed) and `contact_end` (value: the largest total normal force seen at a tick end), both
+  with the other entity and, for `contact`, the deepest point; Tick 0 does the same, so bodies that
+  start touching log `contact` at tick 0.
+- **Capacity.** `config.contact.max_contact_pairs` (default 1024, part of `sim_config_hash`) bounds the
+  near shape pairs and the gear targets of one tick, and the `Contacts` points (eight per pair plus one
+  per gear point). Overflow ends the run `CrashedSolver(ContactCapacity)`, at Tick 0 if the scenario
+  already overflows.
+- **Stiffness check.** Per body, against its weight under 1 g: the collider's material times the number
+  of points the parts can press on a plane (ball 1, capsule 2, other parts 4), and the sum of the gear
+  legs. Above `ω dt = 2` a `SetupError` naming the largest stable `dt` and stiffness; above 0.5 a
+  warning in `ResolveReport.warnings`, plus one when the damping ratio exceeds 1.
+- **Allocation.** Parry's own `contact` query builds a new `EPA` whenever two polyhedra overlap, which
+  allocates. The solver therefore runs GJK itself and keeps one `EPA` for the run, warmed up at Tick 0;
+  balls go through Parry's `contact`, which only projects points. Triangle-mesh traversal uses Parry's
+  BVH iterator, whose stack is inline for the mesh depths tested. The allocation test covers every shape
+  on a half-space, a height field and a mesh, overlapping boxes, gear points and contacts starting and
+  ending, under RK4 and adaptive Dormand–Prince (O-P3).
+
 ### 9.8 Effort
 
 Rough, for one experienced Rust developer.
@@ -801,7 +859,10 @@ Tests that gate the custom kernel (these feed `sim_verify` and the test strategy
   library; each body's `ContactMaterial` parameters are entered in the scenario.
 - ~~**O-P2.** Deformable-terrain or penetration models~~ **Out of scope (Alex, 2026-11-02).** Terrain is
   rigid and contact is surface contact only.
-- **O-P3.** Confirm Parry query names and allocation behaviour on the pinned version.
+- ~~**O-P3.** Confirm Parry query names and allocation behaviour on the pinned version~~ **Done in step
+  5d-1.** Parry is pinned `=0.31.1` (with its `alloc` feature, which the shapes need). Its dispatcher
+  allocates a fresh EPA for overlapping polyhedra, so the solver drives GJK and one reused EPA itself
+  (§9.7a). The names for 5d-2 (`cast_shapes_nonlinear`) are checked when that step is built.
 - ~~**O-P4.** Implicit or Rosenbrock methods~~ **Not needed for now (Alex, 2026-11-02).** Adaptive
   explicit methods, the Tick-0 stiffness check and exact exponential updates for first-order lags cover
   the stiff parts. Revisit if runs often end in `CrashedSolver` or show stiffness warnings.
