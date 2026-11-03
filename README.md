@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S2-1. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S2-2. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -45,7 +45,8 @@ aircraft.
 > campaigns with their heartbeat, or open a crash stream to list its dumps. The shell around every screen (activity
 > rail, resizable dock, status bar, notifications, dark and light themes) is in place. The Scenario Builder lists a
 > scenario's entities, edits any of their fields with undo and redo, keeps unsaved edits in an autosave, lints the
-> scene (validation, Tick-0 setup, step against time constants) and exports the `.scn.ron`; parameters,
+> scene (validation, Tick-0 setup, step against time constants) and exports the `.scn.ron`. Its bind menu sweeps
+> any number as a parameter or draws it per replicate, and components are added and removed there too;
 > requirements and the other screens come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 

@@ -9,6 +9,7 @@
 
 pub mod fields;
 pub mod lint;
+pub mod params;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use sim_core::{
 
 pub use fields::{FieldKind, FieldView};
 pub use lint::{LintItem, LintLevel};
+pub use params::{ParamKind, ParamRow};
 
 /// The sidecar every edit is saved to until the scenario is exported (§9.4).
 pub const AUTOSAVE_SUFFIX: &str = "~autosave";
@@ -50,15 +52,38 @@ pub struct ComponentView {
     pub fields: Vec<FieldView>,
 }
 
+/// A field of an entity: what the bind menu is open on.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FieldRef {
+    /// The entity's document slot.
+    pub slot: usize,
+    /// The component's type path.
+    pub component: String,
+    /// The field's reflection path.
+    pub path: String,
+}
+
 /// One edit, kept for undo and redo.
-#[derive(Clone, Debug, PartialEq)]
 struct Edit {
     id: u64,
     slot: usize,
-    component: String,
-    path: String,
-    before: String,
-    after: String,
+    change: Change,
+}
+
+/// What an edit changed.
+enum Change {
+    /// One field, as text.
+    Field {
+        component: String,
+        path: String,
+        before: String,
+        after: String,
+    },
+    /// The entity's components (bindings, uncertainties, components added or removed).
+    Entity {
+        before: SceneEntity,
+        after: SceneEntity,
+    },
 }
 
 /// The open scenario, being edited.
@@ -69,6 +94,8 @@ pub struct ScenarioDoc {
     pub path: PathBuf,
     /// The selected entity's slot.
     pub selected: Option<usize>,
+    /// The field the bind menu is open on.
+    pub focus: Option<FieldRef>,
     registry: TypeRegistryArc,
     meta: SceneMeta,
     visual: Option<String>,
@@ -151,6 +178,7 @@ impl ScenarioDoc {
             rel: rel.to_owned(),
             path: path.to_owned(),
             selected: None,
+            focus: None,
             registry,
             meta: scenario.meta(),
             visual: scenario.visual().map(str::to_owned),
@@ -271,14 +299,81 @@ impl ScenarioDoc {
         self.undo.push(Edit {
             id,
             slot,
-            component: component.to_owned(),
-            path: path.to_owned(),
-            before,
-            after,
+            change: Change::Field {
+                component: component.to_owned(),
+                path: path.to_owned(),
+                before,
+                after,
+            },
         });
         self.redo.clear();
         self.changed();
         Ok(true)
+    }
+
+    /// Change an entity's components with `f`, as one undoable edit. A scene that validated
+    /// must still validate afterwards, or the entity is put back and the reason returned.
+    pub(crate) fn restructure(
+        &mut self,
+        slot: usize,
+        f: impl FnOnce(&mut SceneEntity, &bevy::reflect::TypeRegistry) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let was_valid = self.scenario().is_ok();
+        let registry = self.registry.clone();
+        let reg = registry.read();
+        let entity = self
+            .entities
+            .get_mut(slot)
+            .ok_or_else(|| format!("no entity in slot {slot}"))?;
+        let before = entity
+            .try_clone(&reg)
+            .ok_or("a component cannot be copied")?;
+        if let Err(e) = f(entity, &reg) {
+            self.entities[slot] = before;
+            return Err(e);
+        }
+        if was_valid && let Err(e) = self.scenario() {
+            self.entities[slot] = before;
+            return Err(e);
+        }
+        let after = self.entities[slot]
+            .try_clone(&reg)
+            .ok_or("a component cannot be copied")?;
+        drop(reg);
+        let id = self.next_id;
+        self.next_id += 1;
+        self.undo.push(Edit {
+            id,
+            slot,
+            change: Change::Entity { before, after },
+        });
+        self.redo.clear();
+        self.changed();
+        Ok(())
+    }
+
+    /// Put one side of an edit in place.
+    fn replay(&mut self, edit: &Edit, forward: bool) {
+        match &edit.change {
+            Change::Field {
+                component,
+                path,
+                before,
+                after,
+            } => {
+                let text = if forward { after } else { before };
+                self.write(edit.slot, component, path, text)
+                    .expect("an edit's values fit its field");
+            }
+            Change::Entity { before, after } => {
+                let side = if forward { after } else { before };
+                let copy = side
+                    .try_clone(&self.registry.read())
+                    .expect("copied once already");
+                self.entities[edit.slot] = copy;
+            }
+        }
+        self.selected = Some(edit.slot);
     }
 
     /// Undo the last edit; `false` if there is none.
@@ -286,9 +381,7 @@ impl ScenarioDoc {
         let Some(edit) = self.undo.pop() else {
             return false;
         };
-        self.write(edit.slot, &edit.component, &edit.path, &edit.before)
-            .expect("an edit's old value fits its field");
-        self.selected = Some(edit.slot);
+        self.replay(&edit, false);
         self.redo.push(edit);
         self.changed();
         true
@@ -299,9 +392,7 @@ impl ScenarioDoc {
         let Some(edit) = self.redo.pop() else {
             return false;
         };
-        self.write(edit.slot, &edit.component, &edit.path, &edit.after)
-            .expect("an edit's new value fits its field");
-        self.selected = Some(edit.slot);
+        self.replay(&edit, true);
         self.undo.push(edit);
         self.changed();
         true

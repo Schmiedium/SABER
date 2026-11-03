@@ -13,7 +13,7 @@ use sim_studio_ui::dock::{DockLayout, DockLayoutChanged};
 use sim_studio_ui::theme::{StudioTheme, ThemeMode};
 use sim_studio_ui::toast::Toast;
 
-use crate::builder::ScenarioDoc;
+use crate::builder::{FieldRef, ScenarioDoc};
 use crate::campaign::CampaignCard;
 use crate::clock;
 use crate::crash::OpenCrash;
@@ -64,6 +64,36 @@ pub enum StudioCommand {
     Redo,
     /// Write the scenario file (`.scn.ron`) from the Builder.
     Export,
+    /// Open the bind menu on a field (`None` closes it).
+    Focus(Option<FieldRef>),
+    /// Make a field a swept parameter; `lo` and `hi` as typed (both empty: unbounded).
+    Bind {
+        /// The field.
+        field: FieldRef,
+        /// The `param_key`.
+        key: String,
+        /// Lower bound as typed.
+        lo: String,
+        /// Upper bound as typed.
+        hi: String,
+    },
+    /// Remove the binding on a `Component.field.path` target of an entity.
+    Unbind(usize, String),
+    /// Draw a field per replicate; `params` as typed, comma-separated.
+    Jitter {
+        /// The field.
+        field: FieldRef,
+        /// `Normal`, `Uniform`, `LogNormal` or `Triangular`.
+        kind: String,
+        /// The distribution's numbers.
+        params: String,
+    },
+    /// Remove the uncertainty on a target of an entity.
+    Unjitter(usize, String),
+    /// Give an entity a component with its starting value.
+    AddComponent(usize, String),
+    /// Remove a component from an entity.
+    RemoveComponent(usize, String),
 }
 
 /// The Builder's document changed (an edit, undo, redo, export or selection): panels refresh.
@@ -337,7 +367,14 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             | StudioCommand::SetField { .. }
             | StudioCommand::Undo
             | StudioCommand::Redo
-            | StudioCommand::Export => edit(command, &mut cx),
+            | StudioCommand::Export
+            | StudioCommand::Focus(_)
+            | StudioCommand::Bind { .. }
+            | StudioCommand::Unbind(..)
+            | StudioCommand::Jitter { .. }
+            | StudioCommand::Unjitter(..)
+            | StudioCommand::AddComponent(..)
+            | StudioCommand::RemoveComponent(..) => edit(command, &mut cx),
         }
     }
 }
@@ -350,7 +387,42 @@ fn edit(command: &StudioCommand, cx: &mut CommandCx) {
         return;
     };
     match command {
-        StudioCommand::Select(slot) => doc.selected = Some(*slot),
+        StudioCommand::Select(slot) => {
+            if doc.selected != Some(*slot) {
+                doc.focus = None;
+            }
+            doc.selected = Some(*slot);
+        }
+        StudioCommand::Focus(field) => {
+            if let Some(f) = field {
+                doc.selected = Some(f.slot);
+            }
+            doc.focus = field.clone();
+        }
+        StudioCommand::Bind { field, key, lo, hi } => {
+            let result = parse_bounds(lo, hi).and_then(|bounds| {
+                doc.bind(field.slot, &field.component, &field.path, key, bounds)
+            });
+            report(result, cx);
+        }
+        StudioCommand::Unbind(slot, target) => report(doc.unbind(*slot, target), cx),
+        StudioCommand::Jitter {
+            field,
+            kind,
+            params,
+        } => {
+            let result = parse_numbers(params)
+                .and_then(|p| crate::builder::params::distribution(kind, &p))
+                .and_then(|d| doc.jitter(field.slot, &field.component, &field.path, d));
+            report(result, cx);
+        }
+        StudioCommand::Unjitter(slot, target) => report(doc.unjitter(*slot, target), cx),
+        StudioCommand::AddComponent(slot, type_path) => {
+            report(doc.add_component(*slot, type_path), cx);
+        }
+        StudioCommand::RemoveComponent(slot, type_path) => {
+            report(doc.remove_component(*slot, type_path), cx);
+        }
         StudioCommand::SetField {
             slot,
             component,
@@ -393,6 +465,36 @@ fn edit(command: &StudioCommand, cx: &mut CommandCx) {
         _ => return,
     }
     cx.changed.write(DocChanged);
+}
+
+fn report(result: Result<(), String>, cx: &mut CommandCx) {
+    if let Err(e) = result {
+        cx.toasts.write(Toast::error(e));
+    }
+}
+
+fn parse_numbers(text: &str) -> Result<Vec<f64>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            t.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("{t:?} is not a finite number"))
+        })
+        .collect()
+}
+
+fn parse_bounds(lo: &str, hi: &str) -> Result<Option<(f64, f64)>, String> {
+    match (lo.trim(), hi.trim()) {
+        ("", "") => Ok(None),
+        ("", _) | (_, "") => Err("give both bounds, or neither for an unbounded parameter".into()),
+        (lo, hi) => {
+            let v = parse_numbers(&format!("{lo},{hi}"))?;
+            Ok(Some((v[0], v[1])))
+        }
+    }
 }
 
 /// Builder keys (§9.6), unless a text field has focus: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo,
