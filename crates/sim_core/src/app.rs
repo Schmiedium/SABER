@@ -325,6 +325,14 @@ pub trait SimPlugin: Send + Sync + 'static {
     fn start(&self, _world: &mut World) -> Result<(), SetupError> {
         Ok(())
     }
+
+    /// Tick 0 of every run, after the body table, the integrator and the force models are set up
+    /// and before the initial frame is recorded: for initial-condition solvers such as trim, which
+    /// evaluate the equations of motion with [`crate::dynamics::derivatives`] and may change body
+    /// states and inputs. Plugins run in the order added. Allocation is allowed here.
+    fn after_setup(&self, _world: &mut World) -> Result<(), SetupError> {
+        Ok(())
+    }
 }
 
 /// Builds a [`SimWorld`]: the core systems and resources, then each plugin in the order added.
@@ -629,8 +637,8 @@ impl SimWorld {
 
     /// Tick 0 (seq §6): seed the random streams, spawn the scenario if one is set, resolve
     /// parameter bindings from `params` and draw uncertainties (`Core.Resolver`), run each
-    /// plugin's `start`, build the body table and the integrator, set up the force models, size the
-    /// recorder and record the initial frame. Everything that allocates happens here. On error the
+    /// plugin's `start`, build the body table and the integrator, set up the force models, run each
+    /// plugin's `after_setup` (trim), size the recorder and record the initial frame. Everything that allocates happens here. On error the
     /// World must be `reset` before the next attempt.
     pub fn start_with_params(
         &mut self,
@@ -675,6 +683,9 @@ impl SimWorld {
         crate::with_resource(world, |world, d: &mut Dynamics| {
             d.start(world, &config.integrator, config.dt)
         })?;
+        for plugin in &self.plugins {
+            plugin.after_setup(world)?;
+        }
 
         let n = world.resource::<Dynamics>().bodies().len();
         world.resource_mut::<TickEnergy>().per_body.resize(n, 0.0);
@@ -744,6 +755,18 @@ impl SimWorld {
     /// The simulation clock.
     pub fn clock(&self) -> SimClock {
         *self.world.resource::<SimClock>()
+    }
+
+    /// The right-hand side of the equations of motion at the current state and time: every body's
+    /// state derivative with the net wrench behind it, and every force model's integrated states
+    /// with their rates. For trim, linearisation and check cases, outside a run's tick sequence:
+    /// each force model's `prepare` runs first (see `dynamics::derivatives`). Allocates.
+    ///
+    /// # Panics
+    /// If the World has not started.
+    pub fn derivatives(&mut self) -> crate::dynamics::Derivatives {
+        assert!(self.started, "SimWorld::derivatives before start");
+        crate::dynamics::derivatives(&mut self.world)
     }
 
     /// The state hash of the current state (verification §4.1).

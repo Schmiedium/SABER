@@ -16,17 +16,25 @@
 //! with the Earth). `ω` (`body_rates`) is inertial, so a rotating frame changes only the
 //! translational terms and the attitude kinematics. Quaternions are renormalised after every
 //! accepted step.
+//!
+//! Force models may own integrated states (`ForceModel::state_len`, for example an engine's power
+//! lag). They are packed after the bodies, one error-norm group per model, and crossed by the same
+//! integrator, so every model works with every method (D14).
+
+use std::ops::Range;
 
 use bevy_ecs::prelude::*;
 use glam::{DQuat, DVec3};
 use sim_schema::CrashReason;
 
 use crate::app::SetupError;
-use crate::body::{BodyState, BodyTable, Dof, PointMass3, RigidBody6};
+use crate::body::{BodyState, BodyTable, Dof, PointMass3, RigidBody6, SimId};
 use crate::clock::SimClock;
 use crate::environment::{EnvSample, Environment, SimEnvironment};
 use crate::force::{ForceModel, Stage, Wrench};
-use crate::integrator::{Integrator, IntegratorConfig, IntegratorStats, OdeSystem, StateLayout};
+use crate::integrator::{
+    Integrator, IntegratorConfig, IntegratorStats, OdeSystem, StateClass, StateLayout,
+};
 use crate::watchdog::RunStatus;
 
 /// The World's dynamics: the body table, the integrator, the force models and every buffer the
@@ -35,6 +43,8 @@ use crate::watchdog::RunStatus;
 pub struct Dynamics {
     bodies: BodyTable,
     models: Vec<Box<dyn ForceModel>>,
+    /// Each model's integrated states in `y` (empty for a model without states).
+    model_ranges: Vec<Range<usize>>,
     integrator: Option<Integrator>,
     layout: StateLayout,
     y: Vec<f64>,
@@ -55,6 +65,7 @@ impl Dynamics {
         Self {
             bodies: BodyTable::default(),
             models,
+            model_ranges: Vec::new(),
             integrator: None,
             layout: StateLayout::new(),
             y: Vec::new(),
@@ -84,8 +95,8 @@ impl Dynamics {
             .unwrap_or_default()
     }
 
-    /// Tick 0: collect the bodies, build or reset the integrator and its buffers, set up the force
-    /// models. Buffers are kept when the layout is unchanged, so a reused World does not reallocate.
+    /// Tick 0: collect the bodies, set up the force models, build or reset the integrator and its
+    /// buffers. Buffers are kept when the layout is unchanged, so a reused World does not reallocate.
     pub(crate) fn start(
         &mut self,
         world: &mut World,
@@ -93,7 +104,23 @@ impl Dynamics {
         dt: f64,
     ) -> Result<(), SetupError> {
         self.bodies = BodyTable::build(world)?;
-        let layout = self.bodies.layout();
+        {
+            let Self { models, bodies, .. } = self;
+            for model in models.iter_mut() {
+                model.setup(world, bodies)?;
+            }
+        }
+        let mut layout = self.bodies.layout();
+        self.model_ranges.clear();
+        for model in &self.models {
+            let len = model.state_len();
+            let range = if len > 0 {
+                layout.push_group(&vec![StateClass::Model; len])
+            } else {
+                layout.dim()..layout.dim()
+            };
+            self.model_ranges.push(range);
+        }
         let n = self.bodies.len();
         match &mut self.integrator {
             Some(integrator) if layout == self.layout && integrator.config() == config => {
@@ -105,16 +132,12 @@ impl Dynamics {
                 self.layout = layout;
             }
         }
-        self.y.resize(self.bodies.dim(), 0.0);
+        self.y.resize(self.layout.dim(), 0.0);
         self.states.resize(n, BodyState::ZERO);
         self.env.resize(n, EnvSample::VACUUM);
         self.wrenches.resize(n, Wrench::ZERO);
         self.tick_wrenches.clear();
         self.tick_wrenches.resize(n, Wrench::ZERO);
-        let Self { models, bodies, .. } = self;
-        for model in models.iter_mut() {
-            model.setup(world, bodies)?;
-        }
         Ok(())
     }
 
@@ -142,6 +165,11 @@ impl Dynamics {
                 }
             }
         }
+        for (model, range) in self.models.iter().zip(&self.model_ranges) {
+            if !range.is_empty() {
+                model.read_states(world, &mut self.y[range.clone()]);
+            }
+        }
     }
 
     /// Write the packed state back into the body components.
@@ -167,6 +195,11 @@ impl Dynamics {
                 }
             }
         }
+        for (model, range) in self.models.iter().zip(&self.model_ranges) {
+            if !range.is_empty() {
+                model.write_states(world, &self.y[range.clone()]);
+            }
+        }
     }
 }
 
@@ -178,6 +211,8 @@ fn vec3(y: &[f64]) -> DVec3 {
 struct BodyOde<'a> {
     bodies: &'a BodyTable,
     models: &'a [Box<dyn ForceModel>],
+    model_ranges: &'a [Range<usize>],
+    dim: usize,
     environment: &'a dyn Environment,
     states: &'a mut [BodyState],
     env: &'a mut [EnvSample],
@@ -189,7 +224,7 @@ struct BodyOde<'a> {
 
 impl OdeSystem for BodyOde<'_> {
     fn dim(&self) -> usize {
-        self.bodies.dim()
+        self.dim
     }
 
     fn rhs(&mut self, t: f64, y: &[f64], dydt: &mut [f64]) {
@@ -221,15 +256,21 @@ impl OdeSystem for BodyOde<'_> {
             self.wrenches[i] = Wrench::ZERO;
         }
 
-        let stage = Stage {
-            t,
-            states: self.states,
-            env: self.env,
-            bodies: self.bodies,
-            frame_rotation: self.frame_rotation,
-        };
-        for model in self.models {
+        for (model, range) in self.models.iter().zip(self.model_ranges) {
+            let stage = Stage {
+                t,
+                states: self.states,
+                env: self.env,
+                bodies: self.bodies,
+                frame_rotation: self.frame_rotation,
+                own_states: &y[range.clone()],
+            };
             model.eval(&stage, self.wrenches);
+            if !range.is_empty() {
+                let rates = &mut dydt[range.clone()];
+                rates.fill(0.0);
+                model.state_rhs(&stage, rates);
+            }
         }
         if self.first_stage {
             self.tick_wrenches.copy_from_slice(self.wrenches);
@@ -302,6 +343,7 @@ pub(crate) fn integrate_system(world: &mut World) {
             let Dynamics {
                 bodies,
                 models,
+                model_ranges,
                 integrator,
                 y,
                 states,
@@ -314,6 +356,8 @@ pub(crate) fn integrate_system(world: &mut World) {
             let mut ode = BodyOde {
                 bodies,
                 models,
+                model_ranges,
+                dim: y.len(),
                 environment,
                 states,
                 env,
@@ -336,7 +380,11 @@ pub(crate) fn integrate_system(world: &mut World) {
             clock.tick
         };
         if let Err(failure) = result {
-            let sim_id = failure.group.map(|g| d.bodies.entries()[g].sim_id.0);
+            // Groups past the bodies are model states, which name no body.
+            let sim_id = failure
+                .group
+                .and_then(|g| d.bodies.entries().get(g))
+                .map(|e| e.sim_id.0);
             world.resource_mut::<RunStatus>().report_crash(CrashReason {
                 kind: failure.kind,
                 sim_id,
@@ -379,4 +427,126 @@ pub(crate) fn body_energies(
         total += energy;
     }
     total
+}
+
+/// The right-hand side of the World's equations at its current state, for trim, linearisation
+/// and check cases (`SimWorld::derivatives`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Derivatives {
+    /// Every authored body, in `SimId` order.
+    pub bodies: Vec<BodyDerivative>,
+    /// The integrated states of every force model that has some, in registration order.
+    pub models: Vec<ModelStates>,
+}
+
+/// One body's state derivative and the net applied wrench behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyDerivative {
+    /// The body.
+    pub sim_id: SimId,
+    /// `ṗ`, world frame, m/s.
+    pub velocity: DVec3,
+    /// `v̇`, world frame, m/s² (gravity and frame terms included).
+    pub acceleration: DVec3,
+    /// `q̇` (zero for a 3DOF body).
+    pub attitude_rate: DQuat,
+    /// `ω̇`, body axes, rad/s² (zero for a 3DOF body).
+    pub angular_acceleration: DVec3,
+    /// The net applied force (world frame) and moment (body axes), without gravity.
+    pub wrench: Wrench,
+}
+
+/// One force model's integrated states and their time derivatives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelStates {
+    /// `ForceModel::name`.
+    pub model: &'static str,
+    /// The states.
+    pub states: Vec<f64>,
+    /// Their time derivatives.
+    pub rates: Vec<f64>,
+}
+
+/// Evaluate the right-hand side once at the World's current state and time. Each force model's
+/// `prepare` runs first, so it sees the World's current inputs (control positions, for example);
+/// a model that draws random numbers in `prepare` advances its stream, so this is a tool for use
+/// outside a run's tick sequence (trim in `SimPlugin::after_setup`, check cases), not inside one.
+/// Allocates.
+///
+/// # Panics
+/// Before the World's dynamics are set up (Tick 0).
+pub fn derivatives(world: &mut World) -> Derivatives {
+    crate::with_resource(world, |world, d: &mut Dynamics| {
+        for model in d.models.iter_mut() {
+            model.prepare(world, &d.bodies);
+        }
+        d.pack(world);
+        let t = world.resource::<SimClock>().time();
+        let mut dydt = vec![0.0; d.y.len()];
+        {
+            let Dynamics {
+                bodies,
+                models,
+                model_ranges,
+                y,
+                states,
+                env,
+                wrenches,
+                tick_wrenches,
+                ..
+            } = d;
+            let environment = world.resource::<SimEnvironment>().0.as_ref();
+            let mut ode = BodyOde {
+                bodies,
+                models,
+                model_ranges,
+                dim: y.len(),
+                environment,
+                states,
+                env,
+                wrenches,
+                tick_wrenches,
+                // Leave the tick's recorded wrenches alone.
+                first_stage: false,
+                frame_rotation: environment.frame_rotation(),
+            };
+            if !y.is_empty() {
+                ode.rhs(t, y, &mut dydt);
+            }
+        }
+        let bodies = d
+            .bodies
+            .entries()
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let r = &dydt[e.offset..e.offset + e.dof.state_len()];
+                let (attitude_rate, angular_acceleration) = if e.dof == Dof::Six {
+                    (DQuat::from_xyzw(r[7], r[8], r[9], r[6]), vec3(&r[10..13]))
+                } else {
+                    (DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0), DVec3::ZERO)
+                };
+                BodyDerivative {
+                    sim_id: e.sim_id,
+                    velocity: vec3(&r[0..3]),
+                    acceleration: vec3(&r[3..6]),
+                    attitude_rate,
+                    angular_acceleration,
+                    wrench: d.wrenches[i],
+                }
+            })
+            .collect();
+        let models = d
+            .models
+            .iter()
+            .zip(&d.model_ranges)
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(m, r)| ModelStates {
+                model: m.name(),
+                states: d.y[r.clone()].to_vec(),
+                rates: dydt[r.clone()].to_vec(),
+            })
+            .collect();
+        Derivatives { bodies, models }
+    })
 }

@@ -1403,6 +1403,8 @@ dependencies = [
  "bevy_ecs",
  "bevy_reflect",
  "glam",
+ "ron",
+ "serde",
  "sim_core",
  "sim_schema",
  "sim_testkit",

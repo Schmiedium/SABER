@@ -68,6 +68,10 @@ v0.20 (2026-11-03, build step 5a) records the aero-ballistics plugin and Earth r
 IB-08): `ProjectileAero` (McCoy 6DOF), `PointMassAero` (3DOF), `Coef` (constant or `C(Mach)` table) and the
 `AeroState` telemetry component; `Environment::frame_rotation` with the Coriolis and centrifugal terms in the
 kernel, body rates kept inertial, and an opt-in `EarthRotation` scenario component. `LIBRARY_VERSION` 0.1.1.
+v0.21 (2026-11-03, build step 5b) records the fixed-wing plugin as built (§5.2, IB-08): `FixedWingAero` as sums
+of coefficient terms over named inputs, `ControlSurfaces`, `Propulsion` with the Stevens–Lewis turbofan,
+`EngineState`, `AirData` and `TrimCondition`; in the kernel, integrated states owned by force models, the
+`SimPlugin::after_setup` hook and `sim_core::dynamics::derivatives` for trim. `LIBRARY_VERSION` 0.1.2.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -413,7 +417,7 @@ at or below that altitude; the plugin lists the watched bodies at Tick 0, so a s
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
 `sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
-0.1.1 from step 5a) is the version scenarios check against (IB-01).
+0.1.1 from step 5a, 0.1.2 from step 5b) is the version scenarios check against (IB-01).
 
 **As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
 `SetupError` names the body that breaks a rule:
@@ -458,6 +462,39 @@ included, so scenarios written before step 5a run unchanged. `Ecef` with J2 grav
 gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
 origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
 origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
+
+**As built (step 5b).** `FixedWingPlugin` (`ModelId` namespace `fixedwing/`) acts on a `RigidBody6` whose body
+axes are forward, right, down. Its components, each checked at Tick 0 with a `SetupError` naming the body:
+
+- `FixedWingAero { area, span, chord, moment_reference, cx, cy, cz, lift, drag, roll, pitch, yaw }`. Each of the
+  eight coefficients is a list of `AeroTerm { value, factors }`, summed. A value is `Constant(f64)` or
+  `Table(AeroTable)` whose axes are named after inputs; a factor is `Input(i)`, `Sign(i)` (−1 below zero, else
+  +1, for data tabulated over `|β|`) or `Poly(i, [c₀, c₁, …])`. The 21 inputs (`AeroInput`) are α and β in
+  radians or degrees, `|β|`, Mach, altitude, airspeed, each control surface in radians or degrees, the
+  normalised rates `p̂ = pb/2V`, `q̂ = qc̄/2V`, `r̂ = rb/2V`, and throttle. So a table buildup (Stevens and
+  Lewis's F-16), stability derivatives (`C_mq · q̂`) or a mix are all data, not code.
+- `ControlSurfaces { elevator, aileron, rudder, flap, throttle }`, radians and 0–1, read once per tick (IB-08),
+  so a controller, an actuator model (5c), a scenario or a sweep can set them. The sign convention (positive
+  elevator trailing edge down, positive aileron rolls left, positive rudder yaws left) is the data's.
+- `Propulsion { engine, thrust_point }`: `Thrust(Vec<AeroTerm>)` in newtons, or `Turbofan { idle, military,
+  maximum, angular_momentum }`, Stevens and Lewis's F-16 engine: throttle gearing to a commanded power, a power
+  lag whose rate depends on the change asked for, thrust interpolated between the tables by power, and the
+  rotor's gyroscopic moment `−ω × h_e`.
+- `EngineState { power }`: the turbofan's lag, an integrated state the force model owns (IB-08), inserted at
+  Tick 0 at the commanded power unless the scenario gives one.
+- `AirData { airspeed, alpha, beta, mach, dynamic_pressure, load_factor, thrust }`: telemetry at the end of
+  every tick (`entity(1).AirData.alpha`).
+- `TrimCondition { airspeed, flight_path_angle, heading }`: the plugin trims the aircraft for steady straight
+  wings-level flight at Tick 0, in `after_setup`: Levenberg–Marquardt over throttle, elevator, aileron, rudder,
+  α and β on the World's full right-hand side (`sim_core::dynamics::derivatives`), to residuals below 1e-9.
+  The position stays as authored, so altitude and airspeed can be swept. A trim that fails, needs a throttle
+  outside 0–1, or runs in ECEF or a rotating frame is a `SetupError`.
+
+Force `F = q̄S[(C_X, C_Y, C_Z) + C_L (sin α, 0, −cos α) − C_D (cos α, 0, sin α)]` (lift and drag in stability
+axes) and moment `q̄S(b C_l, c̄ C_m, b C_n) + r_ref × F` about the centre of mass, where `r_ref` is the point the
+moment data refer to; then thrust along body `x` at `thrust_point`. `FixedWingAero` and `ProjectileAero` on one
+body is a `SetupError` (D9). Coefficients are copied at Tick 0 after the Resolver, so any term can be swept.
+The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lewis/f16/`) as a scenario file.
 
 `Controller` boundary (in-process, deterministic):
 
@@ -1541,8 +1578,9 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). A system with a `Query` parameter fills Bevy's archetype cache on its first run after Tick 0 spawned the scenario, which allocates on Tick 1 of every fresh World, so model systems are exclusive (`fn(&mut World)`) and read lists of entities built in `SimPlugin::start`, as the kernel's own systems and `EnvironmentPlugin`'s ground-impact check do (step 1c). |
 | As built (step 2) | Plugins declare the event names they emit (`SimAppBuilder::declare_event`) and may register custom requirement checks (`register_check(name, fn() -> Box<dyn CustomCheck>)`); `sim_core::with_resource` is the allocation-free way for an exclusive system to update its own resource. `EnvironmentPlugin` emits `ground_impact` (value: the body's altitude). |
-| As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrive with the first model that needs them (step 5c). |
+| As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrived in step 5b. |
 | As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
+| As built (step 5b) | A force model may own integrated states: `ForceModel::state_len` (read after `setup`, fixed for the run), `read_states`/`write_states` (World to packed vector at the start of each tick and back at its end) and `state_rhs(stage, dxdt)`, pure like `eval`, which sees its states as `Stage::model_states()`. They are packed after the bodies, one `StateClass::Model` error group per model, so every integrator crosses them (D14); a solver failure on them names no body. `SimPlugin::after_setup` runs at Tick 0 after the body table, integrator and force models are set up and before the first frame is recorded, for initial-condition solvers. `sim_core::dynamics::derivatives(world)` (and `SimWorld::derivatives`) evaluates the right-hand side once at the current state: each body's `ṗ`, `v̇`, `q̇`, `ω̇` and net applied wrench, and each model's states and rates; it runs every model's `prepare` first and allocates, so it belongs to Tick 0 and tests, not to the tick loop. `FixedWingPlugin` uses all three (engine power lag, trim). |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 

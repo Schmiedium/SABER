@@ -1,6 +1,8 @@
 //! Zero allocations per tick with the environment plugin (IB-08 rule 5): USSA 1976 and J2
 //! sampling, the ground-impact check, and a scenario spawned and resolved from a file each run;
-//! and with the aero-ballistics plugin (Mach tables, Earth rotation, `AeroState`).
+//! with the aero-ballistics plugin (Mach tables, Earth rotation, `AeroState`); and with the
+//! fixed-wing plugin (the F-16's table buildup, the turbofan's integrated power lag, `AirData`,
+//! trim at Tick 0).
 
 use std::sync::Arc;
 
@@ -105,6 +107,46 @@ fn ballistic_ticks_never_allocate() {
     sim.set_scenario(Arc::new(scenario)).unwrap();
     for seed in [1, 2] {
         sim.start(RunSeed::new(0, seed)).unwrap();
+        let n = sim_testkit::count_allocations(|| {
+            for _ in 0..500 {
+                assert!(sim.step().is_none(), "ended at tick {}", sim.tick());
+            }
+        });
+        assert_eq!(n, 0, "run {seed} allocated");
+        sim.reset();
+    }
+}
+
+#[test]
+fn fixed_wing_ticks_never_allocate() {
+    let text = include_str!("../../../tests/reference/stevens_lewis/f16/f16.scn.ron").replace(
+        "\"sim_models::fixedwing::EngineState\": (power: 90.0),",
+        "\"sim_models::fixedwing::EngineState\": (power: 90.0),\n\
+         \"sim_models::fixedwing::TrimCondition\": (airspeed: 150.0, flight_path_angle: 0.02),",
+    );
+    let mut b = SimAppBuilder::new(SimConfig::new(1.0, 1));
+    sim_models::add_library(&mut b);
+    let registry = b.type_registry();
+    let scenario =
+        Scenario::from_ron(&text, &registry.read(), sim_models::LIBRARY_VERSION).unwrap();
+    b.set_config(scenario.config().clone());
+    let mut sim = b.build().unwrap();
+    sim.set_scenario(Arc::new(scenario)).unwrap();
+    for seed in [1, 2] {
+        sim.spawn(
+            sim_core::SimId(100),
+            (
+                sim_models::environment::Gravity::Flat { g: 9.80665 },
+                sim_models::environment::Atmosphere::Ussa1976,
+            ),
+        );
+        sim.start(RunSeed::new(0, seed)).unwrap();
+        let e = sim.body(sim_core::SimId(1)).unwrap();
+        // Move the throttle so the power state is moving too.
+        sim.world_mut()
+            .get_mut::<sim_models::fixedwing::ControlSurfaces>(e)
+            .unwrap()
+            .throttle = 0.9;
         let n = sim_testkit::count_allocations(|| {
             for _ in 0..500 {
                 assert!(sim.step().is_none(), "ended at tick {}", sim.tick());
