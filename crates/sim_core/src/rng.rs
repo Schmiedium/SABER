@@ -8,6 +8,7 @@
 //! The samplers are implemented here rather than taken from `rand_distr`, so a dependency upgrade
 //! can never change a draw. They use only IEEE arithmetic, `sqrt` and `ln` from the pinned build.
 
+use bevy_ecs::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
 
@@ -85,6 +86,11 @@ impl RngStream {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// Uniform in `(0, 1)` with 53 random bits, never exactly 0 or 1 (for inverse-CDF sampling).
+    pub fn next_open01(&mut self) -> f64 {
+        ((self.next_u64() >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64)
+    }
+
     /// Uniform in `[lo, hi)`.
     pub fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.next_f64()
@@ -106,6 +112,84 @@ impl RngStream {
     /// Normal with the given mean and standard deviation.
     pub fn normal(&mut self, mean: f64, std: f64) -> f64 {
         mean + std * self.standard_normal()
+    }
+}
+
+/// A registered stream of the World's [`RngStreams`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StreamHandle(usize);
+
+/// The World's random streams. Models register their named streams at Tick 0 (allocation allowed)
+/// and draw through the handle afterwards. Registrations survive World reuse; at each run's Tick 0
+/// every stream is re-derived from the new root.
+#[derive(Resource, Clone, Debug)]
+pub struct RngStreams {
+    root: SimRng,
+    names: Vec<String>,
+    streams: Vec<RngStream>,
+    by_id: Vec<usize>,
+}
+
+impl RngStreams {
+    /// Streams for a run with this root.
+    pub fn new(root: SimRng) -> Self {
+        Self {
+            root,
+            names: Vec::new(),
+            streams: Vec::new(),
+            by_id: Vec::new(),
+        }
+    }
+
+    /// The run's root.
+    pub fn root(&self) -> &SimRng {
+        &self.root
+    }
+
+    /// The handle of the stream with this name, registering it on first use.
+    ///
+    /// # Panics
+    /// If two different names map to the same 64-bit stream id (a BLAKE3 collision).
+    pub fn register(&mut self, name: &str) -> StreamHandle {
+        if let Some(i) = self.names.iter().position(|n| n == name) {
+            return StreamHandle(i);
+        }
+        let stream = self.root.stream(name);
+        let pos = self
+            .by_id
+            .binary_search_by_key(&stream.id(), |&i| self.streams[i].id())
+            .expect_err("two random stream names share a stream id");
+        let handle = self.streams.len();
+        self.by_id.insert(pos, handle);
+        self.names.push(name.to_owned());
+        self.streams.push(stream);
+        StreamHandle(handle)
+    }
+
+    /// The stream behind a handle.
+    pub fn get(&self, handle: StreamHandle) -> &RngStream {
+        &self.streams[handle.0]
+    }
+
+    /// The stream behind a handle, for drawing.
+    pub fn get_mut(&mut self, handle: StreamHandle) -> &mut RngStream {
+        &mut self.streams[handle.0]
+    }
+
+    /// Start a new run: new root, every registered stream back at its start.
+    pub(crate) fn reseed(&mut self, root: SimRng) {
+        for (stream, name) in self.streams.iter_mut().zip(&self.names) {
+            *stream = root.stream(name);
+        }
+        self.root = root;
+    }
+
+    /// The streams drawn from in this run, in stream-id order (hashed into the state hash).
+    pub fn drawn(&self) -> impl Iterator<Item = &RngStream> {
+        self.by_id
+            .iter()
+            .map(|&i| &self.streams[i])
+            .filter(|s| s.word_pos() > 0)
     }
 }
 

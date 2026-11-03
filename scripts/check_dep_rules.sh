@@ -19,6 +19,11 @@ for c in sim_hpc sim_explorer sim_models sim_query; do
 done
 forbid sim_explorer sim_core      "the data side builds without the kernel or Bevy (§5.9)"
 forbid sim_query    sim_core      "the data side builds without the kernel or Bevy (§5.9)"
+for c in sim_core sim_models sim_verify sim_testkit; do
+  for arrow in arrow-schema arrow-array parquet; do
+    forbid "$c" "$arrow" "the kernel never builds Arrow; sim_schema's io feature stays off there (step 3a)"
+  done
+done
 for c in sim_schema sim_core sim_models sim_verify; do
   for gui in sim_studio sim_studio_ui sim_explorer sim_hpc sim_query; do
     forbid "$c" "$gui" "the four core libraries never depend on GUI, MPI or query crates"

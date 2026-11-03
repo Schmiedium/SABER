@@ -1,0 +1,24 @@
+// Requirements for the step 1c projectile scenario (crates/sim_models/tests/scenarios/
+// projectile.scn.ron): apogee, time of flight and staying above ground. Used by the step 2 tests
+// and `saber-cli validate`.
+RequirementSet(
+    header: (magic: "SABER", format: "requirements", schema_version: "1.0.0"),
+    id: "PROJ-001", version: "0.1.0", scenario_hint: "projectile.scn.ron",
+    metrics: {
+        "apogee_m": (signal: "entity(1).PointMass3.position.z", reduce: Max),
+        "flight_s": (event: "ground_impact", reduce: FirstTime),
+        "impacts": (event: "ground_impact", reduce: Count),
+    },
+    requirements: [
+        (id: "R-apogee", text: "Apogee at most 300 m",
+         kind: Threshold(metric: "apogee_m", op: Le, value: 300.0),
+         campaign: Probability(min_p: 0.99, confidence: 0.9), trace: ["SYS-12"]),
+        (id: "R-lands", text: "Lands within 20 s",
+         kind: Eventually(event: "ground_impact", within_s: 20.0)),
+        (id: "R-above-ground", text: "Never more than 1 m below the ground",
+         kind: Never(signal: "entity(1).PointMass3.position.z", op: Lt, value: -1.0),
+         early_stop_on_fail: true),
+        (id: "R-quick", text: "Lands within 10 s",
+         kind: Threshold(metric: "flight_s", op: Le, value: 10.0)),
+    ],
+)

@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 sim_verify.workspace = true
-sim_schema.workspace = true
+sim_schema = { workspace = true, features = ["io"] }
 
 [[bin]]
 name = "sim_query"

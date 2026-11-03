@@ -1,6 +1,6 @@
 # SABER: Verification and Test Strategy
 
-Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2; v0.9 (2026-11-02, build step 1c) names the USSA 1976 and WGS 84 oracles actually used and the scenario-file tests, §7.1; v1.0 (2026-11-02, build step 2) lists the per-run verification tests as built, §7.8; v1.1 (2026-11-02, build step 3a) adds the golden output files read by both Rust and Python, §8.3; v1.2 (2026-11-02, build step 3b) lists the local runner's tests, R3 and R4 as built, §8.3; v1.3 (2026-11-02, build step 3c) adds the Python-driven local campaign and the shared `campaign.toml` defaults, §8.3, §8.4). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -191,6 +191,15 @@ Notes:
 - NaN payloads are hashed as-is; a run with NaN has already been flagged by the watchdog.
 - A per-tick rolling hash (`hash_k = H(hash_{k−1} ‖ state_k)`) is available in test builds. When two runs
   disagree, a bisection over ticks finds the first divergent tick and system in seconds.
+- As built (step 1b): the hash is the first 8 bytes (little-endian) of a BLAKE3 keyed-derivation hash over
+  `sim_config_hash`; then per authored body in `SimId` order its `SimId`, a DOF tag (`6` or `3`) and the
+  `to_bits()` of its packed state (`p`, `v`, `q` as `[w, x, y, z]`, `ω` for 6DOF; `p`, `v` for 3DOF); then the
+  tick; then `(stream id, word position)` for every random stream drawn from in the run, in stream-id order.
+  Streams that were registered but never drawn are left out, which is what lets R10 hold for a plugin that
+  registers a stream. `sim_config_hash` covers the scene hash and every `SimConfig` field that changes
+  results (`dt`, start time, `max_ticks`, `at_max_ticks`, integrator kind, mode and tolerances, the energy
+  bound), fed field by field rather than through a text format; the recorder size is left out.
+  `SimWorld::enable_rolling_hash(keep_history)` switches the rolling hash on; it costs one state hash per tick.
 
 ### 4.2 The reproducibility matrix
 
@@ -532,12 +541,13 @@ The minimum oracle set per plugin. Each line names the rung from §5.
 | Item | Oracle | Rung |
 |---|---|---|
 | Quaternion algebra, exponential map, frames NED/ENU/ECEF round-trip | identities, property tests | 1, 6 |
-| USSA 1976 atmosphere | published table at standard altitudes | 9 |
-| WGS 84 gravity, J2 | published values; flat-Earth limit | 9, 5 |
+| USSA 1976 atmosphere | published table at standard altitudes. As built: the PDAS COESA 1976 tables (pdas.com `atmosTable1SI`, `atmosTable2SI`) to one unit in their last printed digit from 0 to 20 km (above that they drift from the standard by more than their print precision), and the standard's own layer-base pressures (22632.1, 5474.89, 868.019, 110.9063, 66.9389, 3.95642 Pa) to half a unit | 9 |
+| WGS 84 gravity, J2 | published values; flat-Earth limit. As built: the WGS 84 normal gravity (Somigliana) at the equator and poles to 1e-7 relative once the J4 radial term is added to the model's J2 field (J2 alone within 2e-5), the gradient of the J2 potential, a short drop under J2 against the flat-Earth closed form, and the geodetic-height round trip | 9, 5 |
 | Rotating Earth: dropped mass eastward deflection `≈ ⅓ ω g t³ cos φ` | first-order formula, asymptotic | 1, 5 |
 | Dryden turbulence | spectrum of a long seeded realization vs the MIL-HDBK-1797 PSD (statistical) | Statistical |
 | `AeroTable` interpolation | exact at breakpoints, linear between, clamping/extrapolation policy, monotonic input stays monotonic | 1, 6 |
-| `SimRng` substreams | R9, distribution tests (KS) on each sampler | 4.2, Statistical |
+| `SimRng` substreams | R9, distribution tests (KS) on each sampler. As built: KS at α = 1e-3 with 20 000 draws for every distribution plain and truncated, the far-tail truncated-normal mean against Simpson's rule, monotone in `u`, one 64-bit draw per sample | 4.2, Statistical |
+| Scenario file and Resolver (IB-01) | export then import bit-exact; `scene_hash` unchanged by comments, layout, entity keys and component order and changed by any value; every `SceneError` variant from a broken file; bindings take defaults or manifest values, uncertainties drawn in `SimId` order, a reused World resolves afresh; a scenario loaded from disk runs to ground impact at the closed-form tick | unit, 1 |
 | `FlightRecorder` | order, wrap, zero allocations after Tick 0 | unit |
 | Watchdog | injected NaN and energy spike flag the right entity and tick | unit |
 
@@ -548,8 +558,8 @@ The minimum oracle set per plugin. Each line names the rung from §5.
 | Free fall, vacuum projectile | closed form |
 | Torque-free symmetric top: precession rate `Ω = (I_x − I_y) ω_x / I_y` in body frame | closed form |
 | Torque-free asymmetric body: `L` and `T_rot` constant; intermediate-axis instability grows, major/minor axes stable | invariants, qualitative-but-numeric (growth rate sign) |
-| Arbitrary forcing | MMS |
-| Order | convergence, `p = 4` for RK4 |
+| Arbitrary forcing | MMS: smooth translation plus rotation about a fixed axis `n` by `θ(t)` (so `ω = θ̇ n` and `q = exp(θ n / 2)`), with a full inertia tensor so the gyroscopic term is exercised |
+| Order | convergence through the kernel, nominal order for SIE, RK2, BS32, RK4, RKF45 and CK45 on the 6DOF MMS case; DOPRI5 shows order about 6 there (its fifth-order error constants are small on this motion until round-off takes over), so the test asks for at least its nominal order |
 | Vertical fall with quadratic drag, constant density: `v(t) = v_t tanh(g t / v_t)` | closed form (also the fragment 3DOF path) |
 | Horizontal flight, no gravity, quadratic drag: `v(t) = v₀ / (1 + k v₀ t)` | closed form |
 | NASA check-cases (sphere, brick, cylinder) | published, nightly |
@@ -640,6 +650,7 @@ analytic crossing time), and BC drag matches the closed forms in §7.2.
 | Clopper–Pearson bound | SciPy `beta.ppf`, Close at `1e-12` |
 | Coverage of the bound | statistical: simulate many Bernoulli campaigns, bound must cover `p` at ≥ nominal rate |
 | Per-run Rust verdict equals Python recomputation from `summaries.parquet` | Exact on booleans |
+| As built (step 2) | A scripted signal with `dt = 0.25` (exact elapsed times): every reducer including the strict `TimeAbove` edge, an event that never happens (`+∞`, `0`), a non-finite sample and an overflowed event tick (`Inconclusive`), every comparison, `Envelope` windows at their edges, `Never`/`Eventually` on signals and events with deadlines, custom checks, the §8.2 table over all eight `SimStatus` values, early stop with the decided/undecided rule, World reuse; every `ReqError` from a broken file or at Tick 0; the projectile scenario's apogee against the sampled parabola and its time of flight equal to the impact tick; zero allocations per tick with every monitor kind |
 
 ---
 
@@ -690,9 +701,9 @@ Subsystems together, and the interface boundaries:
 | Area | Tests |
 |---|---|
 | Domain packs | Each pack's reference scenario (from `sim_studio_ux.md` Domain Packs) loads, resolves, runs to its stop condition, and produces the expected signal set. |
-| IB files | Every IB file is written by its producer and read by every consumer (Rust and Python), with schema validation against `sim_schema`. Includes `FileHeader`, upgraders for the previous major, and `_MANIFEST.json`. |
-| Reproducibility | R2–R5 from §4.2. MPI tests run with `mpiexec -n 4 --oversubscribe` on one CI machine. |
-| Fault injection | `FailingSink` (IO error at part `k`), a scenario that panics at tick `n`, a NaN at tick `n`, walltime drain signal, a rank killed mid-chunk. Each checks the documented outcome in §10.2 of the subsystems doc. |
+| IB files | Every IB file is written by its producer and read by every consumer (Rust and Python), with schema validation against `sim_schema`. Includes `FileHeader`, upgraders for the previous major, and `_MANIFEST.json`. As built (step 3a): `tests/shared/io/` holds one golden file per table and a `crashes.zst`, written by `crates/sim_schema/tests/io.rs` (`SABER_UPDATE_GOLDENS=1`) from synthetic rows that cover nulls, `NaN`, every dynamic family and every enum column. Rust reads them back to the same rows and Python (`python/tests/test_schema_arrow.py`) to the same values; rows are compared rather than bytes, because the Parquet writer stamps its version into the file. Readers are also tested to refuse a missing or unparsable header, another format, another schema major, a wrong column type, an unknown dynamic family, an unknown enum byte and a half-null vector, and the crash stream to seek to one dump, to keep whole dumps of an unfinished stream and to refuse a damaged trailer. A further test fails when `python/saber/schemas/*.json` is stale. Files written by Python and read by Rust arrive with `saber.sweep` (3c). As built (step 3c): the other direction, Python writing and Rust reading, is the manifest: `python/tests/test_campaign_local.py` writes one with `saber.sweep` and `sim_hpc` runs it. `tests/shared/campaign/defaults.toml` is `campaign.toml` as Python writes it with every default; a Python test checks Python still writes it and a `sim_hpc` test parses it and compares it with Rust's defaults. |
+| Reproducibility | R2–R5 from §4.2. MPI tests run with `mpiexec -n 4 --oversubscribe` on one CI machine. As built (step 3b): `crates/sim_hpc/tests/local.rs` runs a 20-run projectile campaign on 1 thread, then on 3 and 8 threads, with chunk sizes 1, 5, 7 and 256, in canary and two shuffled orders, and with parts rolled after every run; every summary row is identical by `run_id` except `wall_time_ms`, `chunk_id` and `part` (R3, R4). |
+| Fault injection | `FailingSink` (IO error at part `k`), a scenario that panics at tick `n`, a NaN at tick `n`, walltime drain signal, a rank killed mid-chunk. Each checks the documented outcome in §10.2 of the subsystems doc. As built (step 3b): a test plugin panics at tick 3 for one parameter set (status `Panicked`, crash tick 2, a dump with frames 0–2 and the message, and every other run bit-identical to the same campaign without the plugin, so rebuilt Worlds behave like fresh ones); a watchdog energy bound crashes one parameter set (`CrashedEnergy`, one dump kept under `M = 1`, footer crash counts); a shared output under a regular file makes stage-out fail (exit `4`, parts kept in scratch); preflight refuses out-of-bounds, missing and duplicate manifest rows, an unresolvable requirement, a broken scenario and a build mismatch (exit `3`). A tiny campaign checks every committed row against the closed-form apogee and time of flight, the verdicts against them, events, the snapshot cadence, the footers, `_SUCCESS.0` and `_MANIFEST.json`. |
 | Performance invariants | Counting global allocator: zero allocations in `SimTickSchedule` after Tick 0 (including a 30k fragment event). `criterion` benchmarks for ticks/s per domain pack with a regression threshold (e.g. > 10 % slower fails, on a dedicated runner). |
 | Studio | Bevy `App` with `MinimalPlugins` and no renderer: `AppState` transitions, `.scn.ron` export → import round-trip is exact, LocalRun hash equals `sim_hpc --local` (R7). Screenshot tests are deliberately avoided; they are brittle and test pixels, not physics. |
 | Explorer | `sim_query` returns identical scorecards embedded, through `sim_query serve`, and from `saber.verify` (roadmap exit criterion), on a fixed campaign fixture. |
@@ -701,7 +712,7 @@ Subsystems together, and the interface boundaries:
 
 | Test | Pass criterion |
 |---|---|
-| Tiny campaign, local | `verdicts.parquet` equals a hand-computed expectation for a scenario designed so the answer is known (e.g. a vacuum projectile with a range threshold split exactly by the parameter sweep, so the pass fraction is known analytically). |
+| Tiny campaign, local | `verdicts.parquet` equals a hand-computed expectation for a scenario designed so the answer is known (e.g. a vacuum projectile with a range threshold split exactly by the parameter sweep, so the pass fraction is known analytically). As built (step 3c), up to the summaries: `python/tests/test_campaign_local.py` draws a Latin hypercube over the projectile's `muzzle_vz` with `saber.sweep`, prepares, preflights and runs it with `saber.campaign` through `sim_hpc --local`, and checks every committed summary against the vacuum parabola (apogee `vz²/2g` within 0.01 m, flight time `2vz/g` within 0.02 s, the `R-quick` verdict from the flight time), the manifest's parameters and seeds run by run, and the same `final_state_hash` per run on 1 and 3 threads; preflight refusals (a manifest drawn for another scene, another build) reach Python as statuses. CI runs it in the end-to-end job against freshly built binaries (`SABER_REQUIRE_BINARIES=1`, so it cannot silently skip). `saber.verify` and `verdicts.parquet` follow with step 4c. |
 | 2-node PBS and Slurm | Same outputs as local (R5) except rank and wall-time columns. |
 | Resume | R6 plus no duplicated or missing `run_id`. |
 | Crash storm | Deliberately unstable parameter region trips `[crash_policy]`, exit code 6, evidence kept. |

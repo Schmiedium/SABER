@@ -2,7 +2,11 @@
 //!
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.4, §10.2, §10.4.
 //! This crate holds the `#[repr(u8)]` enums whose discriminants are written to disk and exported to
-//! Python. Arrow schemas, `FileHeader`, `CrashDump` and upgraders land in build step 3a
+//! Python, and the flight-recorder frame and crash reason that a `CrashDump` carries (build step 1b).
+//! Step 1c adds `FileHeader`, `Semver` and the world `Frame` for the scenario file (IB-01). Step 3a
+//! adds the row types of every output table, `CrashDump`, `build_id`, and behind the `io` feature
+//! (off by default, so the kernel never builds Arrow) the Arrow schemas, Parquet reading and
+//! writing with header checks, the crash-dump frame stream and the schema export for Python
 //! (`docs/build-plan.md`).
 
 use serde::{Deserialize, Serialize};
@@ -145,16 +149,109 @@ impl IntegratorKind {
     }
 }
 
-/// Per-requirement outcome (subsystems §8.2). Numeric discriminants are fixed with the summaries
-/// schema in build step 3a.
+/// Per-requirement outcome (subsystems §8.2): the summaries' `req_* u8` and the verdicts'
+/// `verdict u8` columns. Discriminants are stable and exported to Python.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Verdict {
     /// The requirement holds.
-    Pass,
+    Pass = 0,
     /// The requirement is violated.
-    Fail,
+    Fail = 1,
     /// Undecidable, e.g. the run crashed (a numerical failure is not a system failure).
-    Inconclusive,
+    Inconclusive = 2,
+}
+
+impl Verdict {
+    /// Every verdict, in discriminant order.
+    pub const ALL: [Verdict; 3] = [Verdict::Pass, Verdict::Fail, Verdict::Inconclusive];
+}
+
+/// The on-disk `u8` of an enum, and back (summaries columns, exported to Python).
+pub trait DiskEnum: Copy + Sized + 'static {
+    /// Every value, in discriminant order (discriminant = index).
+    const VALUES: &'static [Self];
+    /// The type's name in the exported `enums.json`.
+    const NAME: &'static str;
+    /// The stored byte.
+    fn to_u8(self) -> u8;
+    /// The value of a stored byte, if valid.
+    fn from_u8(v: u8) -> Option<Self> {
+        Self::VALUES.get(v as usize).copied()
+    }
+}
+
+macro_rules! disk_enum {
+    ($t:ty, $name:literal) => {
+        impl DiskEnum for $t {
+            const VALUES: &'static [Self] = &<$t>::ALL;
+            const NAME: &'static str = $name;
+            fn to_u8(self) -> u8 {
+                self as u8
+            }
+        }
+    };
+}
+disk_enum!(SimStatus, "SimStatus");
+disk_enum!(CrashKind, "CrashKind");
+disk_enum!(IntegratorKind, "IntegratorKind");
+disk_enum!(Verdict, "Verdict");
+
+/// Why a crashed run stopped (subsystems §5.4, IB-10): written into a `CrashDump` and, as
+/// `crash_reason u8` and `crash_tick`, into the summaries.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CrashReason {
+    /// What went wrong.
+    pub kind: CrashKind,
+    /// The body that caused it, when one can be named (`FLAG_NAN_ORIGIN` marks it in the frame).
+    pub sim_id: Option<u32>,
+    /// The tick whose state is the crashed state (the last frame in the flight recorder).
+    pub tick: u64,
+    /// A short human-readable explanation, for example the failing step size.
+    pub detail: String,
+}
+
+/// [`BodySnapshot::flags`]: the body was in contact this tick (set by the contact solver, D13).
+pub const FLAG_COLLIDING: u8 = 0b0000_0001;
+/// [`BodySnapshot::flags`]: a model clamped or saturated a value this tick.
+pub const FLAG_CLAMPED: u8 = 0b0000_0010;
+/// [`BodySnapshot::flags`]: this body caused the crash: the first non-finite body, the body with
+/// the most energy when the energy bound tripped, or the body that set the failing solver step.
+pub const FLAG_NAN_ORIGIN: u8 = 0b1000_0000;
+
+/// One body in a [`TickFrame`] (the draft's `BodySnapshot`, `Architecture.md` §6.1).
+///
+/// Plain arrays rather than vector types keep this crate free of maths dependencies and match the
+/// snapshot columns (`pos_xyz`, `quat_wxyz`, `vel_xyz`, `angvel_xyz`, IB-07).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BodySnapshot {
+    /// The body's `SimId`.
+    pub sim_id: u32,
+    /// Position in the world frame, m.
+    pub pos: [f64; 3],
+    /// Attitude, body to world, as `[w, x, y, z]`. Identity for 3DOF bodies.
+    pub quat_wxyz: [f64; 4],
+    /// Velocity in the world frame, m/s.
+    pub lin_vel: [f64; 3],
+    /// Body rates in the body frame, rad/s. Zero for 3DOF bodies.
+    pub ang_vel: [f64; 3],
+    /// Magnitude of the net applied force (without gravity) at the start of the tick, N.
+    pub force_mag: f64,
+    /// `FLAG_*` bits.
+    pub flags: u8,
+}
+
+/// One recorded tick: the state after the tick, as the flight recorder keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TickFrame {
+    /// Completed ticks at this state.
+    pub tick: u64,
+    /// Simulation time of this state, s.
+    pub t_s: f64,
+    /// Total mechanical energy of the authored bodies, J (kinetic, rotational and potential).
+    pub total_energy: f64,
+    /// Authored bodies in `SimId` order.
+    pub bodies: Vec<BodySnapshot>,
 }
 
 #[cfg(test)]
@@ -177,6 +274,21 @@ mod tests {
     }
 
     #[test]
+    fn disk_enums_round_trip_their_bytes() {
+        fn check<T: DiskEnum + PartialEq + std::fmt::Debug>() {
+            for (i, v) in T::VALUES.iter().enumerate() {
+                assert_eq!(v.to_u8() as usize, i, "{}", T::NAME);
+                assert_eq!(T::from_u8(i as u8), Some(*v));
+            }
+            assert_eq!(T::from_u8(T::VALUES.len() as u8), None);
+        }
+        check::<SimStatus>();
+        check::<CrashKind>();
+        check::<IntegratorKind>();
+        check::<Verdict>();
+    }
+
+    #[test]
     fn integrator_kind_discriminants_are_stable() {
         for (i, k) in IntegratorKind::ALL.iter().enumerate() {
             assert_eq!(*k as u8 as usize, i);
@@ -188,4 +300,59 @@ mod tests {
             .collect();
         assert_eq!(adaptive.len(), 5);
     }
+}
+
+mod crash;
+mod header;
+#[cfg(feature = "io")]
+pub mod io;
+mod ranges;
+mod rows;
+pub use crash::{CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump};
+pub use ranges::RangeSet;
+pub use rows::{CampaignVerdictRow, EventRow, ImpactRow, ManifestRow, SnapshotRow, SummaryRow};
+
+/// This crate's version, which is SABER's (`FileHeader::saber_version`).
+pub const SABER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// `FileHeader::build_id` of this binary: the SABER version, git commit, rustc version, target and
+/// profile it was built from (subsystems §5.4; stamped by `build.rs`). Bit-identical results are
+/// only promised between runs of one build (D1), so readers compare it.
+pub fn build_id() -> String {
+    format!(
+        "saber {} git {} {} target {} profile {}",
+        SABER_VERSION,
+        env!("SABER_BUILD_GIT_SHA"),
+        env!("SABER_BUILD_RUSTC"),
+        env!("SABER_BUILD_TARGET"),
+        env!("SABER_BUILD_PROFILE"),
+    )
+}
+
+/// The git commit this binary was built from (`unknown` outside a checkout); part of
+/// [`build_id`].
+pub fn build_git_sha() -> &'static str {
+    env!("SABER_BUILD_GIT_SHA")
+}
+
+pub use header::{
+    FileHeader, HeaderError, MAGIC, REQ_FORMAT, REQ_SCHEMA_VERSION, SCENE_FORMAT,
+    SCENE_SCHEMA_VERSION, Semver,
+};
+
+/// The world frame a scenario declares (subsystems §10.3). The kernel works in this frame
+/// throughout; the environment derives "down" and altitude from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Frame {
+    /// Local flat-Earth frame: x east, y north, z up, origin at mean sea level.
+    #[default]
+    #[serde(rename = "ENU")]
+    Enu,
+    /// Local flat-Earth frame: x north, y east, z down, origin at mean sea level.
+    #[serde(rename = "NED")]
+    Ned,
+    /// Earth-centred, Earth-fixed (WGS 84), for long-range ballistics. Until Earth rotation arrives
+    /// with step 5a the kernel treats it as non-rotating (no Coriolis or centrifugal terms).
+    #[serde(rename = "ECEF")]
+    Ecef,
 }

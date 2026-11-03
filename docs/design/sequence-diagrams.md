@@ -180,13 +180,13 @@ sequenceDiagram
     alt Blocking errors
         Builder-->>Analyst: Export refused, list of errors with entity links
     else Valid
-        Builder->>Registry: Serialize World to DynamicScene RON
+        Builder->>Registry: Serialize World to reflected scene RON (Scenario::from_world, IB-01)
         Builder->>Disk: Write scenarios/experiment_A.scn.ron
         Builder->>Disk: Write experiment_A.params.json (param keys, units, bounds, sim settings) (proposed)
         opt Requirements edited alongside
             Builder->>Disk: Write experiment_A.req.ron
         end
-        Builder->>Builder: Compute scene_hash = blake3(scn bytes)
+        Builder->>Builder: Compute scene_hash = blake3(canonical sim section), not the file bytes (IB-01)
         Builder-->>Analyst: Exported, scene_hash shown
     end
 ```
@@ -427,6 +427,8 @@ sequenceDiagram
 
 The preflight `Allreduce` keeps one rank with a full `$TMPDIR` from silently stalling the whole job later.
 
+As built (step 3c): the scene-hash check runs in `sim_hpc`'s preflight (`ManifestError::SceneMismatch`, exit 2), which `saber.campaign.preflight` calls through `--validate-only` on the login node, so the same check also guards a job submitted by hand. Rendering the PBS script and `qsub` arrive with step 4b.
+
 ---
 
 ## 5. MPI broadcast and dynamic chunking
@@ -581,7 +583,7 @@ sequenceDiagram
     end
 
     alt Reached max_ticks still Running
-        Worker->>Worker: SimStatus = Timeout
+        Worker->>Worker: SimStatus = at_max_ticks (Completed by default, or Timeout; D19)
     end
     Worker->>Telemetry: Finalize RunningStats into summary row (status, total_ticks, wall_time_ms)
     Worker->>CVerify: Finalize per-requirement metric and pass/fail columns into summary row
@@ -719,6 +721,8 @@ sequenceDiagram
 
 Because every part is renamed into place, a reader on `SharedFS` never sees a half-written file under its final name, and `Analyze` ignores `.tmp` and `.partial` files.
 
+As built (step 3b, `sim_hpc --local`): this flow without the MPI main thread. A part opens with its first run and closes on the interval even while idle; the details are in subsystems IB-06 and IB-07. The SIGTERM path arrives with step 4b.
+
 ---
 
 
@@ -793,6 +797,8 @@ sequenceDiagram
         Note over Worker: Capture is wrapped in its own catch_unwind and falls back to a status-only row
     end
 ```
+
+As built (step 3b): one message per run carries the summary row and the optional dump, so a dump never travels without its row. A panic drops the World and the next run on that thread builds a new one; frames are read from the recorder after the panic, so the dump holds every frame committed before it (the in-progress frame is never committed, so none is partial).
 
 ### 8.2 Campaign crash policy on rank 0
 
@@ -877,7 +883,7 @@ sequenceDiagram
         Replay-->>Analyst: Error with dump version and expected version
     end
     Replay->>SharedFS: Load .scn.ron referenced by the campaign
-    Replay->>Replay: Compare blake3(scene) with CrashDump.scene_hash
+    Replay->>Replay: Compare the scene's canonical scene_hash with CrashDump.scene_hash
     alt Hash mismatch
         Replay-->>Analyst: Warn, scene changed since the run. Continue read-only or locate original
     end

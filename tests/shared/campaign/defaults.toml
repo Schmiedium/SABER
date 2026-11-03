@@ -1,0 +1,28 @@
+# campaign.toml (IB-04), written by saber.campaign. Paths are relative to this file.
+
+[campaign]
+id = "defaults"
+scene = "projectile.scn.ron"
+manifest = "sweep_manifest.parquet"
+
+[execution]
+chunk_size = 256
+snapshot_policy = { base_every = 100, adaptive = false, max_per_run = 2000 }
+max_events_per_run = 4096
+io_channel_capacity = 1024
+
+[crash_policy]
+dump_quota_per_param_set = 3
+abort_crash_fraction = 0.25
+abort_min_runs = 2000
+abort_max_setup_errors = 10
+canary_chunks = 64
+
+[checkpoint]
+checkpoint_interval_s = 600.0
+drain_margin_s = 720.0
+auto_resume = 3
+
+[output]
+scratch_dir = "${TMPDIR}"
+shared_out = "out"
