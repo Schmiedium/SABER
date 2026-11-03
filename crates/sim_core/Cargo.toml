@@ -20,10 +20,11 @@ rand_chacha.workspace = true
 bevy_ecs.workspace = true
 bevy_reflect.workspace = true
 glam.workspace = true
+ron.workspace = true
+libm.workspace = true
 
 [dev-dependencies]
 sim_testkit.workspace = true
-ron.workspace = true
 num-bigint.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true

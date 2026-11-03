@@ -4,19 +4,28 @@
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.1, §6, §10.1 and
 //! `docs/design/physics-engine-tradeoffs.md`. Build step 1a (`docs/build-plan.md`) provided the
 //! integrators, the clock and the random streams; step 1b adds the ECS World, the tick schedule,
-//! 6DOF and 3DOF bodies, force models, the watchdog, the flight recorder and the state hash.
+//! 6DOF and 3DOF bodies, force models, the watchdog, the flight recorder and the state hash; step
+//! 1c the scenario file (`scene`), the Tick-0 resolver (`parametric`, `distribution`) and the world
+//! frame; step 2 the per-tick event channel (`events`) and field reads for verification probes
+//! (`field`); step 3b the run's Tier 2 and 3 log (`telemetry::TelemetryLog`).
 //! Geometry and contact arrive in step 5d, the fragment pool in step 5e.
 
 pub mod app;
 pub mod body;
+pub mod checks;
 pub mod clock;
+pub mod distribution;
 pub mod dynamics;
 pub mod environment;
+pub mod events;
+pub mod field;
 pub mod force;
 pub mod hash;
 pub mod integrator;
+pub mod parametric;
 pub mod recorder;
 pub mod rng;
+pub mod scene;
 pub mod schedule;
 pub mod sink;
 pub mod telemetry;
@@ -26,8 +35,12 @@ pub mod watchdog;
 /// `World::resource_scope` this writes no removed-component message and moves no entity between
 /// archetypes, so it never allocates once the resource's buffers exist. `R::default()` must not
 /// allocate. If `f` panics the resource is left at its default; a World that panicked mid-tick is
-/// rebuilt, never reused (seq §8).
-pub(crate) fn with_resource<
+/// rebuilt, never reused (seq §8). Plugin systems use it to mutate their own state while reading
+/// the rest of the World (IB-08).
+///
+/// # Panics
+/// If the resource does not exist.
+pub fn with_resource<
     R: bevy_ecs::resource::Resource<Mutability = bevy_ecs::component::Mutable> + Default,
     U,
 >(
@@ -44,16 +57,29 @@ pub use app::{
     RunSeed, SetupError, SimAppBuilder, SimConfig, SimPlugin, SimTypeRegistry, SimWorld,
 };
 pub use body::{BodyState, BodyTable, FRAGMENT_BASE, MassProps, PointMass3, RigidBody6, SimId};
+pub use checks::{CheckCatalog, CheckFactory, CheckState, CustomCheck};
 pub use clock::{RateDivider, SimClock};
-pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment};
+pub use distribution::{Distribution, Sampler};
+pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment, WorldFrame};
+pub use events::{SimEvent, SimEvents};
+pub use field::{FieldPath, FieldReadError};
 pub use force::{ForceModel, Stage, Wrench};
 pub use hash::{RollingHash, RunIdentity, state_hash};
+pub use parametric::{
+    Apply, ParamBinding, ParamBindings, ParamValues, ResolveReport, ResolvedValue, Uncertainties,
+    Uncertainty, ValueSource,
+};
 pub use recorder::FlightRecorder;
 pub use rng::{RngStream, RngStreams, SimRng, StreamHandle};
+pub use scene::{Scenario, SceneEntity, SceneError, SceneMeta};
 pub use schedule::{SimSet, SimTickSchedule};
-pub use sim_schema::{CrashKind, CrashReason, IntegratorKind, SimStatus, TickFrame};
+pub use sim_schema::{
+    CrashKind, CrashReason, FileHeader, Frame, IntegratorKind, Semver, SimStatus, TickFrame,
+};
 pub use sink::{MemorySink, RunOutput, RunSink, SinkError};
-pub use telemetry::{RunningStats, TickEnergy, Welford};
+pub use telemetry::{
+    LoggedEvent, RunningStats, SnapshotSample, TelemetryConfig, TelemetryLog, TickEnergy, Welford,
+};
 pub use watchdog::{
     MaxTicksOutcome, RunStatus, StopRequests, TerminationPolicy, WatchdogConfig, sim_running,
 };

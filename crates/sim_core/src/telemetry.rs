@@ -1,13 +1,19 @@
 //! Tier 1 telemetry: online reductions kept for every run (subsystems §5.1, `Architecture.md` §5).
 //!
-//! `RunningStats` becomes one summary row per run. Tier 2 events and the Tier 3 snapshot sampler
-//! arrive with the output schemas (build step 3a).
+//! `RunningStats` becomes one summary row per run. The [`TelemetryLog`] keeps the run's Tier 2
+//! events and Tier 3 body snapshots (build step 3b) in buffers sized at Tick 0 from the
+//! [`TelemetryConfig`], so logging never allocates: events past `max_events` and snapshot ticks
+//! past `max_snapshots` are counted, not stored.
 
 use bevy_ecs::prelude::*;
+use sim_schema::BodySnapshot;
 
+use crate::body::SimId;
 use crate::clock::SimClock;
 use crate::dynamics::{Dynamics, body_energies};
 use crate::environment::SimEnvironment;
+use crate::events::SimEvents;
+use crate::recorder::FlightRecorder;
 
 /// Streaming mean, variance and range (Welford's algorithm), allocation-free and order-stable.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -123,4 +129,167 @@ pub(crate) fn telemetry_system(world: &mut World) {
         .energy_drift_max
         .max((total - stats.energy_initial).abs());
     stats.peak_force = stats.peak_force.max(peak);
+}
+
+/// How much Tier 2 and Tier 3 telemetry a run keeps. A campaign execution setting (IB-04
+/// `[execution]`), not part of the scenario: it changes what is written, never the physics, so it
+/// is not in `sim_config_hash`.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelemetryConfig {
+    /// Events kept per run; later ones are counted as dropped.
+    pub max_events: u32,
+    /// Snapshot every this many ticks, from Tick 0 (`0`: no snapshots). The final state is always
+    /// added when snapshots are on.
+    pub snapshot_every: u32,
+    /// Snapshot ticks kept per run, besides the final state.
+    pub max_snapshots: u32,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            max_events: 4096,
+            snapshot_every: 0,
+            max_snapshots: 2000,
+        }
+    }
+}
+
+/// One logged event (Tier 2): a [`crate::SimEvent`] with its tick, time and the body's position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoggedEvent {
+    /// The tick it was emitted in.
+    pub tick: u64,
+    /// Simulation time at the end of that tick, s.
+    pub t_s: f64,
+    /// The declared event name.
+    pub name: &'static str,
+    /// The body it happened to.
+    pub sim_id: Option<SimId>,
+    /// That body's position at the end of the tick, world frame, m.
+    pub pos: Option<[f64; 3]>,
+    /// The value that goes with it.
+    pub value: f64,
+}
+
+/// One body at one sampled tick (Tier 3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SnapshotSample {
+    /// The tick.
+    pub tick: u64,
+    /// Simulation time, s.
+    pub t_s: f64,
+    /// The body's state, as the flight recorder holds it.
+    pub body: BodySnapshot,
+}
+
+/// The run's events and snapshots.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct TelemetryLog {
+    /// Events in emission order.
+    pub events: Vec<LoggedEvent>,
+    /// Events not kept (past `max_events`, or past the per-tick event buffer).
+    pub events_dropped: u64,
+    /// Snapshots, tick by tick, bodies in `SimId` order.
+    pub snapshots: Vec<SnapshotSample>,
+    /// Snapshot ticks not kept (past `max_snapshots`).
+    pub snapshots_dropped: u64,
+    snapshot_ticks: u32,
+    last_snapshot_tick: Option<u64>,
+}
+
+impl TelemetryLog {
+    /// Empty the log and make room for a run of `bodies` bodies (Tick 0).
+    pub(crate) fn start(&mut self, config: &TelemetryConfig, bodies: usize) {
+        self.events.clear();
+        self.events.reserve(config.max_events as usize);
+        self.events_dropped = 0;
+        self.snapshots.clear();
+        if config.snapshot_every > 0 {
+            self.snapshots
+                .reserve((config.max_snapshots as usize + 1) * bodies);
+        }
+        self.snapshots_dropped = 0;
+        self.snapshot_ticks = 0;
+        self.last_snapshot_tick = None;
+    }
+
+    fn snapshot(&mut self, recorder: &FlightRecorder, limit: u32) {
+        let Some(frame) = recorder.latest() else {
+            return;
+        };
+        if self.last_snapshot_tick == Some(frame.tick) {
+            return;
+        }
+        if self.snapshot_ticks >= limit {
+            self.snapshots_dropped += 1;
+            return;
+        }
+        self.snapshot_ticks += 1;
+        self.last_snapshot_tick = Some(frame.tick);
+        self.snapshots
+            .extend(frame.bodies.iter().map(|b| SnapshotSample {
+                tick: frame.tick,
+                t_s: frame.t_s,
+                body: *b,
+            }));
+    }
+
+    /// The snapshots plus the final state when snapshots are on and the final tick was not on the
+    /// cadence (run end; allocates).
+    pub fn snapshots_with_final(
+        &self,
+        config: &TelemetryConfig,
+        recorder: &FlightRecorder,
+    ) -> Vec<SnapshotSample> {
+        let mut out = self.snapshots.clone();
+        if config.snapshot_every > 0
+            && let Some(frame) = recorder.latest()
+            && self.last_snapshot_tick != Some(frame.tick)
+        {
+            out.extend(frame.bodies.iter().map(|b| SnapshotSample {
+                tick: frame.tick,
+                t_s: frame.t_s,
+                body: *b,
+            }));
+        }
+        out
+    }
+}
+
+/// `SimSet::Record`, after the recorder: log this tick's events (with the bodies' positions from
+/// the frame just recorded) and take a snapshot on the cadence. Also called at Tick 0.
+pub(crate) fn log_tick(world: &mut World) {
+    crate::with_resource(world, |world, log: &mut TelemetryLog| {
+        let config = world.resource::<TelemetryConfig>();
+        let recorder = world.resource::<FlightRecorder>();
+        let events = world.resource::<SimEvents>();
+        let clock = world.resource::<SimClock>();
+        log.events_dropped += events.dropped();
+        let frame = recorder.latest();
+        for e in events.this_tick() {
+            if log.events.len() >= config.max_events as usize {
+                log.events_dropped += 1;
+                continue;
+            }
+            let pos = e.sim_id.and_then(|id| {
+                frame?
+                    .bodies
+                    .iter()
+                    .find(|b| b.sim_id == id.0)
+                    .map(|b| b.pos)
+            });
+            log.events.push(LoggedEvent {
+                tick: clock.tick,
+                t_s: clock.time(),
+                name: e.name,
+                sim_id: e.sim_id,
+                pos,
+                value: e.value,
+            });
+        }
+        if config.snapshot_every > 0 && clock.tick % u64::from(config.snapshot_every) == 0 {
+            log.snapshot(recorder, config.max_snapshots);
+        }
+    });
 }
