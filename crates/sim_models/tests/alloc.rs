@@ -273,7 +273,8 @@ impl sim_models::Controller for Hover {
 
 /// Step 5c, part 2: the quadrotor scenario (rotor states, the mixer, five PID loops reading and
 /// writing fields by path) in Dryden turbulence with noisy sensors, next to a second quad flown by
-/// a native controller, never allocates per tick.
+/// a native controller, never allocates per tick. Step 5d-3 adds range finders over a ground and a
+/// static box (a noisy altimeter on the first quad, a forward beam on the second).
 #[test]
 fn rotorcraft_and_control_never_allocate() {
     let noise = "(white: 0.01, bias: 0.001, bias_walk: 0.0001, resolution: 0.0005)";
@@ -292,7 +293,11 @@ fn rotorcraft_and_control_never_allocate() {
         )
         .replace(
             "\"sim_models::sensors::Imu\": ()",
-            &format!("\"sim_models::sensors::Imu\": (gyro_noise: {noise}, accel_noise: {noise})"),
+            &format!(
+                "\"sim_models::sensors::Imu\": (gyro_noise: {noise}, accel_noise: {noise}),\n\
+                 \"sim_models::sensors::RangeFinder\": (latency: 2, mount: (0.0, 0.0, 0.05), \
+                 max_range: 40.0, noise: {noise})"
+            ),
         );
     let mut b = SimAppBuilder::new(SimConfig::new(1.0, 1));
     sim_models::add_library(&mut b);
@@ -340,11 +345,35 @@ fn rotorcraft_and_control_never_allocate() {
                     rotor_drag: 1e-4,
                 },
                 sim_models::sensors::Gnss::default(),
+                sim_models::sensors::RangeFinder {
+                    direction: glam::DVec3::X,
+                    max_range: 30.0,
+                    ..sim_models::sensors::RangeFinder::default()
+                },
+                sim_core::CollisionShape::single(sim_core::ShapeDesc::Ball { radius: 0.25 }),
                 Hover {
                     target: -4.0,
                     trim: 0.0,
                 },
             ),
+        );
+        // Ground (NED: the half-space below z = 0) and a box 15 m ahead of the second quad.
+        sim.spawn(
+            sim_core::SimId(1000),
+            sim_core::CollisionShape::single(sim_core::ShapeDesc::HalfSpace {
+                normal: glam::DVec3::NEG_Z,
+            }),
+        );
+        sim.spawn(
+            sim_core::SimId(1001),
+            sim_core::CollisionShape {
+                parts: vec![sim_core::ShapePart::at(
+                    sim_core::ShapeDesc::Cuboid {
+                        half_extents: glam::DVec3::new(1.0, 5.0, 5.0),
+                    },
+                    sim_core::Pose::at(glam::DVec3::new(20.0, 0.0, -5.0)),
+                )],
+            },
         );
         sim.start(RunSeed::new(0, seed)).unwrap();
         let n = sim_testkit::count_allocations(|| {
@@ -353,6 +382,14 @@ fn rotorcraft_and_control_never_allocate() {
             }
         });
         assert_eq!(n, 0, "run {seed} allocated");
+        for id in [1, 2] {
+            let e = sim.body(sim_core::SimId(id)).unwrap();
+            let r = sim
+                .world()
+                .get::<sim_models::sensors::RangeFinder>(e)
+                .unwrap();
+            assert!(r.valid && r.hit && r.range > 1.0, "quad {id}: {r:?}");
+        }
         sim.reset();
     }
 }

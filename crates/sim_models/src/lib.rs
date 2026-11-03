@@ -11,7 +11,8 @@
 //! adds Dryden turbulence to the environment, the `ActuatorPlugin` (limits, rate limits, lags,
 //! backlash), the `SensorPlugin` (IMU, GNSS, barometer with noise, bias walk and latency), the
 //! `RotorcraftPlugin` (lumped rotors with motor lag, mixer) and the `ControlPlugin` (the
-//! `Controller` trait and PID loops) (`docs/build-plan.md`).
+//! `Controller` trait and PID loops). Step 5d-3 adds the range finder to the `SensorPlugin`, measuring
+//! against the contact geometry (`docs/build-plan.md`).
 
 pub mod actuators;
 pub mod ballistics;
@@ -41,7 +42,8 @@ pub use sensors::SensorPlugin;
 /// and `TrimCondition`.
 /// 0.1.3 (step 5c) adds `Wind::Dryden`, `Actuators`, `Imu`, `Gnss` and `Barometer`.
 /// 0.1.4 (step 5c, part 2) adds `Rotorcraft`, `MixerCommand` and `PidControl`.
-pub const LIBRARY_VERSION: Semver = Semver::new(0, 1, 4);
+/// 0.1.5 (step 5d-3) adds `RangeFinder`.
+pub const LIBRARY_VERSION: Semver = Semver::new(0, 1, 5);
 
 /// Add every model plugin of the library, in the fixed order both binaries use (G4).
 pub fn add_library(builder: &mut SimAppBuilder) -> &mut SimAppBuilder {

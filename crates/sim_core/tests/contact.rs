@@ -1323,3 +1323,127 @@ fn contact_settings_and_components_load_from_a_scenario() {
     assert!((c[0].depth - 0.05).abs() < 1e-12);
     assert_eq!(sim.run(), SimStatus::Completed);
 }
+
+/// The persistent-penetration watchdog (physics §9.7b): a 1 kg ball on a soft ground rests
+/// `m g / k` ≈ 9.8 mm deep. With `max_penetration` 5 mm it ends `CrashedSolver(Penetration)` at
+/// the end of the 11th tick in a row deeper than that (`penetration_ticks` 10), and the run is the
+/// unwatched run up to there. With 15 mm the first overshoot goes deeper for fewer than
+/// `penetration_ticks` = 100 ticks and the run completes; off (the default) it completes too.
+#[test]
+fn persistent_penetration_crashes_only_when_it_persists() {
+    let (m, k, c, r) = (1.0, 1e3, 6.3, 0.1);
+    let run = |limit: Option<f64>, ticks: u32| {
+        let mut cfg = rk4(1e-3, 2000);
+        cfg.contact.max_penetration = limit;
+        cfg.contact.penetration_ticks = ticks;
+        started(with_gravity(cfg), |sim| {
+            sim.spawn(SimId(GROUND), (plane(DVec3::Z, DVec3::ZERO), spring(k, c)));
+            sim.spawn(
+                SimId(1),
+                (
+                    point(DVec3::new(0.0, 0.0, r - TOUCH), DVec3::ZERO),
+                    MassProps::point(m),
+                    ball(r),
+                ),
+            );
+        })
+        .unwrap()
+    };
+    // The unwatched run: overlap at the end of every tick.
+    let mut free = run(None, 10);
+    let (mut depths, mut states) = (Vec::new(), Vec::new());
+    let end = loop {
+        let end = free.step();
+        let p = &free.world().resource::<Contacts>().points;
+        depths.push(p.first().map_or(0.0, |p| p.depth));
+        states.push(point_state(&free, 1));
+        if let Some(end) = end {
+            break end;
+        }
+    };
+    assert_eq!(end, SimStatus::Completed);
+    let rest = m * G / k;
+    // Settled to within 1 % of the static overlap (ζ = 0.1 rings down over the 2 s).
+    assert!((depths.last().unwrap() - rest).abs() < 1e-4);
+    // The longest stretch of ticks deeper than `limit`, and the step that ends the first stretch of
+    // more than `ticks`.
+    let stretch = |limit: f64, ticks: usize| {
+        let (mut run, mut longest, mut trip) = (0usize, 0usize, None);
+        for (i, d) in depths.iter().enumerate() {
+            run = if *d > limit { run + 1 } else { 0 };
+            longest = longest.max(run);
+            if run > ticks && trip.is_none() {
+                trip = Some(i);
+            }
+        }
+        (longest, trip)
+    };
+
+    let (_, trip) = stretch(5e-3, 10);
+    let trip = trip.unwrap();
+    let mut watched = run(Some(5e-3), 10);
+    for (i, state) in states.iter().take(trip).enumerate() {
+        assert!(watched.step().is_none(), "step {i}");
+        assert_eq!(point_state(&watched, 1), *state);
+    }
+    assert_eq!(watched.step(), Some(SimStatus::CrashedSolver));
+    let crash = watched.status().crash().unwrap();
+    assert_eq!(crash.kind, CrashKind::Penetration);
+    assert_eq!(crash.sim_id, Some(1));
+    assert!(
+        crash.detail.contains("contact.max_penetration = 0.005 m")
+            && crash.detail.contains("more than 10 ticks"),
+        "{}",
+        crash.detail
+    );
+
+    let (longest, _) = stretch(15e-3, 100);
+    assert!(
+        (1..=100).contains(&longest),
+        "{longest} ticks deeper than 15 mm"
+    );
+    assert_eq!(run(Some(15e-3), 100).run(), SimStatus::Completed);
+}
+
+/// `contact.max_penetration` must be finite and above 0 and `penetration_ticks` at least 1; both
+/// are part of `sim_config_hash` and parse from RON as `config.contact` does.
+#[test]
+fn penetration_watchdog_settings_are_checked_and_hashed() {
+    for bad in [Some(0.0), Some(-1e-3), Some(f64::NAN), Some(f64::INFINITY)] {
+        let mut c = rk4(1e-3, 1);
+        c.contact.max_penetration = bad;
+        assert!(
+            matches!(SimAppBuilder::new(c).build(), Err(SetupError::BadConfig(_))),
+            "{bad:?}"
+        );
+    }
+    let mut c = rk4(1e-3, 1);
+    c.contact.penetration_ticks = 0;
+    assert!(matches!(
+        SimAppBuilder::new(c).build(),
+        Err(SetupError::BadConfig(_))
+    ));
+
+    let a = rk4(1e-3, 1);
+    assert_eq!(a.contact.max_penetration, None);
+    assert_eq!(a.contact.penetration_ticks, 10);
+    let mut b = a.clone();
+    b.contact.max_penetration = Some(0.01);
+    let mut c = b.clone();
+    c.contact.penetration_ticks = 11;
+    let mut d = b.clone();
+    d.contact.max_penetration = Some(0.02);
+    let hashes = [a.hash(0), b.hash(0), c.hash(0), d.hash(0)];
+    for i in 0..4 {
+        for j in i + 1..4 {
+            assert_ne!(hashes[i], hashes[j], "{i} {j}");
+        }
+    }
+
+    let parsed: sim_core::ContactConfig =
+        ron::from_str("(max_penetration: Some(0.02), penetration_ticks: 5)").unwrap();
+    assert_eq!(
+        (parsed.max_penetration, parsed.penetration_ticks),
+        (Some(0.02), 5)
+    );
+}
