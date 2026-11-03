@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 5e. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S1. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -40,7 +40,11 @@ aircraft.
 > fragment counts to its summary row and each parent's fragment cloud (count, mass, centroid, spread, range, energy)
 > to its snapshots; requirements can read the cloud and per-target `impacts(N)` tallies, and turn Inconclusive when
 > the pool overflowed. `sim_models::import::fragment_drag` reads a fragment drag table in SI or imperial units.
-> The studio comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> `sim_studio` opens with a Launcher: start a workspace from a starter pack (an aero-ballistics shell, a quadrotor
+> holding altitude, or a blank scene, each with requirements that pass), reopen recent workspaces, see recent
+> campaigns with their heartbeat, or open a crash stream to list its dumps. The shell around every screen (activity
+> rail, resizable dock, status bar, notifications, dark and light themes) is in place; the Scenario Builder and the
+> other screens come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

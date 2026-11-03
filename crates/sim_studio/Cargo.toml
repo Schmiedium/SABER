@@ -15,10 +15,20 @@ workspace = true
 sim_core.workspace = true
 sim_models.workspace = true
 sim_verify = { workspace = true, features = ["ecs"] }
-sim_schema.workspace = true
+sim_schema = { workspace = true, features = ["io"] }
 sim_studio_ui.workspace = true
 sim_assets.workspace = true
+bevy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+
+# Every studio test binary links all of Bevy (hundreds of MB each), so the empty unit-test harnesses of
+# the library and binary are not built; the tests live in `tests/`. Set `test = true` to add unit tests.
+[lib]
+test = false
 
 [[bin]]
 name = "sim_studio"
 path = "src/main.rs"
+test = false

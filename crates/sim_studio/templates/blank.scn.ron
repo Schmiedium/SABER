@@ -1,0 +1,29 @@
+// Blank starter (studio template): the environment only, flat-Earth ENU with standard gravity,
+// the 1976 standard atmosphere and calm air. Add bodies in the Scenario Builder.
+(
+    header: (
+        magic: "SABER",
+        format: "scenario",
+        schema_version: "1.0.0",
+    ),
+    units: "SI",
+    frame: ENU,
+    model_library_version: "0.1.0",
+    config: (
+        dt: 0.01,
+        max_ticks: 1000,
+        at_max_ticks: Completed,
+    ),
+    scene: (
+        entities: {
+            0: (
+                components: {
+                    "sim_core::body::SimId": (100),
+                    "sim_models::environment::Gravity": Flat(g: 9.80665),
+                    "sim_models::environment::Atmosphere": Ussa1976,
+                    "sim_models::environment::Wind": Calm,
+                },
+            ),
+        },
+    ),
+)

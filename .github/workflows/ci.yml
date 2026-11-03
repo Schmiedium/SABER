@@ -17,6 +17,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Line tables keep file and line in panics and backtraces; full debug info makes every studio test
+  # binary (each links Bevy) several times larger and the runner's disk fills (step S1).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   rust:

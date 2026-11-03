@@ -1,0 +1,20 @@
+// Aero-ballistics starter requirements (studio template) for `shell.scn.ron`: apogee, range and
+// time of flight. The values are illustrative; set them from the system's specification.
+RequirementSet(
+    header: (magic: "SABER", format: "requirements", schema_version: "1.0.0"),
+    id: "AERO-START", version: "0.1.0", scenario_hint: "shell.scn.ron",
+    metrics: {
+        "apogee_m": (signal: "entity(1).RigidBody6.position.z", reduce: Max),
+        "range_m": (signal: "entity(1).RigidBody6.position.x", reduce: Final),
+        "flight_s": (event: "ground_impact", reduce: FirstTime),
+    },
+    requirements: [
+        (id: "R-apogee", text: "Apogee at most 1500 m",
+         kind: Threshold(metric: "apogee_m", op: Le, value: 1500.0)),
+        (id: "R-range", text: "Range at least 8 km",
+         kind: Threshold(metric: "range_m", op: Ge, value: 8000.0),
+         campaign: Probability(min_p: 0.9, confidence: 0.9)),
+        (id: "R-lands", text: "Lands within 40 s",
+         kind: Eventually(event: "ground_impact", within_s: 40.0)),
+    ],
+)
