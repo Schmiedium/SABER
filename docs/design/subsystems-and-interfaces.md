@@ -64,6 +64,10 @@ v0.19 (2026-11-03, build step 4c) records `saber.analyze`, `saber.verify` and `s
 run counts against whichever verdict it could overturn (instead of an inconclusive-fraction policy), one-sided
 Clopper–Pearson bounds, `verdicts.parquet` with a `saber.verify` footer and a self-contained `report.html`.
 Python compiles requirement sets with `saber-cli validate --emit-req-json` (IB-03). Adds O9.
+v0.20 (2026-11-03, build step 5a) records the aero-ballistics plugin and Earth rotation as built (§5.2, §10.3,
+IB-08): `ProjectileAero` (McCoy 6DOF), `PointMassAero` (3DOF), `Coef` (constant or `C(Mach)` table) and the
+`AeroState` telemetry component; `Environment::frame_rotation` with the Coriolis and centrifugal terms in the
+kernel, body rates kept inertial, and an opt-in `EarthRotation` scenario component. `LIBRARY_VERSION` 0.1.1.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -408,8 +412,52 @@ is a `SetupError`. It installs the kernel's `Environment` for the world frame (�
 at or below that altitude; the plugin lists the watched bodies at Tick 0, so a stop added during a run is not
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
-`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0) is the version
-scenarios check against (IB-01).
+`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
+0.1.1 from step 5a) is the version scenarios check against (IB-01).
+
+**As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
+`SetupError` names the body that breaks a rule:
+
+- `ProjectileAero { diameter, cd0, cd2, cla, cla2, cma, cma2, cmq, clp, cnpa, cmpa, cl0 }` on a `RigidBody6`
+  whose body `x` axis is the axis of symmetry, nose forward. Each coefficient is a `Coef`: `Constant(f64)` or
+  `Mach(AeroTable)` with one axis named `mach`, looked up at the Mach number of the air-relative velocity.
+  Every coefficient defaults to zero, so a scenario names only those it uses.
+- `PointMassAero { diameter, cd0 }` on a `PointMass3`: drag only (the 3DOF option of D2).
+
+With `v_b = q⁻¹(V − wind)`, `v = |v_b|`, `x̂` the body axis, `q_s = ½ρ·πd²/4`, `sin²δ = (v_y² + v_z²)/v²` and
+`(p, q, r)` the body rates relative to the world frame, the force and moment in body axes are:
+
+| Term | Body-axis form | Sign convention |
+|---|---|---|
+| Drag | `−q_s (C_D0 + C_D2 sin²δ) v v_b` | |
+| Lift | `q_s (C_Lα + C_Lα2 sin²δ) [v_b × (x̂ × v_b)]` | toward the nose for `C_Lα > 0` |
+| Magnus force | `q_s d p C_Npα (x̂ × v_b)` | |
+| Overturning moment | `q_s d v (C_Mα + C_Mα2 sin²δ) (v_b × x̂)` | `C_Mα > 0` is statically unstable, as in McCoy |
+| Pitch damping | `q_s d² v C_Mq (0, q, r)` | `C_Mq` stands for `C_Mq + C_Mα̇` |
+| Spin damping | `q_s d² v C_lp p x̂` | |
+| Magnus moment | `q_s d² p C_Mpα [x̂ × (v_b × x̂)]` | |
+| Roll drive (fin cant) | `q_s d v² C_l0 x̂` | |
+
+Linearised for small yaw, and dropping the Magnus force and products of small terms as McCoy does, these give
+his yaw equation `ξ'' + (H − iP)ξ' − (M + iPT)ξ = 0` per calibre with his `H`, `P`, `M` and `T` (verification
+§6.2). A body carries one of the two components; either on a body of the other kind
+or on an entity without a body, a non-finite coefficient, a non-positive diameter or a table that is invalid
+or not over `mach` is a `SetupError`. The force model copies each body's coefficients at Tick 0, after the
+Resolver, so a coefficient can be swept (`ProjectileAero.cla.0` targets a `Constant`). It skips a body with no
+air or no airspeed. The plugin inserts `AeroState { mach, dynamic_pressure, total_yaw, spin_rate,
+gyro_stability }` on each such body at Tick 0 and updates it in `SimSet::Telemetry` from a list built at Tick 0,
+so metrics can read it (`entity(1).AeroState.mach`). `gyro_stability` is McCoy's
+`S_g = I_x² p² / (2ρ I_y S d v² C_Mα)`. `AeroState` is run output: the plugin overwrites it at every Tick 0, so a
+scenario file need not carry it.
+
+`EnvironmentPlugin` also reads an optional `EarthRotation` (`None`, `Ecef`, or `Local { latitude_deg }` for an
+ENU or NED frame whose origin is at that geodetic latitude). The frame then turns at the WGS 84 rate
+`ω_E = 7.292115e-5 rad/s`: about `+z` in ECEF, `(0, cos φ, sin φ)` in ENU, `(cos φ, 0, −sin φ)` in NED. The
+kernel adds the Coriolis and centrifugal terms (§10.3). Without the component no frame rotates, ECEF
+included, so scenarios written before step 5a run unchanged. `Ecef` with J2 gravity gives WGS 84 normal
+gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
+origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
+origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
 
 `Controller` boundary (in-process, deterministic):
 
@@ -1494,6 +1542,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). A system with a `Query` parameter fills Bevy's archetype cache on its first run after Tick 0 spawned the scenario, which allocates on Tick 1 of every fresh World, so model systems are exclusive (`fn(&mut World)`) and read lists of entities built in `SimPlugin::start`, as the kernel's own systems and `EnvironmentPlugin`'s ground-impact check do (step 1c). |
 | As built (step 2) | Plugins declare the event names they emit (`SimAppBuilder::declare_event`) and may register custom requirement checks (`register_check(name, fn() -> Box<dyn CustomCheck>)`); `sim_core::with_resource` is the allocation-free way for an exclusive system to update its own resource. `EnvironmentPlugin` emits `ground_impact` (value: the body's altitude). |
 | As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrive with the first model that needs them (step 5c). |
+| As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 
@@ -1732,8 +1781,13 @@ capture and campaign crash policy as `CrashedNaN`.
 SI throughout the kernel; the Studio may display other units. Every scenario declares a world frame
 (`NED`, `ENU`, or `ECEF` for long-range ballistics). ENU and NED have their origin at mean sea level, so
 altitude is `z` in ENU and `−z` in NED; in ECEF altitude is the WGS 84 geodetic height (Heikkinen's closed
-form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. ECEF is treated as non-rotating until step 5a
-adds Earth rotation (Coriolis and centrifugal terms). Signal metadata (`ModelMeta.signals`) carries unit
+form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. A frame turns only when the scenario carries
+`EarthRotation` (step 5a, §5.2); otherwise every frame, ECEF included, is treated as inertial. A turning frame
+is described by its angular velocity `Ω` in world components (`Environment::frame_rotation`). The kernel then
+integrates `v̇ = F/m + g − 2Ω × v − Ω × (Ω × p)` and the attitude relative to the frame,
+`q̇ = ½ q ⊗ (0, ω − q⁻¹Ωq)`, while `body_rates` stay inertial so Euler's equations are unchanged; aerodynamic
+models use the rates relative to the frame (`Stage::rates_relative_to_frame`). The reported energy is then the
+Jacobi integral, `½mv² + mΦ − ½m|Ω × p|² + T_rot`. Signal metadata (`ModelMeta.signals`) carries unit
 and frame so requirement thresholds can be unit-checked at validation (IB-03).
 
 ### 10.4 Versioning

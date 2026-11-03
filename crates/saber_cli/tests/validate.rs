@@ -36,6 +36,18 @@ fn a_valid_scenario_reports_its_hashes_and_parameters() {
     assert_eq!(v["entities"], 2);
 }
 
+/// The step 5a shell: a 6DOF projectile with McCoy aerodynamics and Earth rotation.
+#[test]
+fn the_ballistic_shell_scenario_validates() {
+    let shell = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sim_models/tests/scenarios/shell.scn.ron"
+    );
+    let (code, out, err) = cli(&["validate", shell]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("param cla"), "{out}");
+}
+
 #[test]
 fn broken_scenarios_exit_2_with_the_error_kind() {
     let dir = std::env::temp_dir().join(format!("saber-cli-test-{}", std::process::id()));

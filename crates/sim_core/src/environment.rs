@@ -50,6 +50,17 @@ pub trait Environment: Send + Sync + 'static {
     /// Gravitational potential per unit mass at `position`, J/kg, with `gravity = −∇U`. Used for
     /// the energy the watchdog and the telemetry report.
     fn gravity_potential(&self, position: DVec3) -> f64;
+
+    /// Angular velocity of the world frame relative to inertial space, world-frame components,
+    /// rad/s: zero (the default) for a non-rotating frame, the Earth's rotation for an Earth-fixed
+    /// one. Constant during a run. For a non-zero rate the kernel adds the Coriolis and centrifugal
+    /// accelerations `−2Ω × v − Ω × (Ω × p)`, integrates attitude relative to the world frame while
+    /// `body_rates` stay inertial (so Euler's equations are unchanged), and counts the centrifugal
+    /// potential `−½|Ω × p|²` in the energy, which makes it the conserved Jacobi integral of a
+    /// free body in the rotating frame.
+    fn frame_rotation(&self) -> DVec3 {
+        DVec3::ZERO
+    }
 }
 
 /// The same conditions everywhere. Potential energy is `−g·p`, so it is measured from the world

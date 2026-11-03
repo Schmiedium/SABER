@@ -38,7 +38,9 @@ pub struct RigidBody6 {
     pub velocity: DVec3,
     /// Attitude: rotates body-frame vectors into the world frame. Unit length.
     pub attitude: DQuat,
-    /// Angular velocity in the body frame, rad/s.
+    /// Angular velocity relative to inertial space, body-frame components, rad/s. In a rotating
+    /// world frame (`Environment::frame_rotation`) a body at rest in that frame has the frame's
+    /// rate here.
     pub body_rates: DVec3,
 }
 

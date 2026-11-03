@@ -12,6 +12,8 @@ pub const B: f64 = A * (1.0 - F);
 pub const E2: f64 = F * (2.0 - F);
 /// Earth's gravitational constant including the atmosphere, m³/s².
 pub const GM: f64 = 3.986_004_418e14;
+/// Angular velocity of the Earth, rad/s (WGS 84 `ω`, about the ECEF +z axis).
+pub const OMEGA_E: f64 = 7.292_115e-5;
 /// Second-degree zonal harmonic, `−√5 · C̄₂₀` with the WGS 84 `C̄₂₀ = −4.841_667_749_85e-4`.
 pub const J2: f64 = 1.082_629_821_313_3e-3;
 

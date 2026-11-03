@@ -37,6 +37,7 @@ pub struct Stage<'a> {
     pub(crate) states: &'a [BodyState],
     pub(crate) env: &'a [EnvSample],
     pub(crate) bodies: &'a BodyTable,
+    pub(crate) frame_rotation: DVec3,
 }
 
 impl Stage<'_> {
@@ -73,6 +74,23 @@ impl Stage<'_> {
     /// Body `i`'s velocity relative to the air, world frame, m/s.
     pub fn air_velocity(&self, i: usize) -> DVec3 {
         self.states[i].velocity - self.env[i].wind
+    }
+
+    /// Angular velocity of the world frame relative to inertial space, world frame, rad/s
+    /// (`Environment::frame_rotation`; zero for a non-rotating frame).
+    pub fn frame_rotation(&self) -> DVec3 {
+        self.frame_rotation
+    }
+
+    /// Body `i`'s angular velocity relative to the world frame (and so to air at rest in it),
+    /// body axes, rad/s: `body_rates` less the frame's rotation. Meaningful for 6DOF bodies.
+    pub fn rates_relative_to_frame(&self, i: usize) -> DVec3 {
+        let s = &self.states[i];
+        if self.frame_rotation == DVec3::ZERO {
+            s.body_rates
+        } else {
+            s.body_rates - s.attitude.conjugate() * self.frame_rotation
+        }
     }
 }
 
