@@ -13,6 +13,7 @@ use sim_studio_ui::dock::{DockLayout, DockLayoutChanged};
 use sim_studio_ui::theme::{StudioTheme, ThemeMode};
 use sim_studio_ui::toast::Toast;
 
+use crate::builder::ScenarioDoc;
 use crate::campaign::CampaignCard;
 use crate::clock;
 use crate::crash::OpenCrash;
@@ -44,7 +45,35 @@ pub enum StudioCommand {
     Rail(Rail),
     /// Switch between the dark and light theme.
     SetTheme(ThemeMode),
+    /// Select the Builder entity in this document slot.
+    Select(usize),
+    /// Set a field of the open scenario from text (the Inspector).
+    SetField {
+        /// The entity's document slot.
+        slot: usize,
+        /// The component's type path.
+        component: String,
+        /// The field's reflection path.
+        path: String,
+        /// The new value as typed.
+        text: String,
+    },
+    /// Undo the last scenario edit.
+    Undo,
+    /// Redo the last undone scenario edit.
+    Redo,
+    /// Write the scenario file (`.scn.ron`) from the Builder.
+    Export,
 }
+
+/// The Builder's document changed (an edit, undo, redo, export or selection): panels refresh.
+#[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocChanged;
+
+/// The open scenario being edited in the Builder (`None`: no workspace, or the scenario does not
+/// load; [`CurrentScenario`] says why).
+#[derive(Resource, Debug, Default)]
+pub struct BuilderDoc(pub Option<ScenarioDoc>);
 
 /// Handed to `sim_explorer` once it exists (IB-18 `OpenCampaign`, step 6b). Until then the
 /// studio records the campaign in the recent list and says where it will open.
@@ -159,6 +188,20 @@ fn opened(ws: Workspace, cx: &mut CommandCx, verb: &str) {
             "The open scenario does not load: {e}"
         )));
     }
+    cx.doc.0 = match &ws.file.open_scenario {
+        Some(rel) => match ScenarioDoc::open(&ws.root, rel) {
+            Ok((doc, restored)) => {
+                if restored {
+                    cx.toasts.write(Toast::warning(format!(
+                        "Restored unsaved edits to {rel} from its autosave; Export writes them to the file"
+                    )));
+                }
+                Some(doc)
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
     cx.workspace.0 = Some(ws);
     cx.next.set(AppState::ScenarioBuilder);
     cx.toasts
@@ -183,6 +226,8 @@ pub struct CommandCx<'w> {
     next: ResMut<'w, NextState<AppState>>,
     toasts: MessageWriter<'w, Toast>,
     explorer: MessageWriter<'w, ExplorerRequest>,
+    doc: ResMut<'w, BuilderDoc>,
+    changed: MessageWriter<'w, DocChanged>,
 }
 
 /// Carry out the user's commands.
@@ -210,6 +255,14 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             StudioCommand::CloseWorkspace => {
                 if let Some(ws) = cx.workspace.0.take() {
                     save_workspace(&ws, &mut cx.toasts);
+                }
+                if let Some(doc) = cx.doc.0.take()
+                    && doc.dirty()
+                {
+                    cx.toasts.write(Toast::info(format!(
+                        "Unsaved edits to {} stay in its autosave and come back when the workspace opens",
+                        doc.rel
+                    )));
                 }
                 cx.scenario.0 = None;
                 cx.next.set(AppState::Launcher);
@@ -280,7 +333,99 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                     save_workspace(ws, &mut cx.toasts);
                 }
             }
+            StudioCommand::Select(_)
+            | StudioCommand::SetField { .. }
+            | StudioCommand::Undo
+            | StudioCommand::Redo
+            | StudioCommand::Export => edit(command, &mut cx),
         }
+    }
+}
+
+/// The Builder's commands.
+fn edit(command: &StudioCommand, cx: &mut CommandCx) {
+    let Some(doc) = &mut cx.doc.0 else {
+        cx.toasts
+            .write(Toast::warning("No scenario is open in the Builder"));
+        return;
+    };
+    match command {
+        StudioCommand::Select(slot) => doc.selected = Some(*slot),
+        StudioCommand::SetField {
+            slot,
+            component,
+            path,
+            text,
+        } => match doc.set(*slot, component, path, text) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                cx.toasts.write(Toast::error(format!(
+                    "{} {}{path}: {e}",
+                    doc.label(*slot),
+                    crate::builder::fields::short(component)
+                )));
+            }
+        },
+        StudioCommand::Undo => {
+            if !doc.undo() {
+                cx.toasts.write(Toast::info("Nothing to undo"));
+            }
+        }
+        StudioCommand::Redo => {
+            if !doc.redo() {
+                cx.toasts.write(Toast::info("Nothing to redo"));
+            }
+        }
+        StudioCommand::Export => match doc.export() {
+            Ok(path) => {
+                cx.toasts
+                    .write(Toast::success(format!("Exported {}", path.display())));
+                if let Some(ws) = &cx.workspace.0 {
+                    cx.scenario.0 = scenario_info(ws);
+                }
+            }
+            Err(e) => {
+                cx.toasts
+                    .write(Toast::error(format!("Export refused: {e}")));
+            }
+        },
+        _ => return,
+    }
+    cx.changed.write(DocChanged);
+}
+
+/// Builder keys (§9.6), unless a text field has focus: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo,
+/// Ctrl+S or Ctrl+E export.
+pub fn builder_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    focus: Option<Res<InputFocus>>,
+    editing: Query<(), With<EditableText>>,
+    mut out: MessageWriter<StudioCommand>,
+) {
+    if focus
+        .and_then(|f| f.get())
+        .is_some_and(|e| editing.contains(e))
+    {
+        return;
+    }
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if !ctrl {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyZ) {
+        out.write(if shift {
+            StudioCommand::Redo
+        } else {
+            StudioCommand::Undo
+        });
+    }
+    if keys.just_pressed(KeyCode::KeyY) {
+        out.write(StudioCommand::Redo);
+    }
+    if keys.any_just_pressed([KeyCode::KeyS, KeyCode::KeyE]) {
+        out.write(StudioCommand::Export);
     }
 }
 

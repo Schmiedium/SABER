@@ -110,6 +110,8 @@ with an upgrader for 1.x) and Tier 3 snapshots (`ch_frag_*`), the summaries' `fr
 v0.29 (2026-11-03, build step S1) records the studio's frame as built (§5.5): kit, states, workspaces, starter
 packs, Launcher and shell; details in `sim_studio_ux.md` §6.3. It also records D21 (was O9): `Probability`
 requirements are judged pooled by default and per parameter set on request, as step 4c built them.
+v0.30 (2026-11-03, build step S2-1) records the Builder's document as built (§5.5) and the kernel API it uses
+(§5.1): `Scenario::from_parts`, `Scenario::meta` and `SceneEntity::try_clone`.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -734,6 +736,8 @@ stateDiagram-v2
 | `Studio.UiKit` | `sim_studio_ui`: Feathers facade plus own widgets (`StudioDock`, `DataTable`, `PlotCanvas`, `TreeView`, `EntityPicker`, `QuantityInput`, `CodeEditor`). Detail and risk register in `sim_studio_ux.md` §6.1. |
 
 **As built (step S1).** The frame only: `Studio.UiKit` has the theme (every `sim_studio_ux.md` §10.1 token as a Feathers token), `StudioDock` with fixed regions, toasts and the widget facade; `sim_studio` has the six `AppState`s, the activity rail, workspaces (`saber.workspace.ron`, schema in `sim_studio_ux.md` §6.3) with starter packs, the per-user recent list (`~/.saber/studio/recent.ron`), the Launcher and the shell. `Studio.Replay` opens a crash stream's index (dumps listed; scrubbing is S6). `Studio.Handoff` is not built: Results says the explorer arrives with step 6b. The studio's logic (`StudioCorePlugin`) runs on `MinimalPlugins`, so tests drive it without a window. Details in `sim_studio_ux.md` §6.3.
+
+**As built (step S2-1).** `Studio.Builder`'s document: `sim_studio::builder::ScenarioDoc` keeps a reflected copy of the open scenario's entities (`SceneEntity::try_clone`) and rebuilds a validated, hashed `Scenario` from them on demand with `Scenario::from_parts(entities, meta, visual, registry)`, which keeps file keys, component order and the `visual:` section, so an untouched scene exports with its `scene_hash`. Fields are edited by reflection path as text; every edit is undoable and saved to `<file>~autosave`, and Export writes the canonical `.scn.ron` (refused while Lint has errors). Lint runs the scene's validation and Tick 0's setup in a World built with the standard library, so setup errors and `ResolveReport.warnings` show while editing. Parameters (bind menu) and requirements are S2-2 and S2-3; the viewport is S3. Details in `sim_studio_ux.md` §7.2.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 

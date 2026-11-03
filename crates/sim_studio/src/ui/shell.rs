@@ -8,8 +8,9 @@ use bevy::scene::{CommandsSceneExt, SceneList, bsn, bsn_list};
 use sim_studio_ui::dock::DockRegion;
 use sim_studio_ui::prelude::*;
 
+use super::builder::{Breadcrumb, RegionBody};
 use super::{action, child};
-use crate::actions::{CurrentCrash, CurrentScenario, CurrentWorkspace, StudioCommand};
+use crate::actions::{BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, StudioCommand};
 use crate::state::{AppState, Rail, RailContext};
 
 /// The shell's root node.
@@ -98,8 +99,9 @@ fn region_body() -> impl bevy::scene::Scene {
 /// Build the shell for `state`.
 pub fn spawn_for(
     state: AppState,
-) -> impl Fn(Commands, Res<CurrentWorkspace>, Res<CurrentScenario>, Res<CurrentCrash>) {
-    move |mut commands, workspace, scenario, crash| {
+) -> impl Fn(Commands, Res<CurrentWorkspace>, Res<CurrentScenario>, Res<CurrentCrash>, Res<BuilderDoc>)
+{
+    move |mut commands, workspace, scenario, crash, doc| {
         let root = commands
             .spawn_scene(screen())
             .insert(DespawnOnExit(state))
@@ -121,8 +123,22 @@ pub fn spawn_for(
             crumbs.push(c.path.display().to_string());
         }
         crumbs.push(state.title().to_owned());
-        child(&mut commands, title_bar, label(crumbs.join("  ▸  ")));
+        let dirty = doc.0.as_ref().is_some_and(|d| d.dirty());
+        let crumb = format!("{}{}", if dirty { "● " } else { "" }, crumbs.join("  ▸  "));
+        let c = child(&mut commands, title_bar, label(crumb));
+        commands.entity(c).insert(Breadcrumb);
         child(&mut commands, title_bar, spacer());
+        if state == AppState::ScenarioBuilder && doc.0.is_some() {
+            for (text, command) in [("Undo", StudioCommand::Undo), ("Redo", StudioCommand::Redo)] {
+                action(&mut commands, title_bar, plain_button(text), command);
+            }
+            action(
+                &mut commands,
+                title_bar,
+                primary_button("Export .scn.ron"),
+                StudioCommand::Export,
+            );
+        }
         action(
             &mut commands,
             title_bar,
@@ -205,6 +221,7 @@ pub fn spawn_for(
 
 /// Fill the dock's regions once it is spawned: the panels each region will hold, the state's
 /// content in the center, and the console history at the bottom.
+#[allow(clippy::too_many_arguments)] // a Bevy system: one parameter per resource it reads
 pub fn fill_regions(
     mut commands: Commands,
     pending: Query<(Entity, &PendingRegions)>,
@@ -213,6 +230,7 @@ pub fn fill_regions(
     crash: Res<CurrentCrash>,
     scenario: Res<CurrentScenario>,
     log: Res<ToastLog>,
+    docs: Res<BuilderDoc>,
 ) {
     for (dock_entity, PendingRegions(state)) in &pending {
         let mine: Vec<_> = regions
@@ -231,6 +249,21 @@ pub fn fill_regions(
         commands.entity(dock_entity).remove::<PendingRegions>();
         for (region, kind) in mine {
             let body = child(&mut commands, region, region_body());
+            commands.entity(body).insert(RegionBody(kind));
+            if *state == AppState::ScenarioBuilder
+                && let Some(doc) = &docs.0
+            {
+                match kind {
+                    DockRegion::Left => super::builder::outliner(&mut commands, body, doc),
+                    DockRegion::Right => super::builder::inspector(&mut commands, body, doc),
+                    DockRegion::Center => super::builder::summary(&mut commands, body, doc),
+                    DockRegion::Bottom => {
+                        super::builder::lint(&mut commands, body, doc);
+                        console(&mut commands, body, &log);
+                    }
+                }
+                continue;
+            }
             match kind {
                 DockRegion::Left => {
                     child(&mut commands, body, heading("Outliner"));
@@ -253,24 +286,29 @@ pub fn fill_regions(
                     );
                 }
                 DockRegion::Bottom => {
-                    child(&mut commands, body, heading("Console"));
                     if let Some(Err(e)) = &scenario.0 {
                         child(&mut commands, body, status_text(Status::Fail, e.clone()));
                     }
-                    let list = child(&mut commands, body, column());
-                    commands.entity(list).insert(ConsoleList);
-                    let start = log.entries.len().saturating_sub(50);
-                    for (_, t) in &log.entries[start..] {
-                        child(
-                            &mut commands,
-                            list,
-                            muted(format!("{} {}", t.level.mark(), t.text)),
-                        );
-                    }
+                    console(&mut commands, body, &log);
                 }
                 DockRegion::Center => center(&mut commands, body, *state, &crash),
             }
         }
+    }
+}
+
+/// The Console: the last 50 notifications, then new ones as they come.
+pub(crate) fn console(commands: &mut Commands, body: Entity, log: &ToastLog) {
+    child(commands, body, heading("Console"));
+    let list = child(commands, body, column());
+    commands.entity(list).insert(ConsoleList);
+    let start = log.entries.len().saturating_sub(50);
+    for (_, t) in &log.entries[start..] {
+        child(
+            commands,
+            list,
+            muted(format!("{} {}", t.level.mark(), t.text)),
+        );
     }
 }
 

@@ -240,6 +240,74 @@ pub fn text_field(
     }
 }
 
+/// A value field for editors that build many fields at run time (the Inspector): no [`FieldId`],
+/// starting with `initial`, announced as `a11y`. Its value arrives as [`KitSubmit`], which bubbles
+/// up to the returned container, so observe it there.
+pub fn value_field(initial: impl Into<String>, a11y: impl Into<String>) -> impl Scene {
+    let initial = initial.into();
+    let a11y = a11y.into();
+    bsn! {
+        @FeathersTextInputContainer
+        Node {
+            min_width: px(120),
+            flex_grow: 1.0,
+        }
+        Children [
+            @FeathersTextInput
+            InheritableFont {
+                font: fonts::MONO,
+                font_size: size::COMPACT_FONT,
+            }
+            FieldInit({initial})
+            AccessibleLabel({a11y})
+        ]
+    }
+}
+
+/// A text field's value is committed: Enter was pressed in it, or it lost focus. Bubbles from the
+/// input up through its parents, so a panel can observe its fields' container. Sent for every
+/// commit, changed or not; the receiver compares with what it has.
+#[derive(EntityEvent, Clone, Debug, PartialEq)]
+#[entity_event(propagate, auto_propagate)]
+pub struct KitSubmit {
+    /// The input, then each parent the event bubbles to.
+    pub entity: Entity,
+    /// The field's text, trimmed.
+    pub value: String,
+}
+
+/// Enter in a text input commits it.
+pub(crate) fn submit_on_enter(
+    ev: On<bevy::input_focus::FocusedInput<bevy::input::keyboard::KeyboardInput>>,
+    inputs: Query<&EditableText, With<bevy::ui_widgets::TextInput>>,
+    mut commands: Commands,
+) {
+    let key = &ev.input;
+    if key.state.is_pressed()
+        && matches!(key.logical_key, bevy::input::keyboard::Key::Enter)
+        && let Ok(text) = inputs.get(ev.focused_entity)
+    {
+        commands.trigger(KitSubmit {
+            entity: ev.focused_entity,
+            value: text.value().to_string().trim().to_owned(),
+        });
+    }
+}
+
+/// Leaving a text input commits it.
+pub(crate) fn submit_on_blur(
+    ev: On<bevy::input_focus::FocusLost>,
+    inputs: Query<&EditableText, With<bevy::ui_widgets::TextInput>>,
+    mut commands: Commands,
+) {
+    if let Ok(text) = inputs.get(ev.entity) {
+        commands.trigger(KitSubmit {
+            entity: ev.entity,
+            value: text.value().to_string().trim().to_owned(),
+        });
+    }
+}
+
 /// Put each field's initial text in.
 pub(crate) fn init_fields(mut fields: Query<(&FieldInit, &mut EditableText), Added<FieldInit>>) {
     for (init, mut text) in &mut fields {

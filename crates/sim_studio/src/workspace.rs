@@ -230,7 +230,7 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> WorkspaceError + '_ {
 }
 
 /// Write `text` to `path` through a temporary file and a rename, so a crash never leaves half a file.
-fn write_atomic(path: &Path, text: &str) -> Result<(), WorkspaceError> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<(), WorkspaceError> {
     let tmp = path.with_extension("ron.tmp");
     std::fs::write(&tmp, text).map_err(io(&tmp))?;
     std::fs::rename(&tmp, path).map_err(io(path))
