@@ -2,9 +2,16 @@
 //! recorder, geometry and contact, watchdog).
 //!
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.1, §6, §10.1 and
-//! `docs/design/physics-engine-tradeoffs.md`. No physics is implemented yet.
+//! `docs/design/physics-engine-tradeoffs.md`. Build step 1a (`docs/build-plan.md`) provides the
+//! integrators, the clock and the random streams; the ECS schedule and bodies arrive in step 1b.
 
-pub use sim_schema::SimStatus;
+pub mod clock;
+pub mod integrator;
+pub mod rng;
+
+pub use clock::{RateDivider, SimClock};
+pub use rng::{RngStream, SimRng};
+pub use sim_schema::{CrashKind, IntegratorKind, SimStatus};
 
 /// The tick pipeline's system sets, in their fixed order (subsystems §6).
 ///

@@ -14,6 +14,9 @@ truth for crate boundaries, interface boundaries (IB-xx), file formats, names an
 | `verification-and-test-strategy.md` | Test tiers, tolerances, reference data, CI cadence |
 | `flight-dynamics-sources.md` | Reading list for aircraft and drone models |
 
+`docs/build-plan.md` (outside `design/`) orders the roadmap into build steps, one PR each. A PR that
+finishes a step adds it to the plan's "Done" table.
+
 The loop:
 
 1. **Code and design change in the same PR.** A PR that changes behaviour, an interface, a file format

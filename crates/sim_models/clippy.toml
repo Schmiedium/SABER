@@ -1,8 +1,10 @@
 # Determinism guards (verification-and-test-strategy.md §4.3).
-# Grows as dependencies arrive (rand::thread_rng, f64::mul_add outside the FMA module, rayon in a World).
+# Grows as dependencies arrive (rayon in a World, Bevy's parallel executor). OS entropy is out of
+# reach: rand_core 0.10 has none, and neither `rand` nor `getrandom` is a kernel dependency.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "wall time breaks determinism; use SimClock" },
     { path = "std::time::SystemTime::now", reason = "wall time breaks determinism; use SimClock" },
+    { path = "f64::mul_add", reason = "fused multiply-add changes bits; the FMA policy is never (subsystems §10.1)" },
 ]
 disallowed-types = [
     { path = "std::collections::HashMap", reason = "iteration order is random; use IndexMap or a sorted Vec" },

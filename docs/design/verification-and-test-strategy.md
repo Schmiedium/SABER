@@ -1,6 +1,6 @@
 # SABER: Verification and Test Strategy
 
-Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -117,8 +117,12 @@ One comparator, implemented identically in Rust (`sim_testkit`) and Python (`sab
 reference case gives the same verdict wherever it is checked:
 
 ```text
-close(a, b; atol, rtol)  ⇔  |a − b| ≤ max(atol, rtol · max(|a|, |b|))
+close(a, b; atol, rtol)  ⇔  a == b  or  (a, b finite and |a − b| ≤ max(atol, rtol · max(|a|, |b|)))
 ```
+
+Equal values, including equal infinities, are close; an infinity is close only to the same infinity
+(without that rule `|∞ − x| ≤ rtol·∞` would pass); NaN is never close. Both implementations are checked
+against the shared vectors in `tests/shared/tol_vectors.json`.
 
 It is **symmetric** on purpose. `numpy.isclose` is not (`atol + rtol·|b|`), and `approx`/`float-cmp`
 semantics differ again, so neither is used directly.
@@ -333,10 +337,10 @@ always land exactly on the tick boundary. So most tests are written once and run
 
 | Test | What it checks | Comparison |
 |---|---|---|
-| **Tableau order conditions** | For each tableau, the algebraic order conditions (`Σ bᵢ = 1`, `Σ bᵢcᵢ = ½`, `Σ bᵢcᵢ² = ⅓`, …) up to `order` for `b` and `embedded_order` for `b_hat`, plus `cᵢ = Σⱼ aᵢⱼ`, FSAL consistency (last row of `a` equals `b`) where `fsal` is set | Exact, in rational arithmetic: the test holds each tableau as rationals from the source paper and also checks that the f64 `Tableau` constant is the correctly rounded value of each one. A coefficient typo fails here, before any physics runs. |
+| **Tableau order conditions** | For each tableau, the algebraic order conditions (`Σ bᵢ = 1`, `Σ bᵢcᵢ = ½`, `Σ bᵢcᵢ² = ⅓`, …) up to `order` for `b` and `embedded_order` for `b_hat`, plus `cᵢ = Σⱼ aᵢⱼ`, FSAL consistency (last row of `a` equals `b`) where `fsal` is set | Exact, in rational arithmetic, over every rooted tree up to the order: each coefficient is written once as its exact source value and the f64 is derived from it; the test checks the conditions exactly, checks that each f64 is the correctly rounded value, and checks that some condition of the next order fails (the declared order is the true one). DOP853's nodes involve √6, so it is held as the published 30-digit decimals and its conditions hold to 1e-20. A coefficient typo fails here, before any physics runs. |
 | **Fixed-step order** | Each kind in `Fixed` mode on the §5.3 manufactured problems, a Kepler orbit and a torque-free asymmetric top. Observed order equals the nominal order of the propagated solution: 1, 2, 4, 3, 4 (Fehlberg propagates 4th order), 5, 5, 8 | §5.4 slope test. DOP853 needs larger `dt` to stay above the round-off floor; the test picks its `dt` range for that reason. |
-| **Embedded estimate order** | Local error estimate `‖y − ŷ‖` over one step scales as `h^{q+1}`, `q = embedded_order` | slope test on a single step |
-| **Estimate reliability** | On analytic problems the estimate tracks the true local error within a factor of about 10, and is never systematically smaller | ratios, over randomized states |
+| **Embedded estimate order** | Local error estimate over one step scales as `h^{q+1}`, with `q = embedded_order` except DOP853, whose composite estimator scales as `h⁸` (`q = 7`, `Tableau::err_order`) | slope test on a single step |
+| **Estimate reliability** | On analytic problems the estimate is never systematically smaller than the true local error (at least a tenth of it). For `Fehlberg45`, which propagates the solution its estimate measures, it also tracks the true error within a factor of about 10. The other pairs propagate the higher-order solution (local extrapolation), so their estimate measures the lower-order solution's error and overstates the propagated one's by a growing factor as `h` shrinks | ratios, over a spread of start states |
 | **Adaptive accuracy** | Adaptive runs meet the requested `rtol`/`atol` against a tight-tolerance DOP853 reference (or the analytic answer), within a stated multiple; across `rtol = 1e-4 … 1e-10`, log error vs log tolerance has a slope near 1 | slope test plus an upper bound |
 | **Tick alignment** | Every tick ends at exactly `t₀ + n·dt` (bitwise), whatever the substeps; the controller's `h` carries over between ticks | Exact |
 | **Controller bounds** | Rejected steps are retried smaller; growth and shrink limits respected; `h_max ≤ dt`; `max_substeps_per_tick` bounds the work; failing the error test at `h_min` ends the run as `CrashedSolver(StepSizeUnderflow)` on a deliberately stiff or discontinuous case, not an endless loop | exact counts and statuses on scripted problems |

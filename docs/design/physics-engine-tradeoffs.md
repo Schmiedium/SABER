@@ -3,6 +3,11 @@
 Status: **decided, D13** (Alex, 2026-11-01): custom physics kernel with Parry for collision detection;
 robotics deferred. §1–§7 are the analysis that led there; §8 records the decision, §9 designs the
 contact handling it needs, and §10 the selectable integrators (D14). Written 2026-11-01.
+v1.1 (2026-11-02, build step 1a): §10 records what implementing the integrators settled: the error-norm
+scale uses the old and new state, DOP853's composite estimator, first-same-as-last reuse only within a
+tick, `SubstepLimit` and non-finite errors, Fixed-mode estimate weights, `atol.model`, how
+semi-implicit Euler uses state classes, and the interface as built (§10.7). Dense output moves to the
+contact step.
 Companion to `subsystems-and-interfaces.md` (§5.1 `sim_core`, §5.2 `sim_models`, §6 tick pipeline,
 IB-16 fragmentation, G8) and `flight-dynamics-sources.md`.
 
@@ -577,6 +582,13 @@ quick runs and accurate runs with an error estimate.
 | `DormandPrince54` (DOPRI5) | 5 (4) | 7 (6 effective) | yes | fixed or adaptive | **recommended accurate mode**; 4th-order dense output used for event location |
 | `DormandPrince853` (DOP853) | 8 (5, 3) | 12 | – | fixed or adaptive | reference runs, convergence studies, very tight tolerances |
 
+`SemiImplicitEuler` works on the packed state through each component's `StateClass`: velocity-like
+components (`Vel`, `Rate`, `Model`) step first with `f(t, yₙ)`, then position-like components (`Pos`,
+`Quat`) step with `f` evaluated at the updated velocities, at two right-hand-side evaluations per step.
+DOP853 uses Hairer's composite error estimate from its 5th- and 3rd-order embedded solutions,
+`|h|·‖e₅‖² / sqrt(n·(‖e₅‖² + 0.01·‖e₃‖²))` per body, which scales as `h⁸`; its coefficients involve √6
+and are the published 30-digit decimals (Hairer, Nørsett and Wanner, *Solving ODEs I*, §II.10).
+
 All of these are explicit Runge–Kutta methods, so one generic stepper driven by a Butcher tableau covers
 every row except `SemiImplicitEuler`. Adding another method (Verner, Tsitouras 5(4)) is a new tableau
 constant, not new stepper code.
@@ -605,18 +617,32 @@ flowchart LR
 - **Fixed mode.** `N` equal substeps per tick (default 1). With an embedded pair, the difference between
   the two solutions is still computed and reported as a **local error estimate**, at no extra force
   evaluations. That gives quick runs with an accuracy indicator.
+  The estimate is weighted by `rtol` and `atol` given in `Fixed` (defaults `1e-6` and the `Atol`
+  defaults); they do not change the steps.
 - **Adaptive mode.** Standard PI step-size control on a weighted RMS error norm
-  `‖e‖ = sqrt(mean((eᵢ / (atol_i + rtol·max(|yᵢ|, |ŷᵢ|)))²))`. A step is accepted when `‖e‖ ≤ 1`.
-  The controller's `h` carries over between ticks, and the last substep in each tick is clipped to land on
-  the tick boundary.
+  `‖e‖ = sqrt(mean((eᵢ / (atol_i + rtol·max(|yₙ,ᵢ|, |yₙ₊₁,ᵢ|)))²))`, the scale taken from the state
+  before and after the step (Hairer). A step is accepted when `‖e‖ ≤ 1`. The controller follows Hairer's
+  DOPRI5 settings: safety 0.9, step ratio between 0.2 and 10, PI weight β = 0.04, exponent
+  `1/(q+1) − 0.75β` with `q` the estimate's order, no growth on the step after a rejection. The first
+  step of a run tries `h_max`. The controller's `h` carries over between ticks, and the last substep in
+  each tick is clipped to land on the tick boundary (or stretched by up to 1 % to reach it, never past
+  `h_max`); when a step was shortened only to land, the next tick starts from the larger of the
+  controller's earlier proposal and its new one.
+- **First same as last.** FSAL pairs reuse their last stage as the next substep's first stage only within
+  a tick. Every tick evaluates its first stage afresh, because inputs change at the tick boundary and the
+  previous tick's last stage saw the old inputs. A rejected step reuses its first stage.
 - **Why substeps stay inside ticks.** Control inputs, actuator commands and wind samples change at tick
   boundaries (zero-order hold). Embedded RK pairs assume the right-hand side is smooth within a step; a
   step that straddles a discontinuity gets rejected repeatedly. Aligning substeps to ticks puts every
   input discontinuity on a step boundary.
 - **Bounds.** `h_min`, `h_max` (≤ dt) and `max_substeps_per_tick` keep the work bounded. If the error
   test still fails at `h_min`, the run ends with `CrashedSolver(StepSizeUnderflow)`, recorded like any other
-  crash (seq §8), because that almost always means a modelling problem (stiffness, discontinuous model,
-  NaN on the way).
+  crash (seq §8), because that almost always means a modelling problem (stiffness, discontinuous model).
+  More than `max_substeps_per_tick` step attempts (accepted and rejected) in one tick ends the run with
+  `CrashedSolver(SubstepLimit)`. A non-finite error norm counts as a rejection; if it is still non-finite
+  at `h_min`, the run ends as `CrashedNaN` (`CrashKind::NonFinite`), not as a solver failure, and the body
+  that produced it is named. The state is left at the last accepted substep. In `Fixed` mode the
+  integrator does not judge; the watchdog catches non-finite state.
 
 ### 10.3 What the error norm covers
 
@@ -626,7 +652,9 @@ flowchart LR
 - **State components.** Position, velocity, attitude quaternion (4 components, normalised after each
   accepted step), body rates, plus any model states that the model plugin registers as integrated (motor
   speed, battery charge, actuator lag states). Each component class gets its own `atol`
-  (e.g. 1 mm, 1 mm/s, 1e-8, 1e-6 rad/s) so metres and quaternion components are not compared raw.
+  (e.g. 1 mm, 1 mm/s, 1e-8, 1e-6 rad/s, and `model` for model states, default 1e-6) so metres and
+  quaternion components are not compared raw. The kernel describes the packed state at Tick 0 as a
+  `StateLayout`: a `StateClass` per component and one group per body.
 - **Fragments are excluded.** `PointMass3` fragments (up to 30k) always use their own fixed integrator
   (`SemiImplicitEuler` or `Rk4`, set in the fragment config) at the tick dt. They do not couple back, and
   letting 30k fragments drive the step size of the main bodies would waste most of the CPU.
@@ -640,7 +668,8 @@ flowchart LR
   (`DormandPrince54`, `DormandPrince853`, `BogackiShampine32`) to evaluate positions inside the step for
   the time-of-impact search, then restarts the step at `t*`. For methods without dense output the kernel
   uses cubic Hermite interpolation from the step's end points and derivatives. After an impulse the FSAL
-  stage is discarded (the derivative jumped).
+  stage is discarded (the derivative jumped). Dense output is built with contact in build step 5d; the
+  integrators of step 1a do not have it yet.
 
 ### 10.5 Determinism and allocation
 
@@ -650,8 +679,14 @@ flowchart LR
 - Different integrators or tolerances give different results by design. The integrator config is part of
   the run's identity: it is hashed into `sim_config_hash`, written next to `scene_hash` in every
   summary row and file header, and studio re-simulation uses the recorded config.
-- Stage buffers are fixed-size arrays sized by the tableau (`const S: usize`) times the body count known
-  at Tick 0. No allocation per step.
+- Stage buffers are sized by the tableau (`const S: usize` stages) times the state length known at Tick 0,
+  and allocated once when the World's `Integrator` is built. No allocation per step or per tick (tested
+  for every method in both modes).
+- Quaternions are renormalised in `post_step` after each accepted step. An FSAL stage reused within the
+  tick was evaluated just before that projection; the difference is of the size of the local error and
+  does not lower the method's order (the convergence tests confirm it).
+- No fused multiply-add: `f64::mul_add` is a disallowed method in `sim_core` and `sim_models`, and Rust
+  never fuses on its own.
 
 ### 10.6 Configuration and telemetry
 
@@ -670,29 +705,40 @@ A sweep can also vary the integrator or tolerance per row (for example a converg
 same `Bind*Param` mechanism as other parameters, since the config is resolved at Tick 0.
 
 New T1 summary columns (IB-07): `integrator u8`, `substeps_total u64`, `steps_rejected u64`,
-`h_min_used f64`, `h_max_used f64`, `err_est_max f64` (max local error norm seen, fixed or adaptive),
-`err_est_mean f64`. Tier 3 snapshots can include the per-tick error estimate for plots. `sim_verify`
+`h_min_used f64`, `h_max_used f64`, `err_est_max f64` (max local error norm over accepted steps, fixed
+or adaptive), `err_est_mean f64` (mean over accepted steps). `h_min_used` leaves out steps shortened only
+to land on a tick boundary, unless no other step was taken. The two error columns are null for methods
+without an estimate. Tier 3 snapshots can include the per-tick error estimate for plots. `sim_verify`
 can then state requirements on numerical quality ("`err_est_max` ≤ 1 for every run counted as Pass").
 
 ### 10.7 Interface (part of IB-08)
+
+As built in `sim_core::integrator` (build step 1a). The per-method `Stepper` is internal; the kernel holds
+one `Integrator` per World.
 
 ```rust
 pub trait OdeSystem {                       // implemented by sim_core over the World's packed state
     fn dim(&self) -> usize;
     fn rhs(&mut self, t: f64, y: &[f64], dydt: &mut [f64]);        // forces + contact at a stage
-    fn post_step(&mut self, y: &mut [f64]);                         // quaternion normalisation
+    fn post_step(&mut self, y: &mut [f64]) {}                       // quaternion normalisation
 }
 
-pub struct Tableau<const S: usize> {
-    pub a: [[f64; S]; S], pub b: [f64; S], pub b_hat: Option<[f64; S]>, pub c: [f64; S],
-    pub order: u8, pub embedded_order: u8, pub fsal: bool, pub dense: Option<DenseCoeffs>,
+pub enum StateClass { Pos, Vel, Quat, Rate, Model }                 // picks atol; SIE kick/drift
+pub struct StateLayout { /* class per component, one group (body) per range */ }
+
+pub struct Tableau<const S: usize> {        // every coefficient keeps its exact source value
+    pub a: [[Coef; S]; S], pub b: [Coef; S], pub c: [Coef; S], pub error: ErrorWeights<S>,
+    pub order: u8, pub embedded_order: u8, pub err_order: u8, pub fsal: bool, /* kind */
 }
+pub enum ErrorWeights<const S: usize> { None, Embedded([Coef; S]), Dop853 { e5: [Coef; S], b_hat3: [Coef; S] } }
 
-pub struct StepReport { pub h_used: f64, pub err_norm: Option<f64>, pub accepted: bool }
-
-pub trait Stepper {
-    fn advance_tick(&mut self, sys: &mut dyn OdeSystem, t: f64, dt: f64, y: &mut [f64]) -> Result<TickReport, CrashReason>;
-    fn dense_eval(&self, theta: f64, out: &mut [f64]);              // for event location
+impl Integrator {
+    pub fn new(config: IntegratorConfig, layout: &StateLayout, dt: f64) -> Result<Self, IntegratorConfigError>;
+    // t0 and t1 come from SimClock (start + n·dt), so ticks land on the grid bitwise.
+    pub fn advance_tick(&mut self, sys: &mut dyn OdeSystem, t0: f64, t1: f64, y: &mut [f64])
+        -> Result<TickReport, SolverFailure>;              // SolverFailure { kind: CrashKind, t, h, group }
+    pub fn stats(&self) -> &IntegratorStats;               // the summary columns of §10.6
+    pub fn reset(&mut self);                               // World reuse between runs (G5)
 }
 ```
 
