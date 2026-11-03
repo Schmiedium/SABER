@@ -250,7 +250,10 @@ mod tests {
 }
 
 mod header;
-pub use header::{FileHeader, HeaderError, MAGIC, SCENE_FORMAT, SCENE_SCHEMA_VERSION, Semver};
+pub use header::{
+    FileHeader, HeaderError, MAGIC, REQ_FORMAT, REQ_SCHEMA_VERSION, SCENE_FORMAT,
+    SCENE_SCHEMA_VERSION, Semver,
+};
 
 /// The world frame a scenario declares (subsystems §10.3). The kernel works in this frame
 /// throughout; the environment derives "down" and altitude from it.

@@ -906,8 +906,16 @@ dependencies = [
 name = "sim_verify"
 version = "0.0.0"
 dependencies = [
+ "bevy_ecs",
+ "bevy_reflect",
+ "blake3",
+ "glam",
+ "ron",
+ "serde",
  "sim_core",
+ "sim_models",
  "sim_schema",
+ "sim_testkit",
 ]
 
 [[package]]

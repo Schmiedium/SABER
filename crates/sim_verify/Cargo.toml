@@ -13,8 +13,19 @@ workspace = true
 
 [dependencies]
 sim_schema.workspace = true
+serde.workspace = true
+ron.workspace = true
+blake3.workspace = true
 sim_core = { workspace = true, optional = true }
+bevy_ecs = { workspace = true, optional = true }
+
+[dev-dependencies]
+bevy_ecs.workspace = true
+bevy_reflect.workspace = true
+sim_models.workspace = true
+sim_testkit.workspace = true
+glam.workspace = true
 
 [features]
 default = ["ecs"]
-ecs = ["dep:sim_core"]
+ecs = ["dep:sim_core", "dep:bevy_ecs"]

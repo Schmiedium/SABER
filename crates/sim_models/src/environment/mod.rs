@@ -21,7 +21,7 @@ use bevy_reflect::Reflect;
 use glam::DVec3;
 use sim_core::{
     EnvSample, Environment, PointMass3, RigidBody6, SetupError, SimAppBuilder, SimEnvironment,
-    SimId, SimPlugin, SimSet, StopRequests, WorldFrame,
+    SimEvent, SimEvents, SimId, SimPlugin, SimSet, StopRequests, WorldFrame,
 };
 use sim_schema::Frame;
 
@@ -87,7 +87,7 @@ pub struct GroundImpactStop {
     pub altitude_m: f64,
 }
 
-/// Stop reason of [`GroundImpactStop`].
+/// Stop reason and event name of [`GroundImpactStop`].
 pub const GROUND_IMPACT: &str = "ground_impact";
 
 /// Altitude of a world-frame position, m.
@@ -275,6 +275,7 @@ impl SimPlugin for EnvironmentPlugin {
             .register_type::<Atmosphere>()
             .register_type::<Wind>()
             .register_type::<GroundImpactStop>()
+            .declare_event(GROUND_IMPACT)
             .add_systems(SimSet::Constraints, ground_impact_system);
     }
 
@@ -302,7 +303,7 @@ impl SimPlugin for EnvironmentPlugin {
                     message: format!("GroundImpactStop on {who} has a non-finite altitude"),
                 });
             }
-            watch.push((entity, stop.altitude_m));
+            watch.push((entity, id.copied(), stop.altitude_m));
         }
         world.insert_resource(GroundWatch(watch));
         world.insert_resource(SimEnvironment(Box::new(env)));
@@ -316,26 +317,34 @@ impl SimPlugin for EnvironmentPlugin {
 /// cache on the system's first run after new archetypes appear, which would allocate on Tick 1 of
 /// every fresh World (IB-08 rule 5).
 #[derive(Resource, Debug, Default)]
-struct GroundWatch(Vec<(Entity, f64)>);
+struct GroundWatch(Vec<(Entity, Option<SimId>, f64)>);
 
-/// `SimSet::Constraints`: ask for the run to stop when a watched body reaches the ground.
+/// `SimSet::Constraints`: emit a `ground_impact` event for each watched body at or below its
+/// ground (value: its altitude, m) and ask for the run to stop.
 fn ground_impact_system(world: &mut World) {
-    let frame = world.resource::<WorldFrame>().0;
-    let mut hit = false;
-    for &(entity, ground) in &world.resource::<GroundWatch>().0 {
-        let position = if let Some(b) = world.get::<RigidBody6>(entity) {
-            b.position
-        } else if let Some(b) = world.get::<PointMass3>(entity) {
-            b.position
-        } else {
-            continue;
-        };
-        if altitude(frame, position) <= ground {
-            hit = true;
-            break;
+    sim_core::with_resource(world, |world, watch: &mut GroundWatch| {
+        let frame = world.resource::<WorldFrame>().0;
+        let mut hit = false;
+        for &(entity, sim_id, ground) in &watch.0 {
+            let position = if let Some(b) = world.get::<RigidBody6>(entity) {
+                b.position
+            } else if let Some(b) = world.get::<PointMass3>(entity) {
+                b.position
+            } else {
+                continue;
+            };
+            let h = altitude(frame, position);
+            if h <= ground {
+                hit = true;
+                world.resource_mut::<SimEvents>().emit(SimEvent {
+                    name: GROUND_IMPACT,
+                    sim_id,
+                    value: h,
+                });
+            }
         }
-    }
-    if hit {
-        world.resource_mut::<StopRequests>().request(GROUND_IMPACT);
-    }
+        if hit {
+            world.resource_mut::<StopRequests>().request(GROUND_IMPACT);
+        }
+    });
 }
