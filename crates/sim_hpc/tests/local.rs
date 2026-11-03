@@ -529,6 +529,43 @@ fn preflight_refuses_broken_inputs() {
         PreflightError::Manifest(ManifestError::DuplicateRun { .. })
     ));
 
+    // A manifest generated against another scene (seq §4: regenerate the sweep); one generated
+    // against this scene passes.
+    let s = Setup::new("scene-mismatch", SCENE, &[30.0], 1, "");
+    let rows = vec![ManifestRow {
+        run_id: 0,
+        param_set_id: 0,
+        replicate_seed: 1,
+        params: vec![30.0],
+    }];
+    let batch = ManifestRow::to_batch(&rows, &["param_muzzle_vz".to_owned()]).unwrap();
+    let write_for = |scene_hash: u64| {
+        let mut header = Table::Manifest.header();
+        header.scene_hash = Some(scene_hash);
+        write_parquet(
+            File::create(path_of(&s)).unwrap(),
+            Table::Manifest,
+            &header,
+            std::slice::from_ref(&batch),
+            &[],
+        )
+        .unwrap();
+    };
+    let scene_hash = s.campaign().scenario.scene_hash();
+    write_for(scene_hash ^ 1);
+    let e = err(&s);
+    assert!(
+        matches!(e, PreflightError::Manifest(ManifestError::SceneMismatch { manifest, scenario })
+            if manifest == scene_hash ^ 1 && scenario == scene_hash),
+        "{e}"
+    );
+    assert_eq!(
+        (e.kind(), e.exit_code()),
+        ("SceneMismatch", ExitCode::Config)
+    );
+    write_for(scene_hash);
+    s.campaign();
+
     let s = Setup::new("bad-req", SCENE, &[30.0], 1, "");
     std::fs::write(
         s.dir.join("projectile.req.ron"),

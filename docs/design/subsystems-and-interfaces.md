@@ -45,6 +45,10 @@ carry their declared name instead of an `EventType` enum, and the kernel never b
 v0.15 (2026-11-02, build step 3b) records `sim_hpc --local` as built: preflight, worker threads with World reuse,
 crash and panic capture with the dump quota, `IO.Mux` rolling parts and the summaries-last commit by `IO.Stager`,
 `_MANIFEST.json` and the exit codes (§5.6, IB-04, IB-06, IB-07), and the kernel's Tier 2 and 3 run log (§5.1).
+v0.16 (2026-11-02, build step 3c) records `saber.sweep` and the local half of `saber.campaign` as built (§5.7):
+the samplers, the replicate-seed rule and the sampler footer (IB-02), `campaign.toml` written from Python with
+`sim_hpc`'s defaults, and exit codes mapped to campaign statuses (IB-04). Preflight now also refuses a manifest
+drawn for another scene (`ManifestError::SceneMismatch`, IB-02), the check seq §4 gave the login node.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -573,6 +577,23 @@ flowchart LR
     sweep --> campaign --> analyze --> verifyp --> report
     twin -. "calibrated priors" .-> sweep
 ```
+
+**As built (step 3c), `saber.sweep` and local `saber.campaign`.** `sweep.scene_params(scene)` asks
+`saber-cli validate --json` for the scene's `scene_hash` and `ParamBindings` (key, default, bounds), so Python
+never parses RON and there is no separate `params.json`. `sweep.generate(scene, params, sampler, replicates, seed)`
+needs a definition for every bound key (`Uniform`, `LogUniform`, `Normal` truncated to the bounds, `Levels`, or
+`Fixed`/`Default` to hold it; an unbound key is a warning, as in preflight) and refuses a range outside a binding's
+bounds, so its manifests pass preflight's bounds check. Samplers: `MonteCarlo`, `LatinHypercube`, `Grid` (full
+factorial, last key fastest) and `Morris` (one-at-a-time trajectories on an even-level grid) in numpy, and `Sobol`
+through `scipy.stats.qmc` (scrambled by default, with a warning off powers of 2); `sampler=None` holds every
+parameter for a replicates-only campaign. `Sweep.write` writes IB-02 through `saber.schema.write_table`.
+`saber.campaign.CampaignConfig` mirrors `sim_hpc::CampaignConfig` key for key and writes `campaign.toml` with every
+default spelled out; `tests/shared/campaign/defaults.toml` is that output, checked by a Python test and parsed by a
+`sim_hpc` test against its own defaults, so the mirrors cannot drift. `prepare` lays out a self-contained campaign
+directory (the scene and requirement set copied in, the manifest, `campaign.toml`), `preflight` runs
+`sim_hpc --validate-only --json` and `run_local` runs `sim_hpc --local --json`, both mapping exit codes to a
+`Status` (IB-04); `LocalRun` reads `_MANIFEST.json` and the committed parts. Binaries are found from an argument,
+`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` follow with 4b.
 
 ### 5.8 `sim_query` — campaign query engine (new, D10)
 
@@ -1153,8 +1174,9 @@ flowchart LR
 | Contract | Columns: `run_id u64` (dense, 0..N, sorted), `param_set_id u32`, `replicate_seed u64`, one `f64` column per `param_key`. Parquet KV metadata: `FileHeader` JSON, `sampler` (method, n, seed), `scene_hash` it was generated against. |
 | Owner | `sim_schema::MANIFEST_SCHEMA`; written by Python using the exported schema. |
 | As built (step 3a) | `Table::Manifest` / `ManifestRow`; the parameter columns are named `param_<param_key>` (the dynamic family shared with the summaries); footer entries `saber.header` (whose `scene_hash` is the scene it was generated against) and `saber.sampler`. `saber.schema.write_table` writes it from Python (3c). |
+| As built (step 3c) | `saber.sweep` writes it (§5.7). Columns follow the scene's binding order, then any unbound keys. `replicate_seed = splitmix64(splitmix64(splitmix64(seed) ^ param_set_id) ^ r)` for replicate `r` (SplitMix64's output function), so a run's seed depends only on the campaign seed and its place in the sweep, and the replicates of one set never share a seed. `saber.sampler` is JSON: `method`, `n` and the sampler's settings (Grid `levels`, Morris `trajectories`, `levels`, `delta`, `points_per_trajectory` and each path's parameter `orders`), `seed`, `replicates`, `swept`, every key's definition under `params`, the seed rule, and the numpy/scipy versions (another version may draw other samples; the file is the record). Preflight also refuses a manifest whose header names another `scene_hash`: `ManifestError::SceneMismatch{manifest, scenario}`, exit 2. |
 | Validation | Preflight: every `param_key` bound in the scene exists as a column; no extra unbound `param_*` columns (warning); values within `bounds`; `run_id` dense and unique; `(param_set_id, replicate_seed)` unique. |
-| Errors | `ManifestError::{MissingParam(key), OutOfBounds{run_id,key,value}, NonDenseRunIds, DuplicateRun}` → abort. |
+| Errors | `ManifestError::{MissingParam(key), OutOfBounds{run_id,key,value}, NonDenseRunIds, DuplicateRun, SceneMismatch}` → abort. |
 | Transfer | **Decided:** Rank 0 reads the manifest once and broadcasts its bytes together with the scene; every rank checks the BLAKE3 hash, so no rank reads Lustre for it (G3, seq §5). |
 
 ### IB-03 · Requirement set `*.req.ron` (sim_studio / text editor → sim_verify, saber.verify)
@@ -1207,6 +1229,7 @@ shared_out = "campaigns/drn-hover-a/out"
 | Owner | `sim_hpc` (config struct), mirrored by `saber.campaign`. |
 | Errors | Exit codes: `0` ok (or nothing left to resume), `2` config/validation error (incl. resume mismatch), `3` build_id mismatch, `4` I/O / stage-out failure (some parts not committed), `5` partial (drained before walltime or runs missing; resumable), `6` aborted by crash policy (`CrashStorm` or `SetupErrors`; evidence committed), `70` internal. Python maps exit codes to campaign status. `auto_resume` resubmits after `4`, `5` or a killed job, and stops on `2`, `3` or `6`, or when the last attempt made no progress. |
 | As built (step 3b) | `sim_hpc::CampaignConfig` reads every key above (unknown keys are errors) plus `execution.max_events_per_run` (default 4096) and `execution.threads` (default: available parallelism); paths are relative to the file, and `scratch_dir`/`shared_out` expand `${VAR}` (`${TMPDIR}` falls back to the system temp directory). `flight_recorder_ticks` overrides the scenario's `recorder_frames` (not hashed). `snapshot_policy.adaptive` is accepted with a warning and sampling stays at `base_every`. CLI: `--local` and `--validate-only` (`--json` for both, `--threads N`); without `--local` the binary exits `64` until MPI lands (4a), and `--resume` / `--override-crash-policy` exit `64` until 4b. Exit `64` is a usage error. |
+| As built (step 3c) | `saber.campaign` maps exit codes to statuses: `0` completed, `2` invalid, `3` build mismatch, `4` I/O error, `5` partial, `6` aborted, `64` usage, `70` (or any other code) internal, and a signal (a negative code from Python, or 129–159 from a shell) killed; `4`, `5` and killed are resumable. With `--json`, `sim_hpc` prints one object: on a refusal `{ok: false, exit, kind, error}` with `kind` one of `Config`, `Scene`, `Requirements`, `Manifest`, `SceneMismatch`, `BuildMismatch`; `--validate-only` adds `req_set_hash` and `param_keys` to step 3b's fields; `--local` adds `campaign_id` and `threads`. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
 

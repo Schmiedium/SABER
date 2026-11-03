@@ -427,6 +427,8 @@ sequenceDiagram
 
 The preflight `Allreduce` keeps one rank with a full `$TMPDIR` from silently stalling the whole job later.
 
+As built (step 3c): the scene-hash check runs in `sim_hpc`'s preflight (`ManifestError::SceneMismatch`, exit 2), which `saber.campaign.preflight` calls through `--validate-only` on the login node, so the same check also guards a job submitted by hand. Rendering the PBS script and `qsub` arrive with step 4b.
+
 ---
 
 ## 5. MPI broadcast and dynamic chunking

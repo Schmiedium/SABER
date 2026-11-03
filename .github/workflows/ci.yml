@@ -45,6 +45,26 @@ jobs:
       - run: pip install -e './python[test]'
       - run: pytest python
 
+  end-to-end:
+    name: End to end (Python drives sim_hpc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p sim_hpc -p saber_cli --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e './python[test]'
+      - name: Tiny campaign from Python (build step 3c)
+        env:
+          SABER_SIM_HPC: ${{ github.workspace }}/target/debug/sim_hpc
+          SABER_CLI: ${{ github.workspace }}/target/debug/saber-cli
+          SABER_REQUIRE_BINARIES: "1"
+        run: pytest python/tests/test_campaign_local.py
+
   reference-data:
     name: Reference data provenance (TD1)
     runs-on: ubuntu-latest

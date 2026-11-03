@@ -50,6 +50,14 @@ pub enum ManifestError {
         /// The seed.
         replicate_seed: u64,
     },
+    /// The manifest was generated against another scene (its header's `scene_hash`), so its
+    /// samples may follow other bindings or bounds: regenerate the sweep (seq §4).
+    SceneMismatch {
+        /// `scene_hash` in the manifest's header.
+        manifest: u64,
+        /// The scenario's `scene_hash`.
+        scenario: u64,
+    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -78,6 +86,11 @@ impl std::fmt::Display for ManifestError {
             } => write!(
                 f,
                 "manifest has (param_set_id {param_set_id}, replicate_seed {replicate_seed}) twice"
+            ),
+            ManifestError::SceneMismatch { manifest, scenario } => write!(
+                f,
+                "manifest was generated against scene_hash {manifest:016x}, the scenario's is \
+                 {scenario:016x}; regenerate the sweep"
             ),
         }
     }
@@ -141,9 +154,18 @@ impl Manifest {
         Ok(())
     }
 
-    /// Check the manifest against the scenario's bindings: every bound key has a column and every
-    /// value is within its bounds. Returns the columns no binding uses (a warning, IB-02).
+    /// Check the manifest against the scenario: the scene it was generated against (when its
+    /// header names one), every bound key has a column and every value is within its bounds.
+    /// Returns the columns no binding uses (a warning, IB-02).
     pub fn check_against(&self, scenario: &Scenario) -> Result<Vec<String>, ManifestError> {
+        if let Some(manifest) = self.header.scene_hash
+            && manifest != scenario.scene_hash()
+        {
+            return Err(ManifestError::SceneMismatch {
+                manifest,
+                scenario: scenario.scene_hash(),
+            });
+        }
         let bindings = scenario.param_bindings();
         let mut used = vec![false; self.param_keys.len()];
         for (_, b) in &bindings {
