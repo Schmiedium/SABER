@@ -31,7 +31,7 @@
       "type": "uint32"
     },
     {
-      "doc": "body it hit; null for the ground",
+      "doc": "body or static collider it hit (the ground's own SimId too)",
       "name": "target_sim_id",
       "nullable": true,
       "type": "uint32"
@@ -55,19 +55,19 @@
       "type": "float64"
     },
     {
-      "doc": "impact point, target body frame, m",
+      "doc": "impact point, target body frame, m (null for a static collider)",
       "name": "point_target_body_x",
       "nullable": true,
       "type": "float64"
     },
     {
-      "doc": "impact point, target body frame, m",
+      "doc": "impact point, target body frame, m (null for a static collider)",
       "name": "point_target_body_y",
       "nullable": true,
       "type": "float64"
     },
     {
-      "doc": "impact point, target body frame, m",
+      "doc": "impact point, target body frame, m (null for a static collider)",
       "name": "point_target_body_z",
       "nullable": true,
       "type": "float64"

@@ -34,8 +34,9 @@ use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldF
 use crate::events::{SimEvents, clear_events};
 use crate::force::ForceModel;
 use crate::fragments::{
-    FRAGMENTATION, FRAGMENTS_DROPPED, FragmentConfig, FragmentDrag, FragmentPool, Fragmentable,
-    FragmentationModel, fragment_integrate_system, fragment_system,
+    Covariance, FRAGMENTATION, FRAGMENTS_DROPPED, FragmentCloud, FragmentConfig, FragmentDrag,
+    FragmentPool, Fragmentable, FragmentationModel, ImpactTally, attach_outputs,
+    fragment_integrate_system, fragment_system,
 };
 use crate::geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
 use crate::hash::{
@@ -440,7 +441,10 @@ impl SimAppBuilder {
             .register_type::<ContactOverride>()
             .register_type::<ContactOverrides>()
             .register_type::<Fragmentable>()
-            .register_type::<FragmentDrag>();
+            .register_type::<FragmentDrag>()
+            .register_type::<FragmentCloud>()
+            .register_type::<Covariance>()
+            .register_type::<ImpactTally>();
         b.world.insert_resource(SimEvents::default());
         b.world.insert_resource(FragmentPool::default());
         b.world.insert_resource(CheckCatalog::default());
@@ -778,6 +782,7 @@ impl SimWorld {
             scenario.spawn(world, &registry.read());
         }
         crate::parametric::resolve(world, params)?;
+        attach_outputs(world);
         for plugin in &self.plugins {
             plugin.start(world)?;
         }
@@ -803,9 +808,10 @@ impl SimWorld {
             stats.energy_initial = e0;
             stats.energy.push(e0);
         }
+        let parents = world.resource::<FragmentPool>().parent_count();
         world
             .resource_mut::<FlightRecorder>()
-            .ensure(config.recorder_frames as usize, n);
+            .ensure(config.recorder_frames as usize, n, parents);
         record_frame(world);
         let telemetry = *world.resource::<TelemetryConfig>();
         world.resource_mut::<TelemetryLog>().start(&telemetry, n);
@@ -944,6 +950,8 @@ impl SimWorld {
             } else {
                 Vec::new()
             },
+            fragments: self.world.resource::<FragmentPool>().totals(),
+            impacts: self.world.resource::<FragmentPool>().impacts().to_vec(),
         }
     }
 

@@ -443,11 +443,29 @@ impl std::fmt::Display for ReqError {
 
 impl std::error::Error for ReqError {}
 
+/// The fields of the per-target fragment impact signals `impacts(SimId).<field>` (IB-16).
+pub const IMPACT_SIGNAL_FIELDS: [&str; 3] = ["count", "mass", "max_ke"];
+
 /// Split `entity(SimId).Component.field.path` into the `SimId` and `Component.field.path`.
-pub fn parse_signal(signal: &str) -> Result<(u32, &str), String> {
+/// `impacts(SimId).count`, `.mass` and `.max_ke` (IB-16) are short for
+/// `entity(SimId).ImpactTally.count` and so on.
+pub fn parse_signal(signal: &str) -> Result<(u32, std::borrow::Cow<'_, str>), String> {
+    if let Some(rest) = signal.strip_prefix("impacts(") {
+        let shape = "a fragment impact signal is impacts(SimId).count, .mass or .max_ke";
+        let (id, field) = rest.split_once(')').ok_or(shape)?;
+        let id: u32 = id
+            .trim()
+            .parse()
+            .map_err(|_| format!("{id:?} is not a SimId"))?;
+        let field = field
+            .strip_prefix('.')
+            .filter(|f| IMPACT_SIGNAL_FIELDS.contains(f))
+            .ok_or(shape)?;
+        return Ok((id, format!("ImpactTally.{field}").into()));
+    }
     let rest = signal
         .strip_prefix("entity(")
-        .ok_or("a signal is entity(SimId).Component.field")?;
+        .ok_or("a signal is entity(SimId).Component.field or impacts(SimId).field")?;
     let (id, rest) = rest
         .split_once(')')
         .ok_or("a signal is entity(SimId).Component.field")?;
@@ -459,7 +477,15 @@ pub fn parse_signal(signal: &str) -> Result<(u32, &str), String> {
         .strip_prefix('.')
         .filter(|p| p.contains('.'))
         .ok_or("a signal is entity(SimId).Component.field")?;
-    Ok((id, path))
+    Ok((id, path.into()))
+}
+
+/// Whether a signal reads fragments (`FragmentCloud`, `ImpactTally`, `impacts(..)`): a run that
+/// dropped fragments makes what reads it `Inconclusive` (IB-16).
+pub fn reads_fragments(signal: &str) -> bool {
+    parse_signal(signal).is_ok_and(|(_, path)| {
+        path.starts_with("FragmentCloud.") || path.starts_with("ImpactTally.")
+    })
 }
 
 impl RequirementSet {

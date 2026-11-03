@@ -11,14 +11,14 @@
   },
   "magic": "SABER",
   "schema_versions": {
-    "crashes": "1.0.0",
+    "crashes": "2.0.0",
     "events": "1.0.0",
     "impacts": "1.0.0",
     "manifest": "1.0.0",
     "requirements": "1.0.0",
     "scenario": "1.0.0",
     "snapshots": "1.0.0",
-    "summaries": "1.0.0",
+    "summaries": "1.1.0",
     "verdicts": "1.0.0"
   }
 }

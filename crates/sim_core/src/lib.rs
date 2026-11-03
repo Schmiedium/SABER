@@ -74,9 +74,9 @@ pub use events::{SimEvent, SimEvents};
 pub use field::{FieldPath, FieldReadError};
 pub use force::{ForceModel, Stage, Wrench};
 pub use fragments::{
-    FRAGMENTATION, FRAGMENTS_DROPPED, Fragment, FragmentConfig, FragmentDrag, FragmentImpact,
-    FragmentParent, FragmentPool, FragmentState, FragmentWriter, Fragmentable, FragmentationModel,
-    ParentSummary,
+    Covariance, FRAGMENTATION, FRAGMENTS_DROPPED, Fragment, FragmentCloud, FragmentConfig,
+    FragmentDrag, FragmentImpact, FragmentParent, FragmentPool, FragmentState, FragmentTotals,
+    FragmentWriter, Fragmentable, FragmentationModel, ImpactTally, ParentSummary,
 };
 pub use geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
 pub use hash::{RollingHash, RunIdentity, state_hash};

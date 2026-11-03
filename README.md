@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 5d. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step 5e. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -36,8 +36,11 @@ aircraft.
 > with Clopper–Pearson bounds in `verdicts.parquet`, and `saber.report` writes a self-contained `report.html` with
 > the traceability matrix (`python -m saber.verify campaign.toml` does all three). A fragmentation hook lets a model break a body into up
 > to 30 000 point-mass fragments (gravity, drag from a ballistic coefficient) whose impacts on bodies and the
-> ground are found along each tick's path; writing those impacts and per-parent statistics to the output
-> tables comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> ground are found along each tick's path. Campaigns write those impacts to `*_impacts.parquet`, each run's
+> fragment counts to its summary row and each parent's fragment cloud (count, mass, centroid, spread, range, energy)
+> to its snapshots; requirements can read the cloud and per-target `impacts(N)` tallies, and turn Inconclusive when
+> the pool overflowed. `sim_models::import::fragment_drag` reads a fragment drag table in SI or imperial units.
+> The studio comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout
