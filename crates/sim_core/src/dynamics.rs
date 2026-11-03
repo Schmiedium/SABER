@@ -198,6 +198,18 @@ impl Dynamics {
         Ok(())
     }
 
+    /// Retire the body in slot `i` (it fragmented, IB-16): its state is frozen from the next tick,
+    /// and its colliders and gear points leave contact and ray queries.
+    pub(crate) fn retire(&mut self, i: usize) {
+        self.bodies.retire(i);
+        self.contact.retire_body(i);
+    }
+
+    /// The contact solver.
+    pub(crate) fn contact(&self) -> &ContactSolver {
+        &self.contact
+    }
+
     /// The contacts at the World's current state into `Contacts`, with their events (the end of
     /// every tick, and Tick 0).
     pub(crate) fn contact_end_of_tick(&mut self, world: &mut World) {
@@ -548,6 +560,11 @@ impl OdeSystem for BodyOde<'_> {
         for (i, e) in self.bodies.entries().iter().enumerate() {
             let range = e.offset..e.offset + e.dof.state_len();
             let (y, d) = (&y[range.clone()], &mut dydt[range]);
+            if self.bodies.is_retired(i) {
+                // A body that fragmented stays where it broke up (IB-16).
+                d.fill(0.0);
+                continue;
+            }
             let w = self.wrenches[i];
             let rotating = self.frame_rotation != DVec3::ZERO;
             let mut accel = w.force * (1.0 / e.mass) + self.env[i].gravity;

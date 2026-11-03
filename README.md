@@ -34,7 +34,10 @@ aircraft.
 > `saber.campaign.submit` queues it on PBS or Slurm with automatic resubmissions. `saber.analyze` reads a campaign's
 > committed parts with its coverage and uncertainty, `saber.verify` turns per-run verdicts into campaign verdicts
 > with Clopper–Pearson bounds in `verdicts.parquet`, and `saber.report` writes a self-contained `report.html` with
-> the traceability matrix (`python -m saber.verify campaign.toml` does all three). The fragment pool comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> the traceability matrix (`python -m saber.verify campaign.toml` does all three). A fragmentation hook lets a model break a body into up
+> to 30 000 point-mass fragments (gravity, drag from a ballistic coefficient) whose impacts on bodies and the
+> ground are found along each tick's path; writing those impacts and per-parent statistics to the output
+> tables comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

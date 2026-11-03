@@ -33,6 +33,10 @@ use crate::dynamics::{Dynamics, contact_system, integrate_system};
 use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldFrame};
 use crate::events::{SimEvents, clear_events};
 use crate::force::ForceModel;
+use crate::fragments::{
+    FRAGMENTATION, FRAGMENTS_DROPPED, FragmentConfig, FragmentDrag, FragmentPool, Fragmentable,
+    FragmentationModel, fragment_integrate_system, fragment_system,
+};
 use crate::geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
 use crate::hash::{
     CONFIG_CONTEXT, RollingHash, RunIdentity, finish, rolling_hash_system, state_hash,
@@ -97,6 +101,9 @@ pub struct SimConfig {
     /// Contact settings (step 5d).
     #[serde(default)]
     pub contact: ContactConfig,
+    /// Fragment pool settings (step 5e, IB-16).
+    #[serde(default)]
+    pub fragments: FragmentConfig,
     /// Flight-recorder frames `K`.
     #[serde(default = "default_recorder_frames")]
     pub recorder_frames: u32,
@@ -118,6 +125,7 @@ impl SimConfig {
             integrator: IntegratorConfig::default(),
             watchdog: WatchdogConfig::default(),
             contact: ContactConfig::default(),
+            fragments: FragmentConfig::default(),
             recorder_frames: default_recorder_frames(),
         }
     }
@@ -152,6 +160,15 @@ impl SimConfig {
         if self.contact.penetration_ticks == 0 {
             return Err(SetupError::BadConfig(
                 "contact.penetration_ticks must be at least 1",
+            ));
+        }
+        if self
+            .fragments
+            .lifetime
+            .is_some_and(|l| !(l.is_finite() && l > 0.0))
+        {
+            return Err(SetupError::BadConfig(
+                "fragments.lifetime must be finite and above 0",
             ));
         }
         if self.watchdog.energy_max_j.is_some_and(f64::is_nan) {
@@ -224,6 +241,11 @@ impl SimConfig {
             Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
         };
         h.update(&self.contact.penetration_ticks.to_le_bytes());
+        h.update(&self.fragments.capacity.to_le_bytes());
+        match self.fragments.lifetime {
+            None => h.update(&[0]),
+            Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
+        };
         finish(&h)
     }
 }
@@ -416,17 +438,25 @@ impl SimAppBuilder {
             .register_type::<GearPoint>()
             .register_type::<ContactPoints>()
             .register_type::<ContactOverride>()
-            .register_type::<ContactOverrides>();
+            .register_type::<ContactOverrides>()
+            .register_type::<Fragmentable>()
+            .register_type::<FragmentDrag>();
         b.world.insert_resource(SimEvents::default());
+        b.world.insert_resource(FragmentPool::default());
         b.world.insert_resource(CheckCatalog::default());
         b.declare_event(CONTACT)
             .declare_event(CONTACT_END)
             .declare_event(IMPACT)
             .declare_event(CONTACT_DEFERRED)
-            .declare_event(CONTACT_PROJECTED);
+            .declare_event(CONTACT_PROJECTED)
+            .declare_event(FRAGMENTATION)
+            .declare_event(FRAGMENTS_DROPPED);
         b.add_systems(SimSet::Environment, clear_events)
-            .add_systems(SimSet::Integrate, integrate_system)
-            .add_systems(SimSet::Constraints, contact_system)
+            .add_systems(
+                SimSet::Integrate,
+                (integrate_system, fragment_integrate_system),
+            )
+            .add_systems(SimSet::Constraints, (contact_system, fragment_system))
             .add_systems(SimSet::Telemetry, telemetry_system)
             .add_systems(SimSet::Record, (record_frame, log_tick))
             .add_systems(
@@ -474,6 +504,17 @@ impl SimAppBuilder {
     /// Add a force model. Models are evaluated in the order added.
     pub fn add_force_model(&mut self, model: impl ForceModel) -> &mut Self {
         self.models.push(Box::new(model));
+        self
+    }
+
+    /// Register a fragmentation model (IB-16) under its id, for `Fragmentable` bodies to name.
+    ///
+    /// # Panics
+    /// If a model with the same id is already registered.
+    pub fn add_fragmentation_model(&mut self, model: impl FragmentationModel) -> &mut Self {
+        self.world
+            .resource_mut::<FragmentPool>()
+            .add_model(Box::new(model));
         self
     }
 
@@ -749,6 +790,9 @@ impl SimWorld {
         crate::with_resource(world, |world, d: &mut Dynamics| {
             d.contact_end_of_tick(world)
         });
+        crate::with_resource(world, |world, pool: &mut FragmentPool| {
+            pool.start(world, config)
+        })?;
 
         let n = world.resource::<Dynamics>().bodies().len();
         world.resource_mut::<TickEnergy>().per_body.resize(n, 0.0);

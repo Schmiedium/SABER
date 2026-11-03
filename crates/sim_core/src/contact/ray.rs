@@ -1,5 +1,7 @@
 //! Ray queries against every collider of the run (build step 5d-3): what range sensors measure
 //! (physics §9.7, IB-19). The same shapes the contact solver uses, at the bodies' current poses.
+//! Segment queries (build step 5e): where a fragment's path over one tick first meets a collider,
+//! with each body's motion over the tick taken into account (IB-16).
 
 use bevy_ecs::prelude::*;
 use glam::{DQuat, DVec3};
@@ -74,7 +76,7 @@ impl ContactSolver {
     ) -> Option<RayHit> {
         let mut best: Option<RayHit> = None;
         for c in &self.colliders {
-            if Some(c.sim_id) == exclude {
+            if c.retired || Some(c.sim_id) == exclude {
                 continue;
             }
             let reach = best.map_or(max, |b| b.distance);
@@ -123,4 +125,86 @@ impl ContactSolver {
         }
         best
     }
+
+    /// Where the straight path of a point from `p0` (tick start) to `p1` (tick end) first meets a
+    /// collider, with every body moving from its pose in `start` to its pose in `end` (indexed by
+    /// body slot). The path is taken relative to each body: the start point is carried with the
+    /// body from its start pose to its end pose, and the segment from there to `p1` is cast
+    /// against the body at its end pose, so a fast point never tunnels through a thin target and a
+    /// moving target is not missed. Retired colliders are skipped; ties go to the collider first
+    /// in `SimId` order.
+    pub(crate) fn segment_cast(
+        &self,
+        start: &[Placement],
+        end: &[Placement],
+        p0: DVec3,
+        p1: DVec3,
+    ) -> Option<SegmentHit> {
+        let mut best: Option<SegmentHit> = None;
+        for (k, c) in self.colliders.iter().enumerate() {
+            if c.retired {
+                continue;
+            }
+            let reach = best.map_or(1.0, |b| b.fraction);
+            let (from, place) = match c.body {
+                Some(slot) => {
+                    let (s, e) = (start[slot], end[slot]);
+                    let carried =
+                        e.position + e.rotation * (s.rotation.conjugate() * (p0 - s.position));
+                    (carried, e)
+                }
+                None => (p0, Placement::WORLD),
+            };
+            let seg = p1 - from;
+            let len = seg.length();
+            let (dir, len) = if len > 0.0 {
+                (seg / len, len)
+            } else {
+                // Not moving relative to the target: inside or not.
+                (DVec3::X, 0.0)
+            };
+            let max = reach * len;
+            let near = match c.body {
+                Some(_) => enters_sphere(from, dir, place.position, c.reach, max),
+                None => c.unbounded || c.fixed_box.is_none_or(|b| enters_box(from, dir, b, max)),
+            };
+            if !near {
+                continue;
+            }
+            for part in &c.parts {
+                let limit = best.map_or(1.0, |b| b.fraction) * len;
+                if let Some((d, n)) = self.narrow.ray(part, &place, from, dir, limit) {
+                    let fraction = if len > 0.0 { (d / len).min(1.0) } else { 0.0 };
+                    if best.is_none_or(|b| fraction < b.fraction) {
+                        best = Some(SegmentHit {
+                            fraction,
+                            collider: k,
+                            sim_id: c.sim_id,
+                            body: c.body,
+                            point: from + dir * d,
+                            normal: n,
+                        });
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// The first collider on a swept segment ([`ContactSolver::segment_cast`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SegmentHit {
+    /// Fraction of the tick (and of the segment) at the hit, in `[0, 1]`.
+    pub(crate) fraction: f64,
+    /// The collider's index.
+    pub(crate) collider: usize,
+    /// The collider's entity.
+    pub(crate) sim_id: SimId,
+    /// Its body slot, `None` for a static collider.
+    pub(crate) body: Option<usize>,
+    /// The hit point on the target at its end-of-tick pose, world frame, m.
+    pub(crate) point: DVec3,
+    /// The surface normal there, facing against the path.
+    pub(crate) normal: DVec3,
 }

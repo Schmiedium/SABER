@@ -14,6 +14,7 @@ v1.3 (2026-11-03, build step 5d): §9.7a and §9.7b record geometry, compliant a
 built; §10.4 records that impact location re-integrates the bodies instead of using dense output.
 v1.4 (2026-11-03, build step 5d-3): §9.7c records the kernel ray query, range sensors and the
 persistent-penetration watchdog as built.
+v1.5 (2026-11-03, build step 5e-1): §10.3 records how fragments are integrated and their impacts found.
 Companion to `subsystems-and-interfaces.md` (§5.1 `sim_core`, §5.2 `sim_models`, §6 tick pipeline,
 IB-16 fragmentation, G8) and `flight-dynamics-sources.md`.
 
@@ -837,6 +838,12 @@ flowchart LR
 - **Fragments are excluded.** `PointMass3` fragments (up to 30k) always use their own fixed integrator
   (`SemiImplicitEuler` or `Rk4`, set in the fragment config) at the tick dt. They do not couple back, and
   letting 30k fragments drive the step size of the main bodies would waste most of the CPU.
+  As built (step 5e-1): fragments are not `PointMass3` entities but slots of `sim_core::fragments`, one
+  step per tick of `config.integrator.fragments` (default `SemiImplicitEuler`) after the bodies, with
+  gravity, ballistic-coefficient drag against the air-relative velocity and the rotating frame's terms.
+  Their impacts are segment casts over the tick through the same Parry shapes as contact and range
+  sensors (§9.7c), with each target's motion over the tick taken out, so the time of impact is
+  interpolated along a chord: exact for straight paths, within `g h²/(8 v)` for a falling one.
 
 ### 10.4 Interaction with contact
 

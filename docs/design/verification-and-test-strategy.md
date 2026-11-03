@@ -1,7 +1,7 @@
 # SABER: Verification and Test Strategy
 
 Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2; v0.9 (2026-11-02, build step 1c) names the USSA 1976 and WGS 84 oracles actually used and the scenario-file tests, §7.1; v1.0 (2026-11-02, build step 2) lists the per-run verification tests as built, §7.8; v1.1 (2026-11-02, build step 3a) adds the golden output files read by both Rust and Python, §8.3; v1.2 (2026-11-02, build step 3b) lists the local runner's tests, R3 and R4 as built, §8.3; v1.3 (2026-11-02, build step 3c) adds the Python-driven local campaign and the shared `campaign.toml` defaults, §8.3, §8.4; v1.4 (2026-11-03, build step 4a) records R5 on 1, 2 and 4 ranks, as threads and under `mpiexec`, and the crash-storm and init-refusal tests, §8.3, §8.4; v1.5 (2026-11-03, build step 4b) records R6 and the drain, SIGTERM and resume-refusal tests, §8.4; v1.6 (2026-11-03, build step 4c) completes the tiny-campaign test with `verdicts.parquet` against hand-computed verdicts and adds the campaign-statistics tests, §8.4; v1.7 (2026-11-03, build step 5a) records the rotating-frame and aero-ballistics tests, writes out the linear yaw equation of the plugin's own force laws for M2 and narrows T2, §6.2, §7.1, §7.3, §13; v1.8 (2026-11-03, build step 5b) records the fixed-wing tests: the Stevens–Lewis F-16 check case, the book's trims, an envelope sweep against an independent port of the book's subroutines, and adds T5, §7.4, §13; v1.9 (2026-11-03, build step 5c, part 1) records the Dryden spectrum and autocorrelation tests and the actuator and sensor tests, §7.1, §7.6; v1.10 (2026-11-03, build step 5c, part 2) records the rotorcraft and control tests and leaves the RotorPy cross-check open, §7.6;
-v1.11 (2026-11-03, build step 5d, part 1) records the compliant-contact, geometry and gear tests, §7.5; v1.12 (2026-11-03, build step 5d, part 2) records the impulsive-contact tests, §7.5; v1.13 (2026-11-03, build step 5d, part 3) records the penetration-watchdog and range-finder tests, §7.5, §7.6). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+v1.11 (2026-11-03, build step 5d, part 1) records the compliant-contact, geometry and gear tests, §7.5; v1.12 (2026-11-03, build step 5d, part 2) records the impulsive-contact tests, §7.5; v1.13 (2026-11-03, build step 5d, part 3) records the penetration-watchdog and range-finder tests, §7.5, §7.6; v1.14 (2026-11-03, build step 5e, part 1) adds claimed fragments to the state hash and records the fragment-pool tests, §4.1, §7.7). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -201,6 +201,9 @@ Notes:
   results (`dt`, start time, `max_ticks`, `at_max_ticks`, integrator kind, mode and tolerances, the energy
   bound), fed field by field rather than through a text format; the recorder size is left out.
   `SimWorld::enable_rolling_hash(keep_history)` switches the rolling hash on; it costs one state hash per tick.
+- From step 5e-1, once a breakup has claimed pool slots, every claimed slot follows the bodies in slot order:
+  its `SimId` (u32), a state byte (1 alive, 2 impacted, 3 expired) and the `to_bits()` of its position and
+  velocity. A run without a breakup hashes exactly as before.
 
 ### 4.2 The reproducibility matrix
 
@@ -808,6 +811,27 @@ stable across reruns (exact), mass accounting, no allocation after Tick 0 with a
 counted in `n_dropped`, segment-vs-shape impact test finds hits that end-point tests miss (a fast fragment
 through a thin plate), impact time interpolated within the tick (Close, `Tol::event(0.5)` against the
 analytic crossing time), and BC drag matches the closed forms in §7.2.
+
+**As built (step 5e, part 1).** The kernel hook (`crates/sim_core/tests/fragments.rs`,
+`fragments_alloc.rs`) with scripted breakups (a test model that writes listed fragments, or a burst of equal
+fragments in random directions) and synthetic values (TD1). A breakup happens at a tick's end, so a
+fragment's motion starts one tick after `t = 0` at the earliest; the closed forms below count from there.
+
+| Check | Oracle | Tolerance |
+|---|---|---|
+| Four parents spawned out of order, three breaking up in one tick and one later: slots by (tick, parent `SimId`, index), ids `FRAGMENT_BASE + slot`, each parent's fragment masses summing to its mass, the `fragmentation` events and parent summaries; the same seed gives bit-identical fragments and state hash, another seed different ones | exact | bit-exact; 1e-12 relative on the masses |
+| A pool of 10 and two breakups of 8: 8 and 2 written, 6 dropped, one `fragments_dropped` event, the run completes | exact | exact |
+| The parent of a breakup resting on compliant ground: frozen at its breakup state under gravity, `contact_end` the next tick, no contacts after, a ray down finds the ground, its fragments (born inside its collider) never hit it | exact | bit-exact |
+| Vacuum parabola: RK4 exact; semi-implicit Euler `p₀ + v₀ τ + ½ g τ² + ½ g h τ`, `v₀ + g τ` (its exact solution) | closed form | 1e-9 m; 1e-10 m/s |
+| Constant-BC drag without gravity, still air and a 3D wind: `x = w t + ln(1 + k u₀ t)/k`, `v = w + u₀/(1 + k u₀ t)`, `k = ρ/(2 BC)`, over 2000 ticks; a Mach table interpolates and holds at its ends | closed form | 1e-9 relative; 1e-12 |
+| In a rotating world frame a fragment carrying its parent's whole state tracks an authored 3DOF body from the same start (both RK4) | independent form | 1e-9 m; 1e-11 m/s |
+| A 1000 m/s fragment against a 2 mm static plate: no tick end is inside the plate, yet the hit is found at the crossing time, on the plate's face, with the full relative speed; a fragment flying away stays alive | closed form | 1e-12 s; 1e-9 m, m/s |
+| A fragment and a rotated ball closing at 1000 m/s: hit at the closed-form time, at the ball's leading point in its body frame | closed form | 1e-12 s; 1e-9 m |
+| Fragments thrown level and upward from 100 m land on the ground at the parabola's times (the path inside a tick is a chord) | closed form | 1e-5 s (`Tol::event` asks 0.5 tick) |
+| `fragments.lifetime`: alive through the tick before, expired in the tick it runs out | exact | exact |
+| A model writing a NaN fragment: `CrashedNaN` naming the parent at that tick; no `Fragmentable` body, no pool | exact | exact |
+| Setup errors (unknown model, not a body, `FragmentDrag` without `Fragmentable`, bad drag tables), a bad `fragments.lifetime`, `fragments` in `sim_config_hash`, RON parsing, the warning when parents expect more fragments than the pool holds | error kinds | exact |
+| A 30 000-fragment breakup in air with a Mach drag table and wind, fragments hitting the ground, a static box and moving boxes and expiring, for 150 ticks under semi-implicit Euler and RK4, across a World reset: every fragment accounted for (impacts + expired + alive) | counting allocator | 0 allocations |
 
 ### 7.8 `sim_verify` and `saber.verify`
 
