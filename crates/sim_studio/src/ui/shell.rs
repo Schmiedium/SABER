@@ -254,7 +254,10 @@ pub fn fill_regions(
                 && let Some(doc) = &docs.0
             {
                 match kind {
-                    DockRegion::Left => super::builder::outliner(&mut commands, body, doc),
+                    DockRegion::Left => {
+                        super::builder::outliner(&mut commands, body, doc);
+                        super::builder::parameters(&mut commands, body, doc);
+                    }
                     DockRegion::Right => super::builder::inspector(&mut commands, body, doc),
                     DockRegion::Center => super::builder::summary(&mut commands, body, doc),
                     DockRegion::Bottom => {

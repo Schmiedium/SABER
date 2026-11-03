@@ -12,17 +12,30 @@ use sim_studio_ui::prelude::*;
 
 use super::{action, child};
 use crate::actions::{BuilderDoc, DocChanged, StudioCommand};
-use crate::builder::{LintLevel, ScenarioDoc};
+use crate::builder::{FieldRef, LintLevel, ParamKind, ScenarioDoc};
 use crate::state::AppState;
 
 /// A dock region's content node, refilled when the document changes.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct RegionBody(pub DockRegion);
 
-/// The entity slot the Inspector shows (it is rebuilt only when the selection moves; values are
-/// updated in place, so a click into the next field is not lost).
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InspectorOf(pub Option<usize>);
+/// The layout the Inspector shows ([`ScenarioDoc::inspector_key`]): it is rebuilt only when that
+/// changes (selection, bind menu, components, bindings); values are updated in place, so a click
+/// into the next field is not lost.
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub struct InspectorOf(pub String);
+
+/// Field ids of the bind menu.
+pub mod bind_field {
+    /// The parameter name.
+    pub const KEY: &str = "bind.key";
+    /// The lower bound.
+    pub const LO: &str = "bind.lo";
+    /// The upper bound.
+    pub const HI: &str = "bind.hi";
+    /// The distribution's numbers.
+    pub const PARAMS: &str = "bind.params";
+}
 
 /// An Inspector value field: which field of which entity it edits.
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
@@ -110,9 +123,75 @@ pub fn outliner(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
     }
 }
 
+/// The Parameters list (§7.3) under the Outliner: everything that varies between runs.
+pub fn parameters(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
+    let rows = doc.parameters();
+    let sweeps = rows.iter().filter(|r| r.kind == ParamKind::Sweep).count();
+    child(
+        commands,
+        body,
+        heading(format!(
+            "Parameters   ⚙ {sweeps}   ● {}",
+            rows.len() - sweeps
+        )),
+    );
+    if rows.is_empty() {
+        child(
+            commands,
+            body,
+            muted(
+                "Nothing varies yet. Open ⚙ on a number in the Inspector to sweep it or draw it per replicate.",
+            ),
+        );
+        return;
+    }
+    let keys = doc.sweep_keys();
+    if !keys.is_empty() {
+        child(
+            commands,
+            body,
+            muted(format!("manifest columns: {}", keys.join(", "))),
+        );
+    }
+    for r in rows {
+        let id = r.sim_id.map_or_else(|| "—".to_owned(), |i| format!("#{i}"));
+        let (mark, detail) = match r.kind {
+            ParamKind::Sweep => ("⚙", format!("{} = {} in {}", r.name, r.nominal, r.range)),
+            ParamKind::Rng => (
+                "●",
+                format!(
+                    "{}{}",
+                    r.range,
+                    if r.apply == Some(sim_core::Apply::Add) {
+                        ", added"
+                    } else {
+                        ""
+                    }
+                ),
+            ),
+        };
+        let line = format!("{mark} {id} {}  {detail}", r.target);
+        match doc.locate(r.slot, &r.target) {
+            Some(field) => {
+                action(
+                    commands,
+                    body,
+                    plain_row(line.clone(), bsn_list! { @label(line) }),
+                    StudioCommand::Focus(Some(field)),
+                );
+            }
+            None => {
+                child(commands, body, label(line));
+            }
+        }
+    }
+}
+
 /// The Inspector: every component of the selected entity, a field per row.
 pub fn inspector(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
-    commands.entity(body).insert(InspectorOf(doc.selected));
+    commands
+        .entity(body)
+        .insert(InspectorOf(doc.inspector_key()));
     child(commands, body, heading("Inspector"));
     let Some(slot) = doc.selected else {
         child(commands, body, muted("Select an entity in the Outliner."));
@@ -134,13 +213,37 @@ pub fn inspector(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
     child(
         commands,
         body,
-        muted("Enter or leaving a field applies it; Ctrl+Z undoes. Numbers are SI."),
+        muted(
+            "Enter or leaving a field applies it; Ctrl+Z undoes. Numbers are SI. ⚙ opens the bind menu.",
+        ),
     );
+    if let Some(focus) = doc.focus.clone().filter(|f| f.slot == slot) {
+        bind_menu(commands, body, doc, focus);
+    }
     for c in doc.components(slot) {
-        child(commands, body, heading(c.name.clone()));
+        let head = child(commands, body, wide_row());
+        child(commands, head, heading(c.name.clone()));
+        child(commands, head, spacer());
+        if c.name != "SimId" {
+            action(
+                commands,
+                head,
+                plain_button(format!("Remove {}", c.name)),
+                StudioCommand::RemoveComponent(slot, c.type_path.clone()),
+            );
+        }
         for f in c.fields {
             let r = child(commands, body, wide_row());
-            child(commands, r, field_label(f.label.clone()));
+            let mut name = f.label.clone();
+            if f.kind == crate::builder::FieldKind::Float {
+                if doc.binding(slot, &c.type_path, &f.path).is_some() {
+                    name.push_str(" ⚙");
+                }
+                if doc.uncertainty(slot, &c.type_path, &f.path).is_some() {
+                    name.push_str(" ●");
+                }
+            }
+            child(commands, r, field_label(name));
             if !f.editable() {
                 child(commands, r, mono(f.text.clone()));
                 continue;
@@ -185,7 +288,207 @@ pub fn inspector(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
             if !hint.is_empty() {
                 child(commands, r, muted(hint.trim().to_owned()));
             }
+            if f.kind == crate::builder::FieldKind::Float {
+                action(
+                    commands,
+                    r,
+                    plain_button(format!("⚙ {}.{}", c.name, f.label)),
+                    StudioCommand::Focus(Some(FieldRef {
+                        slot,
+                        component: c.type_path.clone(),
+                        path: f.path.clone(),
+                    })),
+                );
+            }
         }
+    }
+    let addable = doc.addable(slot);
+    if !addable.is_empty() {
+        child(commands, body, heading("Add component"));
+        let r = child(commands, body, wrap_row());
+        for (type_path, name) in addable {
+            action(
+                commands,
+                r,
+                plain_button(format!("+ {name}")),
+                StudioCommand::AddComponent(slot, type_path),
+            );
+        }
+    }
+}
+
+fn wrap_row() -> impl bevy::scene::Scene {
+    bsn! {
+        @wide_row()
+        Node {
+            flex_wrap: FlexWrap::Wrap,
+            row_gap: px(4),
+        }
+    }
+}
+
+/// The bind menu (§7.2) on one numeric field: what varies it now, and how to make it a swept
+/// parameter or a per-replicate draw.
+fn bind_menu(commands: &mut Commands, body: Entity, doc: &ScenarioDoc, focus: FieldRef) {
+    let menu = child(commands, body, panel());
+    let target = crate::builder::params::target(&focus.component, &focus.path);
+    let value = doc
+        .components(focus.slot)
+        .into_iter()
+        .find(|c| c.type_path == focus.component)
+        .and_then(|c| c.fields.into_iter().find(|f| f.path == focus.path))
+        .map(|f| f.text)
+        .unwrap_or_default();
+    let head = child(commands, menu, wide_row());
+    child(commands, head, heading(format!("⚙ {target} = {value}")));
+    child(commands, head, spacer());
+    action(
+        commands,
+        head,
+        plain_button("Close bind menu"),
+        StudioCommand::Focus(None),
+    );
+
+    let binding = doc.binding(focus.slot, &focus.component, &focus.path);
+    let jitter = doc.uncertainty(focus.slot, &focus.component, &focus.path);
+    if binding.is_none() && jitter.is_none() {
+        child(commands, menu, muted("Constant: the same in every run."));
+    }
+    if let Some(b) = &binding {
+        let r = child(commands, menu, wide_row());
+        let range = b.bounds.map_or_else(
+            || "unbounded".to_owned(),
+            |(lo, hi)| format!("[{lo:?}, {hi:?}]"),
+        );
+        child(
+            commands,
+            r,
+            label(format!(
+                "⚙ swept as {} (default {:?}, {range})",
+                b.param_key, b.default
+            )),
+        );
+        child(commands, r, spacer());
+        action(
+            commands,
+            r,
+            plain_button(format!("Unbind {target}")),
+            StudioCommand::Unbind(focus.slot, target.clone()),
+        );
+    }
+    if let Some(u) = &jitter {
+        let r = child(commands, menu, wide_row());
+        child(
+            commands,
+            r,
+            label(format!(
+                "● drawn per replicate: {:?}, {} the value, stream {}",
+                u.distribution,
+                if u.apply == sim_core::Apply::Add {
+                    "added to"
+                } else {
+                    "replacing"
+                },
+                u.stream
+            )),
+        );
+        child(commands, r, spacer());
+        action(
+            commands,
+            r,
+            plain_button(format!("Remove draw on {target}")),
+            StudioCommand::Unjitter(focus.slot, target.clone()),
+        );
+    }
+
+    child(
+        commands,
+        menu,
+        label("Sweep parameter: a manifest column sets it in each run"),
+    );
+    let r = child(commands, menu, wide_row());
+    let key = binding.as_ref().map_or_else(
+        || {
+            target
+                .rsplit(['.', ']'])
+                .next()
+                .unwrap_or("p")
+                .trim_start_matches('[')
+                .to_owned()
+        },
+        |b| b.param_key.clone(),
+    );
+    let (lo, hi) = binding
+        .as_ref()
+        .and_then(|b| b.bounds)
+        .map_or((String::new(), String::new()), |(lo, hi)| {
+            (format!("{lo:?}"), format!("{hi:?}"))
+        });
+    child(
+        commands,
+        r,
+        text_field(bind_field::KEY, key, "Parameter name"),
+    );
+    child(commands, r, text_field(bind_field::LO, lo, "Lower bound"));
+    child(commands, r, text_field(bind_field::HI, hi, "Upper bound"));
+    let f = focus.clone();
+    commands
+        .spawn_scene(primary_button(format!("Sweep {target}")))
+        .insert(ChildOf(menu))
+        .observe(
+            move |_: On<KitActivated>, fields: Fields, mut out: MessageWriter<StudioCommand>| {
+                out.write(StudioCommand::Bind {
+                    field: f.clone(),
+                    key: fields.get(bind_field::KEY).unwrap_or_default(),
+                    lo: fields.get(bind_field::LO).unwrap_or_default(),
+                    hi: fields.get(bind_field::HI).unwrap_or_default(),
+                });
+            },
+        );
+
+    child(
+        commands,
+        menu,
+        label(if binding.is_some() {
+            "Per-replicate draw, added to the swept value (both)"
+        } else {
+            "Per-replicate draw: a random value in each replicate"
+        }),
+    );
+    child(
+        commands,
+        menu,
+        muted(
+            "Numbers, comma-separated. Normal: mean, std · Uniform: lo, hi · Triangular: lo, mode, hi · LogNormal: μ, σ of ln",
+        ),
+    );
+    let start = if binding.is_some() {
+        "0, 0".to_owned()
+    } else {
+        format!("{value}, 0")
+    };
+    child(
+        commands,
+        menu,
+        text_field(bind_field::PARAMS, start, "Distribution numbers"),
+    );
+    let r = child(commands, menu, wrap_row());
+    for kind in ["Normal", "Uniform", "Triangular", "LogNormal"] {
+        let f = focus.clone();
+        commands
+            .spawn_scene(button(format!("{kind} on {target}")))
+            .insert(ChildOf(r))
+            .observe(
+                move |_: On<KitActivated>,
+                      fields: Fields,
+                      mut out: MessageWriter<StudioCommand>| {
+                    out.write(StudioCommand::Jitter {
+                        field: f.clone(),
+                        kind: kind.to_owned(),
+                        params: fields.get(bind_field::PARAMS).unwrap_or_default(),
+                    });
+                },
+            );
     }
 }
 
@@ -317,12 +620,15 @@ pub fn refresh(
         return;
     };
     for (body, RegionBody(kind), shown) in &bodies {
-        if *kind == DockRegion::Right && shown.is_some_and(|s| s.0 == doc.selected) {
+        if *kind == DockRegion::Right && shown.is_some_and(|s| s.0 == doc.inspector_key()) {
             continue;
         }
         commands.entity(body).despawn_related::<Children>();
         match kind {
-            DockRegion::Left => outliner(&mut commands, body, doc),
+            DockRegion::Left => {
+                outliner(&mut commands, body, doc);
+                parameters(&mut commands, body, doc);
+            }
             DockRegion::Right => inspector(&mut commands, body, doc),
             DockRegion::Center => summary(&mut commands, body, doc),
             DockRegion::Bottom => {

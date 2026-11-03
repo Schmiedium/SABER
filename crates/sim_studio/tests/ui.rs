@@ -197,12 +197,17 @@ fn the_builder_edits_undoes_and_exports_a_scenario() {
         app.update();
     }
     assert_eq!(state(&app), AppState::ScenarioBuilder);
+    let selected = |app: &App| {
+        app.world()
+            .resource::<BuilderDoc>()
+            .0
+            .as_ref()
+            .unwrap()
+            .selected
+    };
+    assert_eq!(selected(&app), Some(1), "slot 1 is #1");
     let mut q = app.world_mut().query::<&InspectorOf>();
-    assert_eq!(
-        q.iter(app.world()).next(),
-        Some(&InspectorOf(Some(1))),
-        "slot 1 is #1"
-    );
+    assert_eq!(q.iter(app.world()).count(), 1);
 
     let (_, input) = inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
     assert_eq!(input_text(&app, input), "1.2");
@@ -254,7 +259,97 @@ fn the_builder_edits_undoes_and_exports_a_scenario() {
     assert_eq!(input_text(&app, input), "1.5");
 
     press(&mut app, "Select #100 Gravity · Atmosphere · Wind");
-    let mut q = app.world_mut().query::<&InspectorOf>();
-    assert_eq!(q.iter(app.world()).next(), Some(&InspectorOf(Some(0))));
+    assert_eq!(selected(&app), Some(0));
     inspector_field(&mut app, "sim_models::environment::Gravity", ".g");
+}
+
+/// The bind menu: ⚙ on a field opens it, Sweep makes the field a parameter (listed under the
+/// Outliner with its manifest column), a Normal draw on the swept field is added to it, Unbind
+/// removes the sweep, and components are added and removed from the Inspector.
+#[test]
+fn the_bind_menu_sweeps_draws_and_unbinds_a_field() {
+    let dir = scratch("bind");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    let doc = |app: &App| -> String {
+        app.world()
+            .resource::<BuilderDoc>()
+            .0
+            .as_ref()
+            .unwrap()
+            .to_ron()
+            .unwrap()
+    };
+    let original = doc(&app);
+    press(&mut app, "⚙ MassProps.mass");
+    let set = |app: &mut App, pairs: [(&'static str, &'static str); 3]| {
+        app.world_mut()
+            .run_system_once(move |mut f: Fields| {
+                for (id, text) in pairs {
+                    f.set(id, text);
+                }
+            })
+            .unwrap();
+        app.update();
+    };
+    use sim_studio::ui::builder::bind_field;
+    set(
+        &mut app,
+        [
+            (bind_field::KEY, "mass_q"),
+            (bind_field::LO, "1.0"),
+            (bind_field::HI, "1.5"),
+        ],
+    );
+    press(&mut app, "Sweep MassProps.mass");
+    {
+        let d = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        assert_eq!(d.sweep_keys(), ["mass_q"]);
+    }
+    labelled(&mut app, "⚙ #1 MassProps.mass  mass_q = 1.2 in [1.0, 1.5]");
+    labelled(&mut app, "Unbind MassProps.mass");
+
+    set(
+        &mut app,
+        [
+            (bind_field::PARAMS, "0, 0.01"),
+            (bind_field::KEY, "mass_q"),
+            (bind_field::LO, "1.0"),
+        ],
+    );
+    press(&mut app, "Normal on MassProps.mass");
+    {
+        let d = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        let u = d
+            .uncertainty(1, "sim_core::body::MassProps", ".mass")
+            .unwrap();
+        assert_eq!(
+            u.apply,
+            sim_core::Apply::Add,
+            "drawn around the swept value"
+        );
+    }
+    press(&mut app, "Unbind MassProps.mass");
+    press(&mut app, "Remove draw on MassProps.mass");
+    assert_eq!(doc(&app), original);
+
+    press(&mut app, "+ Barometer");
+    assert!(doc(&app).contains("Barometer"));
+    press(&mut app, "Remove Barometer");
+    assert_eq!(doc(&app), original);
+    press(&mut app, "Close bind menu");
+    assert!(
+        app.world()
+            .resource::<BuilderDoc>()
+            .0
+            .as_ref()
+            .unwrap()
+            .focus
+            .is_none()
+    );
 }
