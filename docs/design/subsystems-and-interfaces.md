@@ -59,6 +59,11 @@ IB-15): rank 0 plans each attempt from the committed summaries footers alone, re
 build's parts, dispatches only the missing runs with the earlier counts restored, drains before the walltime, and
 `saber.campaign` renders PBS and Slurm job scripts whose queued resubmissions run only while resuming helps. A fresh
 campaign now refuses an output directory that already holds one. Adds D20 (was O8).
+v0.19 (2026-11-03, build step 4c) records `saber.analyze`, `saber.verify` and `saber.report` as built (§5.7,
+§8.2, IB-11, IB-12): committed parts of every attempt read as one table, campaign rules in which an inconclusive
+run counts against whichever verdict it could overturn (instead of an inconclusive-fraction policy), one-sided
+Clopper–Pearson bounds, `verdicts.parquet` with a `saber.verify` footer and a self-contained `report.html`.
+Python compiles requirement sets with `saber-cli validate --emit-req-json` (IB-03). Adds O9.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -657,7 +662,41 @@ default spelled out; `tests/shared/campaign/defaults.toml` is that output, check
 directory (the scene and requirement set copied in, the manifest, `campaign.toml`), `preflight` runs
 `sim_hpc --validate-only --json` and `run_local` runs `sim_hpc --local --json`, both mapping exit codes to a
 `Status` (IB-04); `LocalRun` reads `_MANIFEST.json` and the committed parts. Binaries are found from an argument,
-`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` follow with 4b.
+`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` came with 4b
+(IB-04).
+
+**As built (step 4c), `saber.analyze`, `saber.verify` and `saber.report`.** `analyze.open_campaign` takes a
+`campaign.toml` or a shared output directory. A part is committed when its `*_summaries.parquet` has its final
+name; `Campaign.summaries()` reads those of every attempt (ordered by attempt, rank, part) as one pyarrow table
+sorted by `run_id`, keeps a re-queued `run_id` once and raises `AnalysisError` when two copies' `final_state_hash`
+differ. `coverage()` gives the runs in the sweep, those committed and the missing `run_id` ranges (what
+`--resume` would run). `uncertainty` gives per `param_set_id` its parameters, runs by outcome and each metric's
+mean, standard deviation and 5th, 50th and 95th percentiles over finished runs; `crash_regions` the parameter sets
+with crashes or timeouts, worst first. These use pyarrow and numpy: the files are plain Parquet, so DuckDB and
+Polars read them as they are, but neither is a dependency. `verify.verify(campaign, requirements=None, *,
+crashes="fail", by_param_set=False, envelope=None, recompute=False)` reads the campaign's archived requirement set
+through `saber-cli validate --emit-req-json` unless given one, refuses a set whose `req_set_hash` differs from the
+one the campaign ran with (unless `recompute=True`, which re-evaluates `Threshold` requirements from their metric
+columns and leaves the other kinds `Inconclusive`) and refuses an aborted campaign (`CampaignError`, `ABORTED`).
+Each run counts by status: `Completed` and `Terminated` by their `req_<id>` verdict, `Timeout` as `Inconclusive`
+(D20), the crash statuses as failures (seq §11's default) or, with `crashes="inconclusive"`, as inconclusive, and
+`SetupError` not at all (reported). The rules (§8.2) never let inconclusive runs make a verdict wrong, only
+`Inconclusive`: `AllPass` fails on any failure and passes only with no inconclusive run; `Probability` passes when
+the one-sided Clopper–Pearson lower bound, with the inconclusive runs as failures, reaches `min_p`, fails when the
+upper bound with them as passes is below it, and otherwise reports how many all-passing runs would show it;
+`Quantile` takes the empirical quantile (inverted CDF) with the unknown values on the failing side for `Pass` and
+on the passing side for `Fail`. Rules judge every counted run together by default; `by_param_set=True` judges
+each parameter set on its own and reports the worst (O9). `envelope` keeps runs whose parameters lie in given
+ranges. A partial campaign is judged on what committed and says so. The bounds come from a regularized incomplete
+beta in the standard library (no scipy), checked against scipy and the binomial tails in tests.
+`Verification.write()` writes `verdicts.parquet` next to the parts, with the campaign's hashes in its header and
+the policy, counterexamples, upper bounds and warnings in its `saber.verify` footer (IB-12).
+`report.write_report(campaign, verification)` writes `report.html` beside it (IB-12), and
+`python -m saber.verify CAMPAIGN [--req R] [--crashes inconclusive] [--by-param-set] [--envelope KEY=LO:HI]
+[--recompute] [--check]` does all three and prints the verdicts (exit 0, or 1 with `--check` unless every
+requirement passed; 2 a set that does not fit or an unreadable file; 6 an aborted campaign, whose report is still
+written; 64 usage). Sobol sensitivity indices (seq §10) and the top-up manifest for straddling parameter sets
+(seq §11) are not built yet.
 
 ### 5.8 `sim_query` — campaign query engine (new, D10)
 
@@ -1187,6 +1226,16 @@ a cut-short run. At a natural end (`Completed`, or `Terminated` by a stop condit
 `Never` and `Envelope` pass, `Eventually` fails, a `Custom` check answers `at_end`. The `Threshold` rule depends only
 on the reducer, the comparison and the metric value, so `saber.verify` can recompute it from the summary columns.
 
+As built (step 4c): the per-run columns stay as above (a crashed run's `req_*` are `Inconclusive`); the campaign
+step decides what a status counts as. `Timeout` is `Inconclusive` (D20); the crash statuses count as failures by
+default (seq §11) or as inconclusive with `crashes="inconclusive"`; `SetupError` runs are excluded. The diagram's
+"inconclusive fraction ≤ policy" check is replaced by a rule with no threshold to tune: an inconclusive run counts
+against whichever verdict it could overturn. `AllPass` is `Pass` only with every counted run passing; `Probability`
+is `Pass` when the Clopper–Pearson lower bound with inconclusive runs as failures reaches `min_p`, `Fail` when the
+upper bound with them as passes is below it, else `Inconclusive`; `Quantile` puts unknown values on the failing
+side for `Pass` and on the passing side for `Fail`. So a verdict is `Pass` or `Fail` only if every way the
+inconclusive runs could have come out gives it (§5.7).
+
 ---
 
 ## 9. Interface boundary catalogue
@@ -1248,7 +1297,7 @@ flowchart LR
 | | |
 |---|---|
 | Contract | §8.1. Signals addressed as `entity(SimId).Component.field` or `event(Name)`; metrics named `metric_key`. |
-| Owner | `sim_verify`. Python reads the compiled JSON form produced by `sim_hpc --validate-only --emit-req-json` so it never parses RON. |
+| Owner | `sim_verify`. Python reads the compiled JSON form produced by `saber-cli validate --emit-req-json` so it never parses RON. |
 | Validation | Every signal path resolves against the scenario; every metric referenced by a requirement exists; units consistent; IDs unique. |
 | Errors | `ReqError::{UnresolvedSignal, UnknownMetric, DuplicateId, TypeMismatch}` → blocking in Studio and preflight. |
 | As built (step 2) | `RequirementSet::from_ron` checks the header, ids, metric references, reducer against source (signal or event), condition shape, numbers and campaign rules; `VerifyState::compile` resolves signals, events and custom checks against a scenario's Tick-0 World. `ReqError::{Parse{line, col}, BadHeader, VersionMismatch, DuplicateId, UnknownMetric, BadMetric, BadRequirement, UnresolvedSignal, TypeMismatch, UnknownCheck}`. `saber-cli validate <set.req.ron> [--scenario <scn>] --emit-req-json` prints the compiled JSON form (`format: "saber-requirements-json"`, `req_set_hash`, `metric_columns`, `requirement_columns`, the scene hash it was resolved against, and the set itself; JSON objects are unordered, so the column lists carry the order); `sim_hpc --validate-only` reuses it with step 3b. Unit checks wait for `ModelMeta.signals` to carry units. |
@@ -1472,6 +1521,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | Read committed parts listed in `_MANIFEST.json` (or glob `*_summaries.parquet` etc. as in the draft, skipping `.tmp`/`.partial`); Python loads column types from exported schemas and checks `FileHeader.schema_version`. Parts from all attempts are read together. A `run_id` that appears twice (re-queued after a node I/O failure) is deduplicated by `run_id`; determinism makes the copies identical, and a differing `final_state_hash` is reported as an error. |
 | Errors | Missing `run_id` ranges in `_MANIFEST.json` → analysis runs but the report is stamped *partial* with those ranges. A policy-aborted campaign (exit `6`) is reported as aborted, with its crash histogram, never as a verdict. |
+| As built (step 4c) | `saber.analyze` (§5.7). Committed means a `*_summaries.parquet` under its final name, so `.tmp` and `.partial` files and the other files of a part whose summaries never committed are skipped; the missing ranges are computed from the committed `run_id`s against the sweep's run count (`_MANIFEST.json` `runs`, else the manifest file), so a campaign that lost a part after `_MANIFEST.json` was written is still stamped partial. Columns and types are checked through `saber.schema` against the exported schemas. `saber.verify` refuses an aborted campaign; `saber.report` reports it with its abort reason and runs by status. |
 
 ### IB-12 · Verdicts & report (saber.verify → sim_explorer ResultsExplorer, humans)
 
@@ -1479,6 +1529,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | `verdicts.parquet`: `campaign_id, req_id, aggregation, n_runs, n_pass, n_fail, n_inconclusive, estimate, lower_bound, confidence, verdict u8, trace_ids list<str>`. Plus `report.html` with traceability matrix (requirement → metric → evidence query). |
 | Owner | `sim_schema::VERDICTS_SCHEMA`. As built (step 3a): `Table::Verdicts` / `CampaignVerdictRow`; `lower_bound` and `confidence` are null for `AllPass`; sorted by `req_id`. |
+| As built (step 4c) | `saber.verify` writes it (§5.7): `aggregation` is the rule as written (`Probability(min_p: 0.99, confidence: 0.9)`, with ` per param set` appended for `by_param_set`); `estimate` is the pass rate of the conclusive runs (for `Quantile`, the quantile of the known values); `lower_bound` and `confidence` are set for `Probability` only, the lower bound counting inconclusive runs as failures. The header carries the campaign's `campaign_id`, `scene_hash`, `req_set_hash` and `build_id`. The footer key `saber.verify` (`sim_schema::io::VERIFY_KEY`) holds JSON: the crash and timeout policy, `by_param_set`, the envelope, runs judged, excluded `SetupError` runs, `partial` and the missing ranges, the requirement set's id, version and hash, warnings, and per requirement its upper bound, up to ten failing `run_id`s, the worst parameter set, the all-passing runs a straddling `Probability` would need, and a note. `report.html` is one file with inline CSS and no scripts or external resources: the hashes and a *complete*, *partial* or *aborted* stamp, coverage, the traceability matrix (requirement, trace ids, check, metric and its definition, rule, runs by outcome, estimate, bounds, verdict, failing runs, and the evidence query as DuckDB SQL over the committed summaries parts), the policy, runs by status, uncertainty and unstable regions. |
 
 ### IB-13 · External model & requirement import (→ sim_studio / sim_models)
 
@@ -1750,6 +1801,7 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | # | Question | Where |
 |---|---|---|
 | O1 | Fragmentation physics: trigger criteria, fragment mass and velocity distributions, fragment lifetime when nothing is hit. | IB-16 (designed separately) |
+| O9 | Should a `Probability` requirement be judged over all of a campaign's runs pooled (the chance over the sweep's sampled inputs), or on each parameter set, failing if the worst set falls short (an operating envelope)? Step 4c pools by default and judges per set with `by_param_set=True`. | §5.7, seq §11 |
 
 ---
 

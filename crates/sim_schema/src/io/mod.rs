@@ -43,6 +43,9 @@ pub const DUMP_COUNTS_KEY: &str = "saber.dump_counts";
 pub const MANIFEST_HASH_KEY: &str = "saber.manifest_hash";
 /// Manifest footer key: the sampler (method, n, seed) as JSON (IB-02).
 pub const SAMPLER_KEY: &str = "saber.sampler";
+/// `verdicts.parquet` footer: how `saber.verify` judged (JSON: crash handling, scope, coverage, and
+/// per requirement the upper bound, counterexample runs and runs needed; step 4c).
+pub const VERIFY_KEY: &str = "saber.verify";
 
 /// The type of a column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

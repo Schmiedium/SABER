@@ -1,0 +1,28 @@
+// Requirements for the step 4c end-to-end test (python/tests/test_campaign_local.py): the projectile
+// scenario swept over muzzle_vz in {20, 30, 40, 60, 160} m/s, 4 replicates each. In vacuum the
+// apogee is vz^2 / 2g and the flight time 2 vz / g; vz = 160 m/s would fly 32.6 s, longer than
+// the scenario's 30 s, so those runs time out (Inconclusive, D20). Each requirement's campaign
+// verdict is worked out by hand in the test.
+RequirementSet(
+    header: (magic: "SABER", format: "requirements", schema_version: "1.0.0"),
+    id: "PROJ-VERIFY", version: "0.1.0", scenario_hint: "projectile.scn.ron",
+    metrics: {
+        "apogee_m": (signal: "entity(1).PointMass3.position.z", reduce: Max),
+        "flight_s": (event: "ground_impact", reduce: FirstTime),
+    },
+    requirements: [
+        (id: "R-apogee", text: "Apogee at most 300 m",
+         kind: Threshold(metric: "apogee_m", op: Le, value: 300.0), trace: ["SYS-12"]),
+        (id: "R-apogee-median", text: "Median apogee at most 100 m",
+         kind: Threshold(metric: "apogee_m", op: Le, value: 100.0), per_run: false,
+         campaign: Quantile(q: 0.5, op: Le, value: 100.0), trace: ["SYS-12"]),
+        (id: "R-lands", text: "Lands within 20 s with probability 0.8",
+         kind: Eventually(event: "ground_impact", within_s: 20.0),
+         campaign: Probability(min_p: 0.8, confidence: 0.9), trace: ["SYS-13"]),
+        (id: "R-quick", text: "Every shot lands within 10 s",
+         kind: Threshold(metric: "flight_s", op: Le, value: 10.0), trace: ["SYS-14"]),
+        (id: "R-quick-p95", text: "Lands within 10 s with probability 0.95",
+         kind: Threshold(metric: "flight_s", op: Le, value: 10.0),
+         campaign: Probability(min_p: 0.95, confidence: 0.9), trace: ["SYS-14", "SYS-15"]),
+    ],
+)

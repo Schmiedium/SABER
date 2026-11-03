@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 4b. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step 4c. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind and a ground-impact stop, and `saber-cli validate`
@@ -20,7 +20,11 @@ aircraft.
 > (built with `--features mpi`) spreads the same campaign over MPI ranks with the same results, stops a crash storm
 > with exit 6 while keeping its evidence, and writes a `campaign_status.json` heartbeat. A campaign cut short (killed, drained before its walltime, stopped
 > by SIGTERM) is finished by `--resume`, which runs only the runs no committed part holds, and
-> `saber.campaign.submit` queues it on PBS or Slurm with automatic resubmissions. Analysis and verdicts come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> `saber.campaign.submit` queues it on PBS or Slurm with automatic resubmissions. `saber.analyze` reads a campaign's
+> committed parts with its coverage and uncertainty, `saber.verify` turns per-run verdicts into campaign verdicts
+> with Clopper–Pearson bounds in `verdicts.parquet`, and `saber.report` writes a self-contained `report.html` with
+> the traceability matrix (`python -m saber.verify campaign.toml` does all three). Flight-dynamics models come
+> next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

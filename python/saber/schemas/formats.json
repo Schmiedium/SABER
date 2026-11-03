@@ -6,7 +6,8 @@
     "manifest_hash": "saber.manifest_hash",
     "run_ids": "saber.run_ids",
     "sampler": "saber.sampler",
-    "status_counts": "saber.status_counts"
+    "status_counts": "saber.status_counts",
+    "verify": "saber.verify"
   },
   "magic": "SABER",
   "schema_versions": {
