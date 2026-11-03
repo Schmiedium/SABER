@@ -6,7 +6,7 @@
 
 use sim_core::integrator::StepMode;
 
-use super::{FieldKind, ScenarioDoc};
+use super::{FieldKind, ReqItem, ScenarioDoc};
 
 /// How serious a lint item is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -37,6 +37,8 @@ pub struct LintItem {
     pub level: LintLevel,
     /// The entity it is about, if one.
     pub sim_id: Option<u32>,
+    /// The requirement-set item it is about, if one (Requirements panel lint).
+    pub req: Option<ReqItem>,
     /// What is wrong, and what to do.
     pub text: String,
 }
@@ -54,17 +56,20 @@ pub fn lint(doc: &ScenarioDoc) -> Vec<LintItem> {
         Err(e) => out.push(LintItem {
             level: LintLevel::Error,
             sim_id: None,
+            req: None,
             text: format!("The scene does not validate: {e}"),
         }),
         Ok(scenario) => match doc.tick0(scenario) {
             Err(e) => out.push(LintItem {
                 level: LintLevel::Error,
                 sim_id: None,
+                req: None,
                 text: format!("Tick 0 setup fails: {e}"),
             }),
             Ok(warnings) => out.extend(warnings.into_iter().map(|w| LintItem {
                 level: LintLevel::Warning,
                 sim_id: None,
+                req: None,
                 text: w,
             })),
         },
@@ -77,6 +82,7 @@ pub fn lint(doc: &ScenarioDoc) -> Vec<LintItem> {
     out.push(LintItem {
         level: LintLevel::Info,
         sim_id: None,
+        req: None,
         text: format!(
             "{} entities, {bound} with swept parameters, {uncertain} with uncertain values",
             rows.len()
@@ -116,6 +122,7 @@ fn step_against_time_constants(doc: &ScenarioDoc, out: &mut Vec<LintItem>) {
                 out.push(LintItem {
                     level: LintLevel::Warning,
                     sim_id: id,
+                    req: None,
                     text: format!(
                         "{who}{}.{}: a step of {h:e} s is more than {STEP_PER_TIME_CONSTANT} × τ ({tau} s); consider {advice}",
                         component.name, f.label

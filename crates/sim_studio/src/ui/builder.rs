@@ -10,9 +10,10 @@ use sim_core::integrator::StepMode;
 use sim_studio_ui::dock::DockRegion;
 use sim_studio_ui::prelude::*;
 
+use super::requirements::ReqFieldOf;
 use super::{action, child};
-use crate::actions::{BuilderDoc, DocChanged, StudioCommand};
-use crate::builder::{FieldRef, LintLevel, ParamKind, ScenarioDoc};
+use crate::actions::{BuilderDoc, BuilderTab, DocChanged, ReqPanel, StudioCommand};
+use crate::builder::{FieldRef, LintItem, LintLevel, ParamKind, RequirementDoc, ScenarioDoc};
 use crate::state::AppState;
 
 /// A dock region's content node, refilled when the document changes.
@@ -562,9 +563,19 @@ pub fn summary(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
     );
 }
 
-/// Lint, above the Console.
-pub fn lint(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
-    let count = |l: LintLevel| doc.lint().iter().filter(|i| i.level == l).count();
+/// Lint, above the Console: the scenario's, then the requirement set's (`req`).
+pub fn lint(
+    commands: &mut Commands,
+    body: Entity,
+    doc: &ScenarioDoc,
+    req: Option<&RequirementDoc>,
+) {
+    let all = || {
+        doc.lint()
+            .iter()
+            .chain(req.map(RequirementDoc::lint).unwrap_or_default())
+    };
+    let count = |l: LintLevel| all().filter(|i| i.level == l).count();
     child(
         commands,
         body,
@@ -575,41 +586,110 @@ pub fn lint(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
         )),
     );
     for item in doc.lint() {
-        let status = match item.level {
-            LintLevel::Error => Status::Fail,
-            LintLevel::Warning => Status::Warning,
-            LintLevel::Info => Status::Running,
-        };
-        let text = item.text.clone();
-        match item.sim_id.and_then(|id| doc.slot_of(id)) {
-            Some(slot) => {
-                action(
-                    commands,
-                    body,
-                    plain_row(
-                        format!("{} {}", item.level.mark(), item.text),
-                        bsn_list! { @status_text(status, text) },
-                    ),
-                    StudioCommand::Select(slot),
-                );
-            }
-            None => {
-                child(commands, body, status_text(status, text));
-            }
+        let command = item
+            .sim_id
+            .and_then(|id| doc.slot_of(id))
+            .map(StudioCommand::Select);
+        lint_item(commands, body, item, command);
+    }
+    if let Some(r) = req {
+        child(commands, body, muted(format!("Requirements: {}", r.rel)));
+        for item in r.lint() {
+            let command = item.req.clone().map(StudioCommand::SelectReq);
+            lint_item(commands, body, item, command);
         }
     }
 }
 
-/// Refill the Builder's regions after a change; the Inspector is rebuilt only when the
-/// selection moved, otherwise its fields take the document's values in place.
+fn lint_item(
+    commands: &mut Commands,
+    body: Entity,
+    item: &LintItem,
+    command: Option<StudioCommand>,
+) {
+    let status = match item.level {
+        LintLevel::Error => Status::Fail,
+        LintLevel::Warning => Status::Warning,
+        LintLevel::Info => Status::Running,
+    };
+    let text = item.text.clone();
+    match command {
+        Some(command) => {
+            action(
+                commands,
+                body,
+                plain_row(
+                    format!("{} {}", item.level.mark(), item.text),
+                    bsn_list! { @status_text(status, text) },
+                ),
+                command,
+            );
+        }
+        None => {
+            child(commands, body, status_text(status, text));
+        }
+    }
+}
+
+/// What the right dock shows: the Inspector's layout, or the requirement editor's.
+fn right_key(doc: &ScenarioDoc, panel: &ReqPanel) -> String {
+    match panel.tab {
+        BuilderTab::Scene => doc.inspector_key(),
+        BuilderTab::Requirements => panel.doc.as_ref().map_or_else(
+            || "req:none".to_owned(),
+            |d| format!("req:{}", d.editor_key()),
+        ),
+    }
+}
+
+/// Fill one dock region of the Builder for the tab that shows.
+pub fn fill(
+    commands: &mut Commands,
+    body: Entity,
+    kind: DockRegion,
+    doc: &ScenarioDoc,
+    panel: &ReqPanel,
+    log: &ToastLog,
+) {
+    let req = panel.doc.as_ref();
+    match (kind, panel.tab) {
+        (DockRegion::Left, tab) => {
+            super::requirements::tabs(commands, body, tab);
+            if tab == BuilderTab::Scene {
+                outliner(commands, body, doc);
+                parameters(commands, body, doc);
+            } else {
+                super::requirements::list(commands, body, panel, doc);
+            }
+        }
+        (DockRegion::Right, BuilderTab::Scene) => inspector(commands, body, doc),
+        (DockRegion::Right, BuilderTab::Requirements) => {
+            super::requirements::editor(commands, body, req);
+        }
+        (DockRegion::Center, BuilderTab::Scene) => summary(commands, body, doc),
+        (DockRegion::Center, BuilderTab::Requirements) => {
+            super::requirements::summary(commands, body, req);
+        }
+        (DockRegion::Bottom, _) => {
+            lint(commands, body, doc, req);
+            super::shell::console(commands, body, log);
+        }
+    }
+}
+
+/// Refill the Builder's regions after a change; the right dock (Inspector or requirement
+/// editor) is rebuilt only when its layout changed, otherwise its fields take the documents'
+/// values in place, so a click into the next field is not lost.
 #[allow(clippy::too_many_arguments)]
 pub fn refresh(
     mut changed: MessageReader<DocChanged>,
     mut commands: Commands,
     state: Res<State<AppState>>,
     docs: Res<BuilderDoc>,
+    panel: Res<ReqPanel>,
     bodies: Query<(Entity, &RegionBody, Option<&InspectorOf>)>,
-    mut fields: Query<(&InspectorField, &Children)>,
+    fields: Query<(&InspectorField, &Children)>,
+    req_fields: Query<(&ReqFieldOf, &Children)>,
     mut texts: Query<&mut EditableText>,
     log: Res<ToastLog>,
 ) {
@@ -619,40 +699,43 @@ pub fn refresh(
     let Some(doc) = &docs.0 else {
         return;
     };
+    let key = right_key(doc, &panel);
     for (body, RegionBody(kind), shown) in &bodies {
-        if *kind == DockRegion::Right && shown.is_some_and(|s| s.0 == doc.inspector_key()) {
+        if *kind == DockRegion::Right && shown.is_some_and(|s| s.0 == key) {
             continue;
         }
         commands.entity(body).despawn_related::<Children>();
-        match kind {
-            DockRegion::Left => {
-                outliner(&mut commands, body, doc);
-                parameters(&mut commands, body, doc);
-            }
-            DockRegion::Right => inspector(&mut commands, body, doc),
-            DockRegion::Center => summary(&mut commands, body, doc),
-            DockRegion::Bottom => {
-                lint(&mut commands, body, doc);
-                super::shell::console(&mut commands, body, &log);
+        fill(&mut commands, body, *kind, doc, &panel, &log);
+    }
+    let mut sync = |children: &Children, value: &str| {
+        for c in children.iter() {
+            if let Ok(mut t) = texts.get_mut(c)
+                && t.value().to_string().trim() != value
+            {
+                t.editor_mut().set_text(value);
+                t.queue_edit(TextEdit::TextEnd(false));
             }
         }
-    }
-    for (field, children) in &mut fields {
-        let Some(value) = doc
+    };
+    for (field, children) in &fields {
+        if let Some(value) = doc
             .components(field.slot)
             .into_iter()
             .find(|c| c.type_path == field.component)
             .and_then(|c| c.fields.into_iter().find(|f| f.path == field.path))
             .map(|f| f.text)
-        else {
-            continue;
-        };
-        for c in children.iter() {
-            if let Ok(mut t) = texts.get_mut(c)
-                && t.value().to_string().trim() != value
+        {
+            sync(children, &value);
+        }
+    }
+    if let Some(req) = &panel.doc {
+        for (field, children) in &req_fields {
+            if let Some(f) = req
+                .fields(&field.item)
+                .into_iter()
+                .find(|f| f.name == field.field)
             {
-                t.editor_mut().set_text(&value);
-                t.queue_edit(TextEdit::TextEnd(false));
+                sync(children, &f.text);
             }
         }
     }

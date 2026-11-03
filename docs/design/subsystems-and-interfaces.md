@@ -114,6 +114,8 @@ v0.30 (2026-11-03, build step S2-1) records the Builder's document as built (§5
 (§5.1): `Scenario::from_parts`, `Scenario::meta` and `SceneEntity::try_clone`.
 v0.31 (2026-11-03, build step S2-2) records the bind menu as built (§5.5): `ParamBindings` and `Uncertainties`
 edited from the studio, with no change to their file form.
+v0.32 (2026-11-03, build step S2-3) records the Requirements tab as built (§5.5): the studio edits a `.req.ron`
+and compiles it against the open scenario with `sim_verify`'s own Tick-0 compiler (IB-03).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -742,6 +744,8 @@ stateDiagram-v2
 **As built (step S2-1).** `Studio.Builder`'s document: `sim_studio::builder::ScenarioDoc` keeps a reflected copy of the open scenario's entities (`SceneEntity::try_clone`) and rebuilds a validated, hashed `Scenario` from them on demand with `Scenario::from_parts(entities, meta, visual, registry)`, which keeps file keys, component order and the `visual:` section, so an untouched scene exports with its `scene_hash`. Fields are edited by reflection path as text; every edit is undoable and saved to `<file>~autosave`, and Export writes the canonical `.scn.ron` (refused while Lint has errors). Lint runs the scene's validation and Tick 0's setup in a World built with the standard library, so setup errors and `ResolveReport.warnings` show while editing. Parameters (bind menu) and requirements are S2-2 and S2-3; the viewport is S3. Details in `sim_studio_ux.md` §7.2.
 
 **As built (step S2-2).** The bind menu writes the entity's `ParamBindings` and `Uncertainties` (§7, IB-01) exactly as a hand-written file would: target `Component.field.path`, the field's value as the binding default, a draw on a swept field with `apply: Add`, and the stream named `<SimId>.<target>`. Components are added with their `Default` or with every field at its `#[reflect(default)]` (what `()` reads as in a file). Every change is one undoable edit, refused if it would make a valid scene invalid (the kernel's validation decides). Details in `sim_studio_ux.md` §7.2, §7.3.
+
+**As built (step S2-3).** The Builder's Requirements tab edits the IB-03 `RequirementSet` in `sim_studio::builder::RequirementDoc`; the file form is unchanged. Edits that would fail `RequirementSet::validate` are refused. Lint builds the open scenario's World, runs Tick 0's setup and compiles each metric and requirement with `sim_verify::VerifyState::compile`, the compiler `VerifyPlugin` runs at every Tick 0, so a set that lints clean in the studio compiles in every run of that scenario on the same build. The tab needs nothing new from `sim_core` or `sim_verify`. Details in `sim_studio_ux.md` §7.4.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 
