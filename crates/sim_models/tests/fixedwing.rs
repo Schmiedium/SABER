@@ -710,6 +710,143 @@ fn trim_in_an_enu_world_climbs_on_its_heading() {
     Tol::scalar(1e-9, 0.0).assert(d.models[0].rates[0], 0.0);
 }
 
+/// Servos on every control (step 5c) with `hold_start` keep the trimmed controls, so the trimmed
+/// aircraft flies on as steadily as without them; a commanded elevator step then reaches the
+/// surface through the servo's lag.
+#[test]
+fn servos_hold_a_trimmed_aircraft_steady() {
+    use sim_models::actuators::{Actuator, Actuators, Lag};
+    let condition = TrimCondition {
+        airspeed: 180.0,
+        flight_path_angle: 0.0,
+        heading: 0.4,
+    };
+    let mut sim = world_from_text(&f16_text(0.35, Some(condition)), Env::Library);
+    sim.spawn(
+        SimId(100),
+        (
+            Gravity::Flat {
+                g: STANDARD_GRAVITY,
+            },
+            Atmosphere::Ussa1976,
+        ),
+    );
+    sim.start(RunSeed::new(0, 0)).unwrap();
+    let e = entity(&sim);
+    let trimmed = *sim.world().get::<ControlSurfaces>(e).unwrap();
+    // The scenario's aircraft gets servos, as a studio user would add them; restart so they are
+    // set up after the trim.
+    let servo = |output: &str, lag: Lag, rate_limit: f64| Actuator {
+        output: output.into(),
+        hold_start: true,
+        min: -0.5,
+        max: 0.5,
+        rate_limit,
+        lag,
+        ..Actuator::default()
+    };
+    let channels = vec![
+        servo(
+            "ControlSurfaces.elevator",
+            // Stevens and Lewis's F-16 elevator servo: 20.2 rad/s, 60°/s.
+            Lag::FirstOrder {
+                time_constant: 0.0495,
+            },
+            60f64.to_radians(),
+        ),
+        servo(
+            "ControlSurfaces.aileron",
+            Lag::SecondOrder {
+                natural_frequency: 40.0,
+                damping: 0.7,
+            },
+            1.4,
+        ),
+        servo("ControlSurfaces.rudder", Lag::None, 2.0),
+        Actuator {
+            min: 0.0,
+            max: 1.0,
+            ..servo("ControlSurfaces.throttle", Lag::None, 1.0)
+        },
+    ];
+    let text = f16_text(0.35, Some(condition)).replace(
+        "\"sim_models::fixedwing::EngineState\": (power: 90.0),",
+        &format!(
+            "\"sim_models::fixedwing::EngineState\": (power: 90.0),\n\
+             \"sim_models::actuators::Actuators\": {},",
+            channels_ron(&channels)
+        ),
+    );
+    let mut sim = world_from_text(&text, Env::Library);
+    sim.spawn(
+        SimId(100),
+        (
+            Gravity::Flat {
+                g: STANDARD_GRAVITY,
+            },
+            Atmosphere::Ussa1976,
+        ),
+    );
+    sim.start(RunSeed::new(0, 0)).unwrap();
+    assert_eq!(*sim.world().get::<ControlSurfaces>(e).unwrap(), trimmed);
+    let a0 = *sim.world().get::<AirData>(e).unwrap();
+    let b0 = *sim.world().get::<RigidBody6>(e).unwrap();
+    // Half the scenario's 1000 ticks, leaving room for the step below.
+    for _ in 0..500 {
+        assert!(sim.step().is_none());
+    }
+    assert_eq!(*sim.world().get::<ControlSurfaces>(e).unwrap(), trimmed);
+    let a1 = *sim.world().get::<AirData>(e).unwrap();
+    let b1 = *sim.world().get::<RigidBody6>(e).unwrap();
+    Tol::scalar(1e-6, 0.0).assert(a1.airspeed, a0.airspeed);
+    Tol::scalar(1e-8, 0.0).assert(a1.alpha, a0.alpha);
+    Tol::scalar(1e-5, 0.0).assert(b1.position.z, b0.position.z);
+
+    // One degree more elevator: the surface follows the 0.0495 s lag (rate limit not reached).
+    let step = 1f64.to_radians();
+    sim.world_mut().get_mut::<Actuators>(e).unwrap().channels[0].command = trimmed.elevator + step;
+    for k in 1..=20 {
+        sim.step();
+        let want = trimmed.elevator + step * (1.0 - (-(k as f64) * 0.01 / 0.0495).exp());
+        let got = sim.world().get::<ControlSurfaces>(e).unwrap().elevator;
+        Tol::scalar(1e-14, 0.0).assert(got, want);
+    }
+}
+
+/// The RON text of a servo list (the `Actuators` component's own serialisation is reflection's).
+fn channels_ron(channels: &[sim_models::actuators::Actuator]) -> String {
+    use sim_models::actuators::Lag;
+    let lag = |l: &Lag| match l {
+        Lag::None => "None".to_owned(),
+        Lag::FirstOrder { time_constant } => {
+            format!("FirstOrder(time_constant: {time_constant:?})")
+        }
+        Lag::SecondOrder {
+            natural_frequency,
+            damping,
+        } => format!("SecondOrder(natural_frequency: {natural_frequency:?}, damping: {damping:?})"),
+    };
+    let items: Vec<String> = channels
+        .iter()
+        .map(|a| {
+            format!(
+                "(output: {:?}, command: {:?}, hold_start: {}, min: {:?}, max: {:?}, \
+                 rate_limit: {:?}, lag: {}, backlash: {:?}, position: {:?})",
+                a.output,
+                a.command,
+                a.hold_start,
+                a.min,
+                a.max,
+                a.rate_limit,
+                lag(&a.lag),
+                a.backlash,
+                a.position
+            )
+        })
+        .collect();
+    format!("(channels: [{}])", items.join(", "))
+}
+
 /// Trim refuses what it cannot do, as a setup error naming the aircraft.
 #[test]
 fn trim_reports_what_it_cannot_do() {

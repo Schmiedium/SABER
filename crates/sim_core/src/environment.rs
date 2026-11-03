@@ -41,9 +41,10 @@ impl EnvSample {
 
 /// A gravity, atmosphere and wind model. Implementations must be pure in `sample` (the kernel
 /// calls it at every stage of every substep) and must not allocate; per-tick state such as a
-/// turbulence filter is advanced by systems in `SimSet::Environment` and held constant within the
-/// tick.
-pub trait Environment: Send + Sync + 'static {
+/// turbulence filter is advanced by systems in `SimSet::Environment`, which reach the concrete
+/// type through `Any` (`SimEnvironment::downcast_mut`), and within the tick `sample` is a fixed
+/// function of position and time.
+pub trait Environment: std::any::Any + Send + Sync + 'static {
     /// Conditions at `position` (world frame, m) and time `t` (s).
     fn sample(&self, position: DVec3, t: f64) -> EnvSample;
 
@@ -119,6 +120,20 @@ impl Environment for UniformEnvironment {
 /// The World's environment model.
 #[derive(Resource)]
 pub struct SimEnvironment(pub Box<dyn Environment>);
+
+impl SimEnvironment {
+    /// The model as its concrete type, for a system that advances its per-tick state.
+    pub fn downcast_mut<T: Environment>(&mut self) -> Option<&mut T> {
+        let any: &mut dyn std::any::Any = &mut *self.0;
+        any.downcast_mut::<T>()
+    }
+
+    /// The model as its concrete type.
+    pub fn downcast_ref<T: Environment>(&self) -> Option<&T> {
+        let any: &dyn std::any::Any = &*self.0;
+        any.downcast_ref::<T>()
+    }
+}
 
 /// The world frame the scenario declares (IB-01, subsystems §10.3); ENU for a World built in code.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]

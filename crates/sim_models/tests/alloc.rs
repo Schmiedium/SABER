@@ -156,3 +156,85 @@ fn fixed_wing_ticks_never_allocate() {
         sim.reset();
     }
 }
+
+/// Step 5c: Dryden turbulence, actuators (every lag, with limits and backlash) and every sensor
+/// kind (noise, bias walk, quantisation, divided rates, latency) on the trimmed F-16, all loaded
+/// from the scenario file (some with only the fields that differ from the defaults), still never
+/// allocate per tick.
+#[test]
+fn turbulence_actuators_and_sensors_never_allocate() {
+    let noise = "(white: 0.01, bias: 0.001, bias_walk: 0.0001, resolution: 0.0005)";
+    let servo = |output: &str, lag: &str| {
+        format!(
+            "(output: \"{output}\", command: 0.0, hold_start: true, min: -1.0, max: 1.0, \
+             rate_limit: 1.0, lag: {lag}, backlash: 0.001, position: 0.0)"
+        )
+    };
+    let extra = format!(
+        "\"sim_models::fixedwing::EngineState\": (power: 90.0),\n\
+         \"sim_models::fixedwing::TrimCondition\": (airspeed: 150.0, flight_path_angle: 0.0, heading: 0.0),\n\
+         \"sim_models::actuators::Actuators\": (channels: [{}, {}, {}]),\n\
+         \"sim_models::sensors::Imu\": (rate_divider: 2, latency: 3, gyro_noise: {noise}, \
+             accel_noise: {noise}, gyro: (0.0, 0.0, 0.0), accel: (0.0, 0.0, 0.0), valid: false),\n\
+         \"sim_models::sensors::Gnss\": (rate_divider: 10, latency: 7, position_noise: {noise}, \
+             velocity_noise: {noise}),\n\
+         \"sim_models::sensors::Barometer\": (noise: (white: 2.0)),",
+        servo(
+            "ControlSurfaces.elevator",
+            "FirstOrder(time_constant: 0.0495)"
+        ),
+        servo(
+            "ControlSurfaces.aileron",
+            "SecondOrder(natural_frequency: 40.0, damping: 0.7)"
+        ),
+        // Only what differs from the defaults.
+        "(output: \"ControlSurfaces.throttle\", hold_start: true, min: 0.0, max: 1.0)".to_owned(),
+    );
+    let text = include_str!("../../../tests/reference/stevens_lewis/f16/f16.scn.ron").replace(
+        "\"sim_models::fixedwing::EngineState\": (power: 90.0),",
+        &extra,
+    );
+    let mut b = SimAppBuilder::new(SimConfig::new(1.0, 1));
+    sim_models::add_library(&mut b);
+    let registry = b.type_registry();
+    let scenario =
+        Scenario::from_ron(&text, &registry.read(), sim_models::LIBRARY_VERSION).unwrap();
+    b.set_config(scenario.config().clone());
+    let mut sim = b.build().unwrap();
+    sim.set_scenario(Arc::new(scenario)).unwrap();
+    for seed in [1, 2] {
+        sim.spawn(
+            sim_core::SimId(100),
+            (
+                sim_models::environment::Gravity::Flat { g: 9.80665 },
+                sim_models::environment::Atmosphere::Ussa1976,
+                sim_models::environment::Wind::Dryden {
+                    mean: glam::DVec3::new(5.0, 0.0, 0.0),
+                    airspeed: 150.0,
+                    heading: 0.0,
+                    intensity: glam::DVec3::new(1.0, 1.0, 0.7),
+                    scale: glam::DVec3::new(533.0, 533.0, 300.0),
+                },
+            ),
+        );
+        sim.start(RunSeed::new(0, seed)).unwrap();
+        let e = sim.body(sim_core::SimId(1)).unwrap();
+        // Move the commands so every servo is moving.
+        for (c, v) in [(0, -0.05), (1, 0.02), (2, 0.9)] {
+            sim.world_mut()
+                .get_mut::<sim_models::actuators::Actuators>(e)
+                .unwrap()
+                .channels[c]
+                .command = v;
+        }
+        let n = sim_testkit::count_allocations(|| {
+            for _ in 0..500 {
+                assert!(sim.step().is_none(), "ended at tick {}", sim.tick());
+            }
+        });
+        assert_eq!(n, 0, "run {seed} allocated");
+        let imu = sim.world().get::<sim_models::sensors::Imu>(e).unwrap();
+        assert!(imu.valid && imu.gyro != glam::DVec3::ZERO);
+        sim.reset();
+    }
+}
