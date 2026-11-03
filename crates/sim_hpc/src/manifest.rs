@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use sim_core::{ParamValues, Scenario};
-use sim_schema::io::{Table, TableError, TableRow, read_parquet};
+use sim_schema::io::{Table, TableError, TableRow, read_parquet_bytes};
 use sim_schema::{FileHeader, ManifestRow};
 
 /// A manifest read from disk.
@@ -109,11 +109,16 @@ impl Manifest {
     pub fn read(path: &Path) -> Result<Self, ManifestError> {
         let bytes = std::fs::read(path)
             .map_err(|e| ManifestError::Read(format!("{}: {e}", path.display())))?;
+        Self::from_bytes(bytes).map_err(|e| match e {
+            ManifestError::Read(m) => ManifestError::Read(format!("{}: {m}", path.display())),
+            e => e,
+        })
+    }
+
+    /// A manifest from its file's bytes (rank 0 broadcasts them, IB-05), checked like [`Self::read`].
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ManifestError> {
         let hash = hash64(&bytes);
-        let input = std::fs::File::open(path)
-            .map_err(|e| ManifestError::Read(format!("{}: {e}", path.display())))?;
-        let file = read_parquet(input, Table::Manifest)
-            .map_err(|e| ManifestError::Read(format!("{}: {e}", path.display())))?;
+        let file = read_parquet_bytes(bytes, Table::Manifest)?;
         let rows = ManifestRow::from_batches(&file.batches)?;
         let param_keys = file
             .dynamic

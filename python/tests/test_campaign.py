@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from datetime import datetime, timezone
+
 from saber import campaign
 from saber.campaign import (
     CampaignConfig,
@@ -50,7 +52,7 @@ def test_toml_round_trips_every_key():
         requirements="requirements/DRN-HOVER-001.req.ron",
         manifest="sweep_manifest.parquet",
         expected_build_id="a1b2c3d",
-        output=Output(shared_out="campaigns/drn-hover-a/out", scratch_dir="${TMPDIR}/saber"),
+        output=Output(shared_out="campaigns/drn-hover-a/out", scratch_dir="${TMPDIR}/saber", heartbeat_s=2.5),
         execution=Execution(chunk_size=64, flight_recorder_ticks=256, threads=8,
                             snapshot_policy=SnapshotPolicy(base_every=10, adaptive=True, max_per_run=50)),
         crash_policy=CrashPolicy(dump_quota_per_param_set=1, abort_crash_fraction=1.0, canary_chunks=0),
@@ -62,6 +64,9 @@ def test_toml_round_trips_every_key():
     assert data["campaign"]["scene"] == 'scenarios/quad x "gust".scn.ron'
     assert data["execution"]["snapshot_policy"] == {"base_every": 10, "adaptive": True, "max_per_run": 50}
     assert data["checkpoint"]["drain_margin_s"] == 1e-5
+    assert data["output"]["heartbeat_s"] == 2.5
+    # An integer heartbeat reads back as a float, as sim_hpc reads it.
+    assert CampaignConfig.from_toml(text.replace("heartbeat_s = 2.5", "heartbeat_s = 30")).output.heartbeat_s == 30.0
 
 
 def test_reading_refuses_what_sim_hpc_refuses():
@@ -191,3 +196,44 @@ def test_prepare_lays_out_a_self_contained_directory(tmp_path):
     campaign.prepare(tmp_path / "camp", id="proj-a", scene=tmp_path / "camp" / "projectile.scn.ron",
                      sweep=tmp_path / "camp" / "sweep_manifest.parquet")
     assert (tmp_path / "camp" / "sweep_manifest.parquet").read_bytes() == b"manifest"
+
+
+def test_heartbeat_is_read_and_goes_stale(tmp_path):
+    status = {
+        "format": "saber-campaign-status", "campaign_id": "c", "attempt": 0,
+        "started_utc": "2026-11-03T10:00:00Z", "updated_utc": "2026-11-03T10:01:00Z", "heartbeat_s": 15.0,
+        "state": "Running", "abort_reason": None, "abort_detail": None, "ranks": 2,
+        "runs_total": 100, "runs_done": 40, "runs_committed": 32, "setup_errors": 0, "crashes": 3,
+        "chunks_outstanding": 2, "queue_depth": 5,
+        "per_rank": [{"rank": 0, "runs_done": 20, "crashes": 1, "last_seen_utc": None}],
+        "crashes_by_param_set": {"7": 3}, "status_counts": {"Terminated": 37, "CrashedNaN": 3},
+        "req_tallies": {"R-1": {"pass": 30, "fail": 7, "inconclusive": 3}},
+    }
+    (tmp_path / "campaign_status.json").write_text(json.dumps(status))
+    hb = campaign.read_heartbeat(tmp_path)
+    assert (hb.state, hb.runs_done, hb.runs_committed, hb.crashes) == ("Running", 40, 32, 3)
+    assert hb.data["crashes_by_param_set"] == {"7": 3} and not hb.finished
+    at = lambda s: datetime(2026, 11, 3, 10, 1, s, tzinfo=timezone.utc)
+    assert not hb.stale(at(44)) and hb.stale(at(46))
+    status["state"] = "Failed"
+    (tmp_path / "campaign_status.json").write_text(json.dumps(status))
+    assert not campaign.read_heartbeat(tmp_path / "campaign_status.json").stale(at(59))
+    (tmp_path / "x.json").write_text("{}")
+    with pytest.raises(CampaignError, match="not a campaign_status"):
+        campaign.read_heartbeat(tmp_path / "x.json")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in binary is a script")
+def test_an_aborted_run_names_its_reason(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    abort = {"reason": "CrashStorm", "detail": "90 of 120 finished runs crashed or timed out"}
+    (out / "_MANIFEST.json").write_text(json.dumps({"status": "aborted", "abort": abort, "missing": [[40, 119]], "attempts": []}))
+    report = {"ok": False, "exit": 6, "abort": abort, "error": "aborted by the crash policy (CrashStorm): ...",
+              "manifest": str(out / "_MANIFEST.json"), "status": str(out / "campaign_status.json")}
+    run = campaign.run_local("c.toml", sim_hpc=fake_sim_hpc(tmp_path, 6, report))
+    assert run.status is Status.ABORTED and not run.status.resumable
+    assert run.abort == abort and run.heartbeat() is None
+    with pytest.raises(CampaignError, match="crash policy") as e:
+        run.check()
+    assert e.value.status is Status.ABORTED

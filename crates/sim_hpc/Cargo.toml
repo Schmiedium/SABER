@@ -1,6 +1,6 @@
 [package]
 name = "sim_hpc"
-description = "SABER headless cluster runner (MPI + rayon)."
+description = "SABER headless campaign runner (local, or MPI with the mpi feature)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,13 @@ serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
 toml.workspace = true
+bincode.workspace = true
+mpi = { workspace = true, optional = true }
+
+[features]
+# MPI cluster runs (IB-05). Needs an MPI library (OpenMPI or MPICH) and libclang to build; without
+# it `sim_hpc` runs only with `--local`.
+mpi = ["dep:mpi"]
 
 [dev-dependencies]
 bevy_ecs.workspace = true

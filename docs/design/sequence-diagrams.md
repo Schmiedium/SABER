@@ -510,6 +510,8 @@ sequenceDiagram
     end
 ```
 
+As built (step 4a): the flow above with these differences, detailed in subsystems §5.6 and IB-05. Rank 0 reads `campaign.toml` too and broadcasts it with the scene, requirement set and manifest; a missing file or failed preflight on rank 0 is an `Init::Refused` broadcast, not a zero length, and every rank exits with its code instead of `MPI_Abort`. A rank whose load fails (a damaged blob, a parse error) reports it in its `ReadyAck`, and rank 0's broadcast verdict stops every rank before any run. Workers are std threads pulling single runs from the rank's queue of chunks (rayon is not used); the main thread polls every millisecond and asks for the next chunk once no more runs are queued than there are threads. Rank 0 serves its own requests without a message. At the end each rank sends a `NodeReport` once its parts are committed, rank 0 writes `_MANIFEST.json`, then broadcasts the exit code; there is no separate barrier. A rank whose output fails asks for no more work; re-queuing its ranges to healthy ranks is not built, so they stay missing for `--resume`. `tests/ranks.rs` runs this protocol with ranks as threads, `tests/mpi.rs` under `mpiexec -n 1, 2, 4`.
+
 ---
 
 ## 6. Per-worker tick-0 resolution and tick loop
@@ -852,6 +854,8 @@ sequenceDiagram
 ```
 
 Exit code 6 is new, next to the subsystems doc's codes (0 ok, 2 config, 3 build mismatch, 4 I/O, 5 partial, 70 internal). `TAG_ABORT` previously covered only preflight and build mismatch. It now also carries `AbortReason::CrashStorm` and `AbortReason::SetupErrors`.
+
+As built (step 4a): "crashed" in the storm rule means crashed, panicked or timed out (`Timeout` counts, the recommended answer to O8, pending Alex); `SetupError` has only its own rule. The `ChunkRequest` delta also carries runs by `SimStatus` and verdict counts per requirement, which feed the heartbeat. `ChunkAssign` carries global dump counts for the parameter sets this rank reported and for every set whose quota is full, which is how "closed parameter sets" reach the other ranks. After a trip, a rank that is between requests gets `TAG_ABORT`, and a rank whose request is on its way gets `TAG_TERMINATE` with the abort reason as the reply; either way it stops taking runs. A run already started finishes (the 1024-tick in-run check is not built), the open part is committed, and the `NodeReport` and `_MANIFEST.json` follow as drawn. The local runner applies the same policy. Resume restoring the counts from `_MANIFEST.json`, and `--override-crash-policy`, arrive with step 4b.
 
 ---
 

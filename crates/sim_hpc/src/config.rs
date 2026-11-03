@@ -159,10 +159,17 @@ pub struct Output {
     pub scratch_dir: String,
     /// The campaign's output directory on the shared file system.
     pub shared_out: String,
+    /// Rank 0 writes `campaign_status.json` to `shared_out` this often, s (IB-15).
+    #[serde(default = "default_heartbeat")]
+    pub heartbeat_s: f64,
 }
 
 fn default_scratch() -> String {
     "${TMPDIR}".to_owned()
+}
+
+fn default_heartbeat() -> f64 {
+    15.0
 }
 
 /// Why a campaign file was refused.
@@ -237,6 +244,10 @@ impl CampaignConfig {
         }
         if !(c.drain_margin_s.is_finite() && c.drain_margin_s >= 0.0) {
             return bad("checkpoint.drain_margin_s must be finite and not negative");
+        }
+        let h = self.output.heartbeat_s;
+        if !(h.is_finite() && h > 0.0 && h <= 86_400.0) {
+            return bad("output.heartbeat_s must be positive and at most one day");
         }
         Ok(())
     }

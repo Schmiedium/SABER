@@ -26,3 +26,4 @@ auto_resume = 3
 [output]
 scratch_dir = "${TMPDIR}"
 shared_out = "out"
+heartbeat_s = 15.0

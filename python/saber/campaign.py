@@ -28,6 +28,10 @@ code to a `Status` (IB-04):
 | 70, other | `INTERNAL` | |
 | signal | `KILLED` | yes |
 
+While a campaign runs, rank 0 writes `campaign_status.json` (IB-15) to its shared output every
+`output.heartbeat_s`; `read_heartbeat` reads it. A crash storm stops the campaign with exit 6
+(`ABORTED`); `_MANIFEST.json` then names the reason (`LocalRun.abort`) and the kept crash dumps.
+
 PBS and Slurm templates, submit, resume and `auto_resume` arrive with build step 4b; archiving
 workspace 3D models with a campaign (D17) with the studio's model library.
 """
@@ -42,6 +46,7 @@ import os
 import shutil
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -68,6 +73,8 @@ __all__ = [
     "preflight",
     "LocalRun",
     "run_local",
+    "Heartbeat",
+    "read_heartbeat",
 ]
 
 PathArg = str | PathLike[str]
@@ -179,10 +186,12 @@ class Checkpoint:
 
 @dataclass
 class Output:
-    """`[output]`. `scratch_dir` and `shared_out` may use `${VAR}`."""
+    """`[output]`. `scratch_dir` and `shared_out` may use `${VAR}`; rank 0 writes the heartbeat
+    `campaign_status.json` to `shared_out` every `heartbeat_s` seconds (IB-15)."""
 
     shared_out: str
     scratch_dir: str = "${TMPDIR}"
+    heartbeat_s: float = 15.0
 
 
 @dataclass
@@ -313,13 +322,16 @@ class CampaignConfig:
         crash = dict(data.get("crash_policy", {}))
         if "abort_crash_fraction" in crash:
             crash["abort_crash_fraction"] = float(crash["abort_crash_fraction"])
+        output = dict(data["output"])
+        if "heartbeat_s" in output:
+            output["heartbeat_s"] = float(output["heartbeat_s"])
         return cls(
             id=c["id"],
             scene=c["scene"],
             manifest=c["manifest"],
             requirements=c.get("requirements"),
             expected_build_id=c.get("expected_build_id"),
-            output=Output(**data["output"]),
+            output=Output(**output),
             execution=Execution(**execution),
             crash_policy=CrashPolicy(**crash),
             checkpoint=Checkpoint(**checkpoint),
@@ -445,6 +457,20 @@ class LocalRun:
         """Every run committed."""
         return self.status is Status.COMPLETED
 
+    @property
+    def abort(self) -> dict[str, str] | None:
+        """`{"reason", "detail"}` when the crash policy stopped the campaign (`CrashStorm`, `SetupErrors`)."""
+        if self.manifest is not None and self.manifest.get("abort"):
+            return self.manifest["abort"]
+        return self.report.get("abort")
+
+    def heartbeat(self) -> "Heartbeat | None":
+        """The campaign's last `campaign_status.json`, if it was written."""
+        path = self.report.get("status")
+        if not path or not Path(path).is_file():
+            return None
+        return read_heartbeat(path)
+
     def check(self) -> "LocalRun":
         """This run, or `CampaignError` unless it completed."""
         if not self.ok:
@@ -515,4 +541,68 @@ def run_local(
         manifest=manifest,
         shared_out=shared_out,
         stderr=c.stderr,
+    )
+
+
+# --- The heartbeat -------------------------------------------------------------------------------
+
+
+@dataclass
+class Heartbeat:
+    """`campaign_status.json` (IB-15, `sim_schema::CampaignStatus`): rank 0's view of a running campaign.
+
+    `state` is `Starting`, `Running`, `Draining`, `Done` or `Failed`; `data` holds every field,
+    including `per_rank`, `crashes_by_param_set`, `status_counts` and `req_tallies`.
+    """
+
+    campaign_id: str
+    attempt: int
+    state: str
+    started_utc: str
+    updated_utc: str
+    heartbeat_s: float
+    runs_total: int
+    runs_done: int
+    runs_committed: int
+    crashes: int
+    setup_errors: int
+    abort_reason: str | None
+    data: dict[str, Any]
+
+    @property
+    def finished(self) -> bool:
+        """The attempt is over (`Done` or `Failed`)."""
+        return self.state in ("Done", "Failed")
+
+    def stale(self, now: datetime | None = None) -> bool:
+        """An unfinished campaign whose file is older than 3 × `heartbeat_s`: the job may be dead."""
+        if self.finished:
+            return False
+        now = now or datetime.now(timezone.utc)
+        updated = datetime.fromisoformat(self.updated_utc.replace("Z", "+00:00"))
+        return (now - updated).total_seconds() > 3 * self.heartbeat_s
+
+
+def read_heartbeat(path: PathArg) -> Heartbeat:
+    """Read `campaign_status.json`, given the file or the campaign's shared output directory."""
+    p = Path(path)
+    if p.is_dir():
+        p = p / "campaign_status.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if data.get("format") != "saber-campaign-status":
+        raise CampaignError(Status.INVALID, f"{p}: not a campaign_status.json")
+    return Heartbeat(
+        campaign_id=data["campaign_id"],
+        attempt=int(data["attempt"]),
+        state=data["state"],
+        started_utc=data["started_utc"],
+        updated_utc=data["updated_utc"],
+        heartbeat_s=float(data["heartbeat_s"]),
+        runs_total=int(data["runs_total"]),
+        runs_done=int(data["runs_done"]),
+        runs_committed=int(data["runs_committed"]),
+        crashes=int(data["crashes"]),
+        setup_errors=int(data["setup_errors"]),
+        abort_reason=data.get("abort_reason"),
+        data=data,
     )
