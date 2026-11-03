@@ -4,19 +4,24 @@
 //! Design: `docs/design/subsystems-and-interfaces.md` §5.1, §6, §10.1 and
 //! `docs/design/physics-engine-tradeoffs.md`. Build step 1a (`docs/build-plan.md`) provided the
 //! integrators, the clock and the random streams; step 1b adds the ECS World, the tick schedule,
-//! 6DOF and 3DOF bodies, force models, the watchdog, the flight recorder and the state hash.
+//! 6DOF and 3DOF bodies, force models, the watchdog, the flight recorder and the state hash; step
+//! 1c the scenario file (`scene`), the Tick-0 resolver (`parametric`, `distribution`) and the world
+//! frame.
 //! Geometry and contact arrive in step 5d, the fragment pool in step 5e.
 
 pub mod app;
 pub mod body;
 pub mod clock;
+pub mod distribution;
 pub mod dynamics;
 pub mod environment;
 pub mod force;
 pub mod hash;
 pub mod integrator;
+pub mod parametric;
 pub mod recorder;
 pub mod rng;
+pub mod scene;
 pub mod schedule;
 pub mod sink;
 pub mod telemetry;
@@ -45,13 +50,21 @@ pub use app::{
 };
 pub use body::{BodyState, BodyTable, FRAGMENT_BASE, MassProps, PointMass3, RigidBody6, SimId};
 pub use clock::{RateDivider, SimClock};
-pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment};
+pub use distribution::{Distribution, Sampler};
+pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment, WorldFrame};
 pub use force::{ForceModel, Stage, Wrench};
 pub use hash::{RollingHash, RunIdentity, state_hash};
+pub use parametric::{
+    Apply, ParamBinding, ParamBindings, ParamValues, ResolveReport, ResolvedValue, Uncertainties,
+    Uncertainty, ValueSource,
+};
 pub use recorder::FlightRecorder;
 pub use rng::{RngStream, RngStreams, SimRng, StreamHandle};
+pub use scene::{Scenario, SceneEntity, SceneError, SceneMeta};
 pub use schedule::{SimSet, SimTickSchedule};
-pub use sim_schema::{CrashKind, CrashReason, IntegratorKind, SimStatus, TickFrame};
+pub use sim_schema::{
+    CrashKind, CrashReason, FileHeader, Frame, IntegratorKind, Semver, SimStatus, TickFrame,
+};
 pub use sink::{MemorySink, RunOutput, RunSink, SinkError};
 pub use telemetry::{RunningStats, TickEnergy, Welford};
 pub use watchdog::{

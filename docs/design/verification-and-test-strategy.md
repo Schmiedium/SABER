@@ -1,6 +1,6 @@
 # SABER: Verification and Test Strategy
 
-Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2; v0.9 (2026-11-02, build step 1c) names the USSA 1976 and WGS 84 oracles actually used and the scenario-file tests, §7.1). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -541,12 +541,13 @@ The minimum oracle set per plugin. Each line names the rung from §5.
 | Item | Oracle | Rung |
 |---|---|---|
 | Quaternion algebra, exponential map, frames NED/ENU/ECEF round-trip | identities, property tests | 1, 6 |
-| USSA 1976 atmosphere | published table at standard altitudes | 9 |
-| WGS 84 gravity, J2 | published values; flat-Earth limit | 9, 5 |
+| USSA 1976 atmosphere | published table at standard altitudes. As built: the PDAS COESA 1976 tables (pdas.com `atmosTable1SI`, `atmosTable2SI`) to one unit in their last printed digit from 0 to 20 km (above that they drift from the standard by more than their print precision), and the standard's own layer-base pressures (22632.1, 5474.89, 868.019, 110.9063, 66.9389, 3.95642 Pa) to half a unit | 9 |
+| WGS 84 gravity, J2 | published values; flat-Earth limit. As built: the WGS 84 normal gravity (Somigliana) at the equator and poles to 1e-7 relative once the J4 radial term is added to the model's J2 field (J2 alone within 2e-5), the gradient of the J2 potential, a short drop under J2 against the flat-Earth closed form, and the geodetic-height round trip | 9, 5 |
 | Rotating Earth: dropped mass eastward deflection `≈ ⅓ ω g t³ cos φ` | first-order formula, asymptotic | 1, 5 |
 | Dryden turbulence | spectrum of a long seeded realization vs the MIL-HDBK-1797 PSD (statistical) | Statistical |
 | `AeroTable` interpolation | exact at breakpoints, linear between, clamping/extrapolation policy, monotonic input stays monotonic | 1, 6 |
-| `SimRng` substreams | R9, distribution tests (KS) on each sampler | 4.2, Statistical |
+| `SimRng` substreams | R9, distribution tests (KS) on each sampler. As built: KS at α = 1e-3 with 20 000 draws for every distribution plain and truncated, the far-tail truncated-normal mean against Simpson's rule, monotone in `u`, one 64-bit draw per sample | 4.2, Statistical |
+| Scenario file and Resolver (IB-01) | export then import bit-exact; `scene_hash` unchanged by comments, layout, entity keys and component order and changed by any value; every `SceneError` variant from a broken file; bindings take defaults or manifest values, uncertainties drawn in `SimId` order, a reused World resolves afresh; a scenario loaded from disk runs to ground impact at the closed-form tick | unit, 1 |
 | `FlightRecorder` | order, wrap, zero allocations after Tick 0 | unit |
 | Watchdog | injected NaN and energy spike flag the right entity and tick | unit |
 

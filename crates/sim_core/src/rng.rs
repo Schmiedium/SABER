@@ -86,6 +86,11 @@ impl RngStream {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// Uniform in `(0, 1)` with 53 random bits, never exactly 0 or 1 (for inverse-CDF sampling).
+    pub fn next_open01(&mut self) -> f64 {
+        ((self.next_u64() >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64)
+    }
+
     /// Uniform in `[lo, hi)`.
     pub fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.next_f64()

@@ -17,6 +17,7 @@ sim_models.workspace = true
 sim_verify = { workspace = true, features = ["ecs"] }
 sim_schema.workspace = true
 sim_assets.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "saber-cli"

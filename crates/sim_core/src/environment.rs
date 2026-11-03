@@ -108,3 +108,7 @@ impl Environment for UniformEnvironment {
 /// The World's environment model.
 #[derive(Resource)]
 pub struct SimEnvironment(pub Box<dyn Environment>);
+
+/// The world frame the scenario declares (IB-01, subsystems §10.3); ENU for a World built in code.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorldFrame(pub sim_schema::Frame);
