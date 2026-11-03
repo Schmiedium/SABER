@@ -581,7 +581,7 @@ sequenceDiagram
     end
 
     alt Reached max_ticks still Running
-        Worker->>Worker: SimStatus = Timeout
+        Worker->>Worker: SimStatus = at_max_ticks (Completed by default, or Timeout; D19)
     end
     Worker->>Telemetry: Finalize RunningStats into summary row (status, total_ticks, wall_time_ms)
     Worker->>CVerify: Finalize per-requirement metric and pass/fail columns into summary row

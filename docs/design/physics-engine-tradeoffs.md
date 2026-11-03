@@ -8,6 +8,8 @@ scale uses the old and new state, DOP853's composite estimator, first-same-as-la
 tick, `SubstepLimit` and non-finite errors, Fixed-mode estimate weights, `atol.model`, how
 semi-implicit Euler uses state classes, and the interface as built (§10.7). Dense output moves to the
 contact step.
+v1.2 (2026-11-02, build step 1b): §4.3 records the kernel's rigid-body dynamics and force-model interface
+as built; §10.2 names the body behind a `SubstepLimit`; §10.3 gives the packed state layout.
 Companion to `subsystems-and-interfaces.md` (§5.1 `sim_core`, §5.2 `sim_models`, §6 tick pipeline,
 IB-16 fragmentation, G8) and `flight-dynamics-sources.md`.
 
@@ -199,6 +201,22 @@ pub fn rk4_step(s: &mut State6, t: f64, dt: f64, mp: &MassProps, fm: &dyn ForceM
 ```
 
 No reset, no persistence rules, no velocity caps, and the force tracks the state within the step.
+
+**As built (step 1b).** The sketch above became `sim_core::dynamics` with these differences:
+
+- One packed state for all authored bodies (§10.3), crossed by the World's integrator, not a per-body
+  `rk4_step`. The stage state a force model sees is `BodyState { position, velocity, attitude, body_rates }`;
+  for 3DOF bodies the attitude is the identity and the rates are zero.
+- `ForceModel` has three methods: `setup` (Tick 0, may allocate), `prepare` (once per tick: copy inputs held
+  constant over the tick out of the World and draw the tick's random numbers) and
+  `eval(&self, stage: &Stage, out: &mut [Wrench])`, which adds a force (world frame) and a moment (body frame)
+  for each body the model acts on. The kernel sums the models in registration order and adds the
+  environment's gravity itself.
+- The quaternion derivative uses the raw integrated quaternion, `q̇ = ½ q ⊗ (0, ω)`; the attitude handed to
+  force models at a stage is normalised, since rotating vectors needs a unit quaternion. Quaternions are
+  renormalised after every accepted step.
+- The inertia tensor may be full (not only principal); its inverse is computed once at Tick 0 after a
+  finite, symmetric, positive-definite check.
 
 ---
 
@@ -639,7 +657,7 @@ flowchart LR
   test still fails at `h_min`, the run ends with `CrashedSolver(StepSizeUnderflow)`, recorded like any other
   crash (seq §8), because that almost always means a modelling problem (stiffness, discontinuous model).
   More than `max_substeps_per_tick` step attempts (accepted and rejected) in one tick ends the run with
-  `CrashedSolver(SubstepLimit)`. A non-finite error norm counts as a rejection; if it is still non-finite
+  `CrashedSolver(SubstepLimit)`, naming the body that set the last attempt's error. A non-finite error norm counts as a rejection; if it is still non-finite
   at `h_min`, the run ends as `CrashedNaN` (`CrashKind::NonFinite`), not as a solver failure, and the body
   that produced it is named. The state is left at the last accepted substep. In `Fixed` mode the
   integrator does not judge; the watchdog catches non-finite state.
@@ -654,7 +672,9 @@ flowchart LR
   speed, battery charge, actuator lag states). Each component class gets its own `atol`
   (e.g. 1 mm, 1 mm/s, 1e-8, 1e-6 rad/s, and `model` for model states, default 1e-6) so metres and
   quaternion components are not compared raw. The kernel describes the packed state at Tick 0 as a
-  `StateLayout`: a `StateClass` per component and one group per body.
+  `StateLayout`: a `StateClass` per component and one group per body. Bodies are packed in `SimId` order,
+  13 components per 6DOF body (`p`, `v`, `q` as `[w, x, y, z]`, `ω`) and 6 per 3DOF body (`p`, `v`), so a
+  solver failure's group index is the body's slot in the body table.
 - **Fragments are excluded.** `PointMass3` fragments (up to 30k) always use their own fixed integrator
   (`SemiImplicitEuler` or `Rk4`, set in the fragment config) at the tick dt. They do not couple back, and
   letting 30k fragments drive the step size of the main bodies would waste most of the CPU.

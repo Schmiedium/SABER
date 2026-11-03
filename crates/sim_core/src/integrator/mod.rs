@@ -206,7 +206,7 @@ impl ErrorNorm {
 }
 
 /// One method's single step. The [`Integrator`] drives it across ticks.
-trait Stepper: Send {
+trait Stepper: Send + Sync {
     /// Attempt one step of size `h` from `(t, y)`, writing the candidate to `y_new`. `t_end` is the
     /// exact end time (the tick boundary on the last substep), used for stages with `c = 1`.
     /// Returns the local error estimate if the method has one.
@@ -513,7 +513,8 @@ pub struct SolverFailure {
     pub t: f64,
     /// Size of the failing step attempt.
     pub h: f64,
-    /// The state group (body) with the largest or first non-finite error, if known.
+    /// The state group (body) with the largest or first non-finite error of the failing attempt
+    /// (for `SubstepLimit`, of the last attempt made), if known.
     pub group: Option<usize>,
 }
 
@@ -720,6 +721,8 @@ impl Integrator {
         let mut t = t0;
         let mut attempts = 0u32;
         let mut after_reject = false;
+        // The body that set the most recent attempt's error, named if the budget runs out.
+        let mut last_group = None;
         loop {
             let remaining = t1 - t;
             let last = remaining <= (h * LAND_STRETCH).min(h_max);
@@ -731,7 +734,7 @@ impl Integrator {
                     kind: CrashKind::SubstepLimit,
                     t,
                     h: h_try,
-                    group: None,
+                    group: last_group,
                 });
             }
             let est = self
@@ -739,6 +742,7 @@ impl Integrator {
                 .attempt(sys, &self.norm, t, h_try, t_end, y, &mut self.y_new)
                 .expect("adaptive mode is validated to have an error estimate");
             let err = est.norm;
+            last_group = Some(est.group);
             if !err.is_finite() {
                 if h_try <= h_min {
                     return Err(SolverFailure {

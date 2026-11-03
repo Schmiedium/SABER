@@ -1,6 +1,6 @@
 # SABER build plan
 
-Status: v1.0 (2026-11-02). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
+Status: v1.1 (2026-11-02; v1.1 marks steps 1a and 1b done, adds O8 and records D19). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
 steps, one reviewable pull request each, in the order they are built. Each step names its scope, the
 design sections it implements, and the test that proves it done (its exit criterion, in the roadmap's
 style). Design changes ride in the same PR as the code (`CONTRIBUTING.md`).
@@ -69,9 +69,12 @@ flowchart LR
 | T1: which McCoy projectiles have complete data for M3 | The M3 part of 5a | verification §13 |
 | T2: exact `H`, `T` definitions and signs for the M2 linear-theory oracle | The M2 part of 5a | verification §13 |
 | T4: access to STANAG 4355 | An optional modified-point-mass reference in 5a | verification §13 |
+| O8: does a `Timeout` run count against the crash policy (reaching `max_ticks` itself is decided, D19: `at_max_ticks`, default `Completed`) | Step 4a's crash policy and step 4c's verdict statistics; nothing earlier | subsystems §11 |
 
 ## Done
 
 | Step | PR |
 |---|---|
 | Scaffold (workspace, CI, design-change loop, D18 rename) | #1 |
+| 1a Integrators, clock, random streams, schema enums, `Tol` | #2 |
+| 1b ECS kernel, 6DOF and 3DOF bodies, watchdog, recorder, state hash | #3 |
