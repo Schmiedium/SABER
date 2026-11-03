@@ -7,7 +7,7 @@
 //! 6DOF and 3DOF bodies, force models, the watchdog, the flight recorder and the state hash; step
 //! 1c the scenario file (`scene`), the Tick-0 resolver (`parametric`, `distribution`) and the world
 //! frame; step 2 the per-tick event channel (`events`) and field reads for verification probes
-//! (`field`).
+//! (`field`); step 3b the run's Tier 2 and 3 log (`telemetry::TelemetryLog`).
 //! Geometry and contact arrive in step 5d, the fragment pool in step 5e.
 
 pub mod app;
@@ -77,7 +77,9 @@ pub use sim_schema::{
     CrashKind, CrashReason, FileHeader, Frame, IntegratorKind, Semver, SimStatus, TickFrame,
 };
 pub use sink::{MemorySink, RunOutput, RunSink, SinkError};
-pub use telemetry::{RunningStats, TickEnergy, Welford};
+pub use telemetry::{
+    LoggedEvent, RunningStats, SnapshotSample, TelemetryConfig, TelemetryLog, TickEnergy, Welford,
+};
 pub use watchdog::{
     MaxTicksOutcome, RunStatus, StopRequests, TerminationPolicy, WatchdogConfig, sim_running,
 };

@@ -719,6 +719,8 @@ sequenceDiagram
 
 Because every part is renamed into place, a reader on `SharedFS` never sees a half-written file under its final name, and `Analyze` ignores `.tmp` and `.partial` files.
 
+As built (step 3b, `sim_hpc --local`): this flow without the MPI main thread. A part opens with its first run and closes on the interval even while idle; the details are in subsystems IB-06 and IB-07. The SIGTERM path arrives with step 4b.
+
 ---
 
 
@@ -793,6 +795,8 @@ sequenceDiagram
         Note over Worker: Capture is wrapped in its own catch_unwind and falls back to a status-only row
     end
 ```
+
+As built (step 3b): one message per run carries the summary row and the optional dump, so a dump never travels without its row. A panic drops the World and the next run on that thread builds a new one; frames are read from the recorder after the panic, so the dump holds every frame committed before it (the in-progress frame is never committed, so none is partial).
 
 ### 8.2 Campaign crash policy on rank 0
 

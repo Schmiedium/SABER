@@ -306,8 +306,10 @@ mod crash;
 mod header;
 #[cfg(feature = "io")]
 pub mod io;
+mod ranges;
 mod rows;
 pub use crash::{CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump};
+pub use ranges::RangeSet;
 pub use rows::{CampaignVerdictRow, EventRow, ImpactRow, ManifestRow, SnapshotRow, SummaryRow};
 
 /// This crate's version, which is SABER's (`FileHeader::saber_version`).
@@ -325,6 +327,12 @@ pub fn build_id() -> String {
         env!("SABER_BUILD_TARGET"),
         env!("SABER_BUILD_PROFILE"),
     )
+}
+
+/// The git commit this binary was built from (`unknown` outside a checkout); part of
+/// [`build_id`].
+pub fn build_git_sha() -> &'static str {
+    env!("SABER_BUILD_GIT_SHA")
 }
 
 pub use header::{
