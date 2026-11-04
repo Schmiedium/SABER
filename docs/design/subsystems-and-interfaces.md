@@ -118,6 +118,9 @@ v0.32 (2026-11-03, build step S2-3) records the Requirements tab as built (§5.5
 and compiles it against the open scenario with `sim_verify`'s own Tick-0 compiler (IB-03).
 v0.33 (2026-11-04, build step S3-1) records the Preview Run as built (§5.5), which builds its World the way `sim_hpc`
 does (R7), and `sim_verify`'s read-only `VerifyState::progress` for live requirement status (§5.3).
+v0.34 (2026-11-04, build step S3-2) records the Preview Run's 3D viewport as built (§5.5): `RenderBridge` and
+`Studio.Viewport` as the `sim_studio::viewport` f64 logic and its draw systems, with the floating origin at the
+camera pivot (G7).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -754,6 +757,18 @@ stateDiagram-v2
 **As built (step S2-3).** The Builder's Requirements tab edits the IB-03 `RequirementSet` in `sim_studio::builder::RequirementDoc`; the file form is unchanged. Edits that would fail `RequirementSet::validate` are refused. Lint builds the open scenario's World, runs Tick 0's setup and compiles each metric and requirement with `sim_verify::VerifyState::compile`, the compiler `VerifyPlugin` runs at every Tick 0, so a set that lints clean in the studio compiles in every run of that scenario on the same build. The tab needs nothing new from `sim_core` or `sim_verify`. Details in `sim_studio_ux.md` §7.4.
 
 **As built (step S3-1).** `Studio.LocalRun` is `sim_studio::preview::PreviewRun`: one `SimWorld` built like a `sim_hpc` run (`SimAppBuilder` with `sim_models::add_library`, the requirement set's `VerifyPlugin`, `set_scenario`, a 600-frame flight recorder, `start_with_params` with the row's `ParamValues` and `RunSeed`), stepped in whole ticks from a Bevy system in the studio's frame loop, at most 12 ms of ticks per frame. Nothing the studio shows writes to that World: bodies come from `FlightRecorder::latest`, plotted signals from `FieldPath::read`, requirement status from `VerifyState::progress` (§5.3). R7 is checked against `sim_hpc --local` itself (`sim_hpc` is a dev-dependency of `sim_studio`, never a dependency). A crash keeps the recorder's frames in memory and opens Crash Replay without a file. The 3D viewport is S3-2; the replay scrubber S4. Details in `sim_studio_ux.md` §7.5.
+
+**As built (step S3-2).** `RenderBridge` and `Studio.Viewport` are `sim_studio::viewport` (f64, no rendering) and
+`sim_studio::ui::viewport` (Bevy systems). A `Camera3d` renders into a `ViewportNode`'s image on render layer 1.
+Bodies come from `FlightRecorder::latest` as before, turned into a display frame that is always ENU (NED turned,
+ECEF in the local WGS 84 tangent plane of the first body's Tick-0 position). The floating origin is the camera
+rig's f64 pivot, re-anchored every frame; positions become f32 only as `(p − origin)`, so G7's 100 km case is
+tested in CI. `StudioCameraRig` is `CameraRig` (own orbit rig, not `PanOrbitCamera`, f64 pivot, yaw, pitch and
+distance) and `CameraFocus` holds the target `SimId`, mode (Frame, Follow, Chase, Track) and phase (Free,
+Transition, Locked, Held); both live in one `ViewportState` resource. `StateHud` is a text panel refreshed at
+10 Hz while running. `GroundGridPlugin` is not the full-screen shader yet: the grid is drawn with gizmo lines (three
+decades about the pivot, in f64 then cast) on a plane mesh, and distance labels are pooled UI text placed by
+projecting f64 points (`ViewProjection`). No new kernel API was needed. Details in `sim_studio_ux.md` §7.10.4.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 

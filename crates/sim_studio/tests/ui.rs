@@ -2,7 +2,7 @@
 //! GPU, driven by activating buttons the way a click does. Checks that the Launcher and the shell
 //! spawn, that their buttons are wired to the commands they name, that the shell fills its
 //! regions, that the Builder's panels edit, undo and export the scenario, and that the Preview
-//! Run plays, steps, plots and stops.
+//! Run plays, steps, plots and stops, with its 3D viewport.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +25,10 @@ use sim_studio::ui::launcher::{LauncherRoot, field};
 use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
 use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
+use sim_studio::ui::viewport::{
+    BodyVisual, GridLabelSlot, HudPanel, HudText, ViewportCamera, ViewportView,
+};
+use sim_studio::viewport::{FocusMode, FocusPhase, ViewportState};
 use sim_studio::workspace::{Pack, Workspace};
 use sim_studio::{StudioCorePlugin, StudioUiPlugin};
 use sim_studio_ui::KitPlugin;
@@ -544,15 +548,15 @@ fn the_preview_runs_steps_plots_and_stops() {
     }
     assert_eq!(state(&app), AppState::ScenarioBuilder);
 
-    press(&mut app, "▶ Preview F5");
+    press(&mut app, "Preview (F5)");
     assert_eq!(state(&app), AppState::LocalRun);
     assert_eq!(count::<ShellRoot>(&mut app), 1);
     assert_eq!(count::<PendingRegions>(&mut app), 0);
     assert!(preview(&app).playing);
-    press(&mut app, "⏸ Pause");
+    press(&mut app, "Pause");
     assert!(!preview(&app).playing);
     let t0 = tick(&app);
-    press(&mut app, "⏭ Step");
+    press(&mut app, "Step");
     assert_eq!(tick(&app), t0 + 1);
     let status = live(&mut app, Live::Status);
     assert!(
@@ -584,7 +588,7 @@ fn the_preview_runs_steps_plots_and_stops() {
     assert_eq!(channels(&app), before + 1);
     assert_eq!(count::<ChannelPlot>(&mut app), before + 1, "one plot each");
     for _ in 0..3 {
-        press(&mut app, "⏭ Step");
+        press(&mut app, "Step");
     }
     let drawn = {
         let mut q = app.world_mut().query::<&ChannelPlot>();
@@ -599,7 +603,7 @@ fn the_preview_runs_steps_plots_and_stops() {
 
     press(&mut app, "Speed max");
     assert_eq!(preview(&app).speed, Speed::Max);
-    press(&mut app, "▶ Play");
+    press(&mut app, "Play");
     until(&mut app, 20_000, |app| {
         preview(app).run.as_ref().unwrap().status().is_some()
     });
@@ -608,16 +612,16 @@ fn the_preview_runs_steps_plots_and_stops() {
     assert!(run.verdicts().is_some(), "checked against its requirements");
     assert!(!preview(&app).playing);
     assert_eq!(state(&app), AppState::LocalRun);
-    press(&mut app, "⟲ Reset");
+    press(&mut app, "Reset");
     assert_eq!(tick(&app), 0);
-    press(&mut app, "■ Stop");
+    press(&mut app, "Stop");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
     assert!(preview(&app).run.is_none());
 
     // A vehicle with no mass cannot be integrated: the preview crashes into Crash Replay.
     let (_, input) = inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
     submit(&mut app, input, "1e-300");
-    press(&mut app, "▶ Preview F5");
+    press(&mut app, "Preview (F5)");
     until(&mut app, 20_000, |app| state(app) == AppState::CrashReplay);
     let crash = app.world().resource::<LiveCrash>().0.clone().unwrap();
     assert!(crash.status.is_crash(), "{:?}", crash.status);
@@ -630,4 +634,118 @@ fn the_preview_runs_steps_plots_and_stops() {
     labelled(&mut app, "Replay (P)");
     press(&mut app, "Scenario Builder (B)");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
+}
+
+fn view(app: &App) -> &ViewportState {
+    app.world().resource::<ViewportState>()
+}
+
+fn shown_labels(app: &mut App) -> Vec<String> {
+    let mut q = app
+        .world_mut()
+        .query::<(&GridLabelSlot, &Text, &Visibility)>();
+    q.iter(app.world())
+        .filter(|(_, _, v)| **v != Visibility::Hidden)
+        .map(|(_, t, _)| t.0.clone())
+        .collect()
+}
+
+fn key(app: &mut App, code: KeyCode) {
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    let window = {
+        let mut q = app.world_mut().query_filtered::<Entity, With<Window>>();
+        q.single(app.world()).unwrap()
+    };
+    for state in [ButtonState::Pressed, ButtonState::Released] {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: code,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat: false,
+            window,
+        });
+        app.update();
+    }
+    for _ in 0..2 {
+        app.update();
+    }
+}
+
+/// The 3D viewport (§7.10): the preview's camera renders into a viewport node in the center;
+/// every body gets a sphere; the camera follows the first body and locks on it; the HUD shows
+/// its state; the ground carries distance labels at multiples of 10 m; the toolbar and keys
+/// change the focus mode, hide the HUD and the grid, and free the camera.
+#[test]
+fn the_viewport_follows_a_body_and_marks_the_ground() {
+    let dir = scratch("viewport");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    press(&mut app, "Preview (F5)");
+    press(&mut app, "Pause");
+    assert_eq!(state(&app), AppState::LocalRun);
+    assert_eq!(count::<ViewportView>(&mut app), 1);
+    let camera = app.world().resource::<ViewportCamera>().0;
+    assert!(app.world().get::<Camera3d>(camera).is_some());
+    let bodies = preview(&app).run.as_ref().unwrap().bodies().len();
+    assert_eq!(count::<BodyVisual>(&mut app), bodies);
+
+    assert_eq!(view(&app).focus.target, Some(1));
+    assert_eq!(view(&app).focus.mode, FocusMode::Follow);
+    until(&mut app, 5_000, |app| {
+        view(app).focus.phase == FocusPhase::Locked
+    });
+    let target = preview(&app).run.as_ref().unwrap().bodies()[0].pos;
+    // The quadrotor flies in NED: the camera works in east, north, up.
+    assert_eq!(view(&app).rig.pivot, view(&app).frame.position(target));
+    assert!(view(&app).rig.pivot.z > 0.0, "hovering above the ground");
+    app.update();
+    assert!(live(&mut app, Live::Focus).starts_with("Focus #1 · Follow · locked"));
+    let hud = {
+        let mut q = app.world_mut().query_filtered::<&Text, With<HudText>>();
+        q.single(app.world()).unwrap().0.clone()
+    };
+    assert!(hud.starts_with("#1   rel. to world origin"), "{hud}");
+    assert!(hud.contains("paused"), "{hud}");
+
+    let labels = shown_labels(&mut app);
+    assert!(!labels.is_empty());
+    assert!(
+        labels
+            .iter()
+            .all(|l| l.ends_with(" m") || l.ends_with(" km")),
+        "{labels:?}"
+    );
+
+    press(&mut app, "Mode: Chase");
+    assert_eq!(view(&app).focus.mode, FocusMode::Chase);
+    assert_eq!(view(&app).focus.target, Some(1));
+    press(&mut app, "HUD");
+    assert!(!view(&app).hud);
+    let hidden = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<HudPanel>>();
+        q.iter(app.world()).all(|v| *v == Visibility::Hidden)
+    };
+    assert!(hidden);
+    press(&mut app, "Grid");
+    assert!(shown_labels(&mut app).is_empty());
+    key(&mut app, KeyCode::KeyH);
+    assert!(view(&app).hud, "H shows the HUD again");
+    key(&mut app, KeyCode::Escape);
+    assert_eq!(view(&app).focus.phase, FocusPhase::Free);
+    key(&mut app, KeyCode::KeyF);
+    assert_eq!(view(&app).focus.mode, FocusMode::Frame);
+    assert_ne!(view(&app).focus.phase, FocusPhase::Free);
+
+    press(&mut app, "Stop");
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+    assert_eq!(count::<BodyVisual>(&mut app), 0);
 }

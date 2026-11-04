@@ -147,7 +147,7 @@ pub fn spawn_for(
             action(
                 &mut commands,
                 title_bar,
-                button("▶ Preview F5"),
+                button("Preview (F5)"),
                 StudioCommand::StartPreview,
             );
             action(
@@ -253,6 +253,8 @@ pub fn fill_regions(
     panel: Res<ReqPanel>,
     preview: Res<PreviewState>,
     theme: Res<StudioTheme>,
+    view: Res<crate::viewport::ViewportState>,
+    camera: Option<Res<super::viewport::ViewportCamera>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     for (dock_entity, PendingRegions(state)) in &pending {
@@ -285,6 +287,8 @@ pub fn fill_regions(
                     docs: &docs,
                     mode: theme.mode,
                     log: &log,
+                    view: &view,
+                    camera: camera.as_ref().map(|c| c.0),
                 };
                 super::preview::fill(&mut commands, &mut images, body, kind, &inputs);
                 continue;

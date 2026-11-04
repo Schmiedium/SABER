@@ -1,5 +1,5 @@
-//! Preview Run's panels (`sim_studio_ux.md` §7.5) in the shell's dock: the toolbar and the live
-//! state in the center (until the viewport of step S3-2), the read-only Outliner on the left,
+//! Preview Run's panels (`sim_studio_ux.md` §7.5) in the shell's dock: the toolbar, the 3D
+//! viewport (`super::viewport`) and the live state in the center, the read-only Outliner on the left,
 //! live requirements and performance on the right, and the plots above the Console. The layout
 //! is rebuilt on [`PreviewChanged`]; the live texts and plots are updated in place every frame.
 
@@ -15,6 +15,7 @@ use super::{action, child};
 use crate::actions::{BuilderDoc, PreviewChanged, PreviewState, StudioCommand};
 use crate::preview::{ENERGY, ParamChoice, PreviewRun, Speed};
 use crate::state::AppState;
+use crate::viewport::ViewportState;
 
 /// Field ids of the toolbar and the plots.
 pub mod preview_field {
@@ -35,6 +36,8 @@ pub enum Live {
     Requirements,
     /// Wall time per tick and per run.
     Perf,
+    /// The viewport's focus.
+    Focus,
 }
 
 /// A channel's plot image.
@@ -94,6 +97,10 @@ pub struct PanelInputs<'a> {
     pub mode: ThemeMode,
     /// The Console's history.
     pub log: &'a ToastLog,
+    /// The viewport's camera and focus.
+    pub view: &'a ViewportState,
+    /// The camera rendering the viewport, once spawned.
+    pub camera: Option<Entity>,
 }
 
 /// Fill one dock region of the Preview Run.
@@ -109,6 +116,8 @@ pub fn fill(
         docs,
         mode,
         log,
+        view,
+        camera,
     } = *inputs;
     match kind {
         DockRegion::Left => {
@@ -126,15 +135,26 @@ pub fn fill(
             toolbar(commands, body, preview);
             let s = child(commands, body, mono(""));
             commands.entity(s).insert(Live::Status);
+            super::viewport::toolbar(commands, body, view, preview);
+            let f = child(commands, body, muted(""));
+            commands.entity(f).insert(Live::Focus);
+            if let Some(camera) = camera {
+                super::viewport::spawn_view(commands, body, camera, view);
+            }
+            child(
+                commands,
+                body,
+                muted(
+                    "Drag to orbit, right-drag to pan, wheel to zoom; F frames the focus, Shift+F follows it, H the HUD, Esc frees the camera.",
+                ),
+            );
             child(commands, body, heading("Bodies"));
             let b = child(commands, body, mono(""));
             commands.entity(b).insert(Live::Bodies);
             child(
                 commands,
                 body,
-                muted(
-                    "Positions in the scenario's world frame, m; velocities, m/s. The 3D viewport arrives with step S3-2.",
-                ),
+                muted("Positions in the scenario's world frame, m; velocities, m/s."),
             );
         }
         DockRegion::Right => {
@@ -145,7 +165,7 @@ pub fn fill(
                 commands,
                 body,
                 muted(
-                    "✓ pass and ✖ fail once no later tick can change them; … still open. Values are the metric so far, or the signal now.",
+                    "PASS or FAIL once no later tick can change them, open until then. Values are the metric so far, or the signal now.",
                 ),
             );
             child(commands, body, heading("Perf"));
@@ -205,9 +225,9 @@ fn toolbar(commands: &mut Commands, body: Entity, preview: &PreviewState) {
 
     let r = child(commands, body, toolbar_row());
     for (text, command) in [
-        ("▶ Play", StudioCommand::PreviewPlay(true)),
-        ("⏸ Pause", StudioCommand::PreviewPlay(false)),
-        ("⏭ Step", StudioCommand::PreviewStep),
+        ("Play", StudioCommand::PreviewPlay(true)),
+        ("Pause", StudioCommand::PreviewPlay(false)),
+        ("Step", StudioCommand::PreviewStep),
     ] {
         action(commands, r, button(text), command);
     }
@@ -230,8 +250,8 @@ fn toolbar(commands: &mut Commands, body: Entity, preview: &PreviewState) {
             );
         }
     }
-    action(commands, r, button("⟲ Reset"), StudioCommand::PreviewReset);
-    action(commands, r, button("■ Stop"), StudioCommand::StopPreview);
+    action(commands, r, button("Reset"), StudioCommand::PreviewReset);
+    action(commands, r, button("Stop"), StudioCommand::StopPreview);
 }
 
 fn plots(
@@ -296,8 +316,8 @@ fn plots(
 
 fn mark(v: Option<Verdict>) -> &'static str {
     match v {
-        Some(Verdict::Pass) => "✓",
-        Some(Verdict::Fail) => "✖",
+        Some(Verdict::Pass) => "PASS",
+        Some(Verdict::Fail) => "FAIL",
         Some(Verdict::Inconclusive) => "?",
         None => "…",
     }
@@ -311,9 +331,9 @@ pub fn live_text(kind: Live, preview: &PreviewState) -> String {
     match kind {
         Live::Status => {
             let state = match run.status() {
-                Some(s) => format!("■ ended: {s:?}"),
-                None if preview.playing => format!("▶ running {}", preview.speed.label()),
-                None => "⏸ paused".to_owned(),
+                Some(s) => format!("ended: {s:?}"),
+                None if preview.playing => format!("running {}", preview.speed.label()),
+                None => "paused".to_owned(),
             };
             format!(
                 "t = {:.3} s   tick {} / {}   {state}   {} · seed {}",
@@ -365,12 +385,14 @@ pub fn live_text(kind: Live, preview: &PreviewState) -> String {
             (Some(us), Some(s)) => format!("{us:.1} µs / tick\n≈ {s:.2} s / run"),
             _ => "—".to_owned(),
         },
+        Live::Focus => String::new(), // needs the viewport: see `display`
     }
 }
 
 /// Rewrite the live texts and redraw the plots that changed.
 pub fn display(
     preview: Res<PreviewState>,
+    view: Res<ViewportState>,
     theme: Res<StudioTheme>,
     mut texts: Query<(&Live, &mut Text)>,
     mut values: Query<(&ChannelValue, &mut Text), Without<Live>>,
@@ -381,7 +403,11 @@ pub fn display(
         return;
     };
     for (kind, mut text) in &mut texts {
-        let t = live_text(*kind, &preview);
+        let t = if *kind == Live::Focus {
+            super::viewport::focus_text(&view)
+        } else {
+            live_text(*kind, &preview)
+        };
         if text.0 != t {
             text.0 = t;
         }
@@ -426,6 +452,8 @@ pub fn refresh(
     docs: Res<BuilderDoc>,
     theme: Res<StudioTheme>,
     log: Res<ToastLog>,
+    view: Res<ViewportState>,
+    camera: Option<Res<super::viewport::ViewportCamera>>,
     mut images: ResMut<Assets<Image>>,
     bodies: Query<(Entity, &RegionBody)>,
 ) {
@@ -439,6 +467,8 @@ pub fn refresh(
             docs: &docs,
             mode: theme.mode,
             log: &log,
+            view: &view,
+            camera: camera.as_ref().map(|c| c.0),
         };
         fill(&mut commands, &mut images, body, *kind, &inputs);
     }

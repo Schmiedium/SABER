@@ -21,6 +21,7 @@ pub mod preview;
 pub mod recent;
 pub mod state;
 pub mod ui;
+pub mod viewport;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -59,6 +60,7 @@ impl Plugin for StudioCorePlugin {
             .init_resource::<ReqPanel>()
             .init_resource::<PreviewState>()
             .init_resource::<LiveCrash>()
+            .init_resource::<viewport::ViewportState>()
             .insert_resource(Recent::load(self.recent_path.clone()))
             .init_resource::<CurrentWorkspace>()
             .init_resource::<CurrentScenario>()
@@ -90,7 +92,10 @@ const SHELL_STATES: [AppState; 5] = [
 
 impl Plugin for StudioUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_ui)
+        app.init_gizmo_group::<ui::viewport::GridGizmos>()
+            .init_gizmo_group::<ui::viewport::BodyGizmos>()
+            .add_systems(Startup, (setup_ui, ui::viewport::setup))
+            .add_systems(OnEnter(AppState::LocalRun), ui::viewport::spawn_camera)
             .add_systems(
                 OnEnter(AppState::Launcher),
                 ui::launcher::spawn.after(actions::refresh_campaigns),
@@ -107,6 +112,17 @@ impl Plugin for StudioUiPlugin {
                     ui::preview::display
                         .after(actions::run_preview)
                         .run_if(in_state(AppState::LocalRun)),
+                    actions::viewport_keys.run_if(in_state(AppState::LocalRun)),
+                    (
+                        ui::viewport::step_camera,
+                        ui::viewport::draw_bodies,
+                        ui::viewport::draw_grid,
+                        ui::viewport::draw_hud,
+                    )
+                        .chain()
+                        .after(actions::run_preview)
+                        .run_if(in_state(AppState::LocalRun)),
+                    ui::viewport::restyle,
                 ),
             );
         for s in SHELL_STATES {

@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S3-1. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S3-2. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -50,7 +50,9 @@ aircraft.
 > Requirements tab edits the scenario's `.req.ron` (metrics, requirements, campaign rules) and compiles it against
 > the scene as a run would. F5 previews the scenario in the studio: one run built exactly as the cluster builds it
 > (same final state hash), with parameter corners and seed, play, pause, step and speeds, live body states,
-> requirements and plots; a crash opens Crash Replay from memory. The 3D viewport and the other screens come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> requirements and plots; a crash opens Crash Replay from memory. Its 3D viewport draws the bodies with velocity
+> arrows over a graph-paper ground labelled every 10 m, a camera that frames, follows, chases or tracks a body, and
+> a large position and velocity read-out. Replay, models and Campaign Setup come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

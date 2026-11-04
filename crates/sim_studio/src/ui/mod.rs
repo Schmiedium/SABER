@@ -7,6 +7,7 @@ pub mod launcher;
 pub mod preview;
 pub mod requirements;
 pub mod shell;
+pub mod viewport;
 
 use bevy::prelude::*;
 use bevy::scene::{CommandsSceneExt, Scene};

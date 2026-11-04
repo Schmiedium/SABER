@@ -24,7 +24,7 @@ pub use bevy;
 /// What panels need in scope: the scene macros, the facade, tokens and kit events.
 pub mod prelude {
     pub use crate::dock::{DockLayout, DockLayoutChanged, DockRegion, DockSide, dock};
-    pub use crate::theme::{StudioTheme, ThemeMode, Token, token};
+    pub use crate::theme::{StudioTheme, ThemeColors, ThemeMode, Token, token};
     pub use crate::toast::{Toast, ToastLevel, ToastLog, toast_stack};
     pub use crate::widgets::{
         FieldId, Fields, KitActivated, KitChanged, KitSubmit, Status, button, column, heading,

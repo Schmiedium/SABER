@@ -6,6 +6,7 @@
 //! ([`crate::widgets::status_mark`] adds ✓ ✖ ◐ ⚠).
 
 use bevy::color::{Alpha, Color, LinearRgba, Luminance, Srgba};
+use bevy::ecs::system::SystemParam;
 use bevy::feathers::dark_theme::create_dark_theme;
 use bevy::feathers::theme::{SemanticToken, SurfaceLevel, ThemeProps, UiTheme};
 use bevy::feathers::tokens::{self as ft, semantic};
@@ -316,6 +317,20 @@ pub fn contrast(a: Color, b: Color) -> f32 {
     };
     let (la, lb) = (l(a), l(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// The current theme's colors for what is drawn outside the widgets (the 3D viewport's grid and
+/// gizmos), so screens need not name Feathers types.
+#[derive(SystemParam)]
+pub struct ThemeColors<'w> {
+    ui: Res<'w, UiTheme>,
+}
+
+impl ThemeColors<'_> {
+    /// The color of `token` in the current theme.
+    pub fn color(&self, token: &Token) -> Color {
+        self.ui.color(token)
+    }
 }
 
 /// Keep Feathers' `UiTheme` in step with [`StudioTheme`].
