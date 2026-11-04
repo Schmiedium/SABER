@@ -122,6 +122,8 @@ v0.34 (2026-11-04, build step S3-2) records the Preview Run's 3D viewport as bui
 `Studio.Viewport` as the `sim_studio::viewport` f64 logic and its draw systems, with the floating origin at the
 camera pivot (G7).
 v0.35 (2026-11-04, build step S3-3) records the kit's bundled symbol font (§5.5).
+v0.36 (2026-11-04, build step S4-1) records Crash Replay as built (§5.5): recorded frames only, no re-simulation
+(D15), with no change to IB-10.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -774,6 +776,15 @@ projecting f64 points (`ViewProjection`). No new kernel API was needed. Details 
 **As built (step S3-3).** `Studio.UiKit` bundles a symbol font (DejaVu Sans 2.37's symbol and arrow blocks, in
 `crates/sim_studio_ui/assets/fonts/` with its license) and puts it behind every text's font, so the symbols Fira
 lacks draw instead of empty boxes. Details in `sim_studio_ux.md` §10.2.
+
+**As built (step S4-1).** Crash Replay is `sim_studio::replay` (frames, playhead, jumps, tracks, growth; no UI) and
+`sim_studio::ui::replay`. It reads a dump with `CrashReader::read` by its index entry (IB-10, unchanged) or takes a
+crashed preview's frames from memory, and shows each `TickFrame` exactly as recorded: nothing is re-simulated, so
+a dump from another build replays exactly (D15). The scenario is found by `scene_hash` among the workspace's
+scenarios and the files beside the stream, for its world frame and `watchdog.energy_max_j`; the Tick-0 resolver of
+`Architecture.md` §6.4 is not run, because the viewport draws snapshots directly. `Studio.Viewport` now reads a
+`ViewSource` resource that Preview or Crash Replay fills, so both screens share one viewport. Run Replay and
+re-simulation are step S4-2. Details in `sim_studio_ux.md` §7.9.1.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 

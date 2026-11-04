@@ -187,6 +187,20 @@ fn focus_modes_move_the_camera_as_specified() {
         FocusPhase::Held,
         "a non-finite target is gone too"
     );
+    update_focus(&mut rig, &mut focus, None, 1.0 / 60.0);
+    assert_eq!(focus.phase, FocusPhase::Held, "still gone");
+    // Back (a replay scrubbed to before the crash): glided to and locked on again.
+    let back = TargetState {
+        pos: DVec3::new(-30.0, 5.0, 2.0),
+        vel: DVec3::ZERO,
+    };
+    update_focus(&mut rig, &mut focus, Some(back), 1.0 / 60.0);
+    assert_eq!(focus.phase, FocusPhase::Transition);
+    for _ in 0..240 {
+        update_focus(&mut rig, &mut focus, Some(back), 1.0 / 60.0);
+    }
+    assert_eq!(focus.phase, FocusPhase::Locked);
+    assert_eq!(rig.pivot, back.pos);
     focus.release();
     assert_eq!(focus.phase, FocusPhase::Free);
 }

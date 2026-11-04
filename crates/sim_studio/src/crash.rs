@@ -1,10 +1,11 @@
 //! Opening a crash-dump stream (`*_crashes.zst`, IB-10) from the Launcher: the header and the
-//! index, without decoding any dump. Crash Replay itself (scrubbing the frames) is step S4.
+//! index, without decoding any dump; [`read_dump`] decodes one for Crash Replay (`crate::replay`).
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
+use sim_schema::CrashDump;
 use sim_schema::io::crashes::{CrashIndexEntry, CrashReader};
 
 /// An opened crash stream.
@@ -41,4 +42,14 @@ impl OpenCrash {
     pub fn other_build(&self) -> bool {
         !self.build_id.is_empty() && self.build_id != sim_schema::build_id()
     }
+}
+
+/// Decode the dump `entry` of the stream at `path`.
+pub fn read_dump(path: &Path, entry: &CrashIndexEntry) -> Result<CrashDump, String> {
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut reader =
+        CrashReader::open(BufReader::new(file)).map_err(|e| format!("{}: {e}", path.display()))?;
+    reader
+        .read(entry)
+        .map_err(|e| format!("{}: run {}: {e}", path.display(), entry.run_id))
 }

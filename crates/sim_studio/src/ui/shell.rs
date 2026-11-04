@@ -1,7 +1,7 @@
 //! The shell every workspace screen shares (`sim_studio_ux.md` §6): title bar with breadcrumb,
 //! activity rail, [`dock`] with its regions, and the status bar ("truth line"). The screens
-//! themselves arrive in S2–S6; until then each state shows what it will hold, and Crash Replay
-//! lists the dumps of the stream it opened.
+//! themselves fill the dock (Scenario Builder, Preview Run, Crash Replay); a state whose screen
+//! is not built yet says which step brings it.
 
 use bevy::prelude::*;
 use bevy::scene::{CommandsSceneExt, SceneList, bsn, bsn_list};
@@ -246,7 +246,7 @@ pub fn fill_regions(
     regions: Query<(Entity, &DockRegion, &ChildOf)>,
     parents: Query<&ChildOf>,
     crash: Res<CurrentCrash>,
-    live_crash: Res<LiveCrash>,
+    replay: Res<crate::replay::ReplayState>,
     scenario: Res<CurrentScenario>,
     log: Res<ToastLog>,
     docs: Res<BuilderDoc>,
@@ -293,6 +293,18 @@ pub fn fill_regions(
                 super::preview::fill(&mut commands, &mut images, body, kind, &inputs);
                 continue;
             }
+            if *state == AppState::CrashReplay {
+                let inputs = super::replay::ReplayInputs {
+                    replay: &replay,
+                    crash: &crash,
+                    view: &view,
+                    camera: camera.as_ref().map(|c| c.0),
+                    mode: theme.mode,
+                    log: &log,
+                };
+                super::replay::fill(&mut commands, &mut images, body, kind, &inputs);
+                continue;
+            }
             match kind {
                 DockRegion::Left => {
                     child(&mut commands, body, heading("Outliner"));
@@ -320,7 +332,7 @@ pub fn fill_regions(
                     }
                     console(&mut commands, body, &log);
                 }
-                DockRegion::Center => center(&mut commands, body, *state, &crash, &live_crash),
+                DockRegion::Center => center(&mut commands, body, *state),
             }
         }
     }
@@ -341,13 +353,7 @@ pub(crate) fn console(commands: &mut Commands, body: Entity, log: &ToastLog) {
     }
 }
 
-fn center(
-    commands: &mut Commands,
-    body: Entity,
-    state: AppState,
-    crash: &CurrentCrash,
-    live_crash: &LiveCrash,
-) {
+fn center(commands: &mut Commands, body: Entity, state: AppState) {
     child(commands, body, title(state.title()));
     if let Some(step) = state.arrives_in() {
         child(
@@ -357,111 +363,6 @@ fn center(
                 "This screen arrives with build step {step} (docs/build-plan.md)."
             )),
         );
-    }
-    if state == AppState::CrashReplay
-        && let Some(c) = &live_crash.0
-    {
-        live_crash_view(commands, body, c);
-        return;
-    }
-    if state == AppState::CrashReplay
-        && let Some(c) = &crash.0
-    {
-        let summary = format!(
-            "{} dump{} · campaign {} · build {}{}",
-            c.index.len(),
-            if c.index.len() == 1 { "" } else { "s" },
-            c.campaign_id.as_deref().unwrap_or("unknown"),
-            if c.build_id.is_empty() {
-                "unknown"
-            } else {
-                &c.build_id
-            },
-            if c.finished {
-                ""
-            } else {
-                " · stream cut short"
-            }
-        );
-        child(commands, body, label(summary));
-        for e in c.index.iter().take(200) {
-            child(
-                commands,
-                body,
-                mono(format!(
-                    "run {:>8}  set {:>6}  seed {:>12}  {:?} ({:?}) at tick {}",
-                    e.run_id, e.param_set_id, e.replicate_seed, e.status, e.kind, e.tick
-                )),
-            );
-        }
-        if c.index.len() > 200 {
-            child(
-                commands,
-                body,
-                muted(format!("… and {} more", c.index.len() - 200)),
-            );
-        }
-    }
-}
-
-/// A preview that crashed, from memory: how and when it ended, and the bodies in its last
-/// recorded frames (the scrubber over all of them arrives with S4).
-fn live_crash_view(commands: &mut Commands, body: Entity, c: &crate::preview::PreviewCrash) {
-    let why = c
-        .reason
-        .as_ref()
-        .map(|r| {
-            if r.detail.is_empty() {
-                format!("{:?}", r.kind)
-            } else {
-                format!("{:?}: {}", r.kind, r.detail)
-            }
-        })
-        .unwrap_or_else(|| "no watchdog reason".to_owned());
-    child(
-        commands,
-        body,
-        status_text(
-            Status::Fail,
-            format!("{:?} at tick {} · {why}", c.status, c.tick),
-        ),
-    );
-    child(
-        commands,
-        body,
-        label(format!(
-            "Preview run, seed {} · {} flight-recorder frame{} kept in memory",
-            c.seed.replicate_seed,
-            c.frames.len(),
-            if c.frames.len() == 1 { "" } else { "s" }
-        )),
-    );
-    for f in c.frames.iter().rev().take(3) {
-        child(
-            commands,
-            body,
-            heading(format!(
-                "Tick {} · t = {:.6} s · energy {:e} J",
-                f.tick, f.t_s, f.total_energy
-            )),
-        );
-        for b in &f.bodies {
-            child(
-                commands,
-                body,
-                mono(format!(
-                    "#{:<4} pos {:e} {:e} {:e}   vel {:e} {:e} {:e}   |F| {:e}",
-                    b.sim_id,
-                    b.pos[0],
-                    b.pos[1],
-                    b.pos[2],
-                    b.lin_vel[0],
-                    b.lin_vel[1],
-                    b.lin_vel[2],
-                    b.force_mag
-                )),
-            );
-        }
     }
 }
 

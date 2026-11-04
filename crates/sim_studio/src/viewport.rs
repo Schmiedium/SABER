@@ -374,12 +374,20 @@ pub fn update_focus(
     target: Option<TargetState>,
     dt: f64,
 ) {
+    let target = target.filter(|t| t.pos.is_finite() && t.vel.is_finite());
+    // A held target that is back (a replay scrubbed to before the crash) is glided to again.
+    if focus.phase == FocusPhase::Held
+        && target.is_some()
+        && let Some(id) = focus.target
+    {
+        focus.set(id, focus.mode, rig);
+    }
     if matches!(focus.phase, FocusPhase::Free | FocusPhase::Held) {
         rig.pivot_vel = DVec3::ZERO;
         rig.distance_vel = 0.0;
         return;
     }
-    let Some(t) = target.filter(|t| t.pos.is_finite() && t.vel.is_finite()) else {
+    let Some(t) = target else {
         focus.phase = FocusPhase::Held;
         rig.pivot_vel = DVec3::ZERO;
         return;
@@ -839,6 +847,27 @@ pub fn velocity_arrow(vel: DVec3, pixel_m: f64) -> DVec3 {
     }
     let px = (30.0 * (1.0 + speed).log2()).min(ARROW_MAX_PX);
     vel / speed * px * pixel_m
+}
+
+/// What the viewport shows this frame: the bodies of a live preview's latest tick, or of the
+/// replay frame under the playhead. Filled by the screen that owns the viewport; the viewport's
+/// systems draw only this.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct ViewSource {
+    /// The bodies, world frame.
+    pub bodies: Vec<BodySnapshot>,
+    /// Simulation time, s.
+    pub t_s: f64,
+    /// Completed ticks.
+    pub tick: u64,
+    /// The HUD's state words: `live`, `paused`, `ended: …`, `frame 12 of 600`.
+    pub state: String,
+    /// The bodies move between frames on their own (a playing run): the HUD then refreshes
+    /// ten times a second instead of every frame.
+    pub moving: bool,
+    /// Where to ring a body in red (Crash Replay's NaN-origin highlight, §7.9): world-frame
+    /// positions, each a flagged body's position or, once that is not finite, its last finite one.
+    pub alarms: Vec<[f64; 3]>,
 }
 
 /// The viewport's state: camera, focus and what is shown (one per studio window).

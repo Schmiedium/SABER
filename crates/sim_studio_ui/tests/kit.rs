@@ -248,6 +248,59 @@ fn plots_draw_a_series_across_the_image() {
     }
 }
 
+/// A track over a fixed range: a level outside the samples shares the axis and draws dashed; a
+/// column marks one item of many, the first at the left edge and the last at the right.
+#[test]
+fn tracks_draw_levels_and_columns() {
+    use sim_studio_ui::plot::{PlotColors, column_of, draw_column, draw_in, draw_level, row_of};
+    let colors = PlotColors {
+        background: [0, 0, 0, 255],
+        line: [255, 0, 0, 255],
+        zero: [0, 0, 255, 255],
+    };
+    let (w, h) = (16u32, 11u32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let at = |px: &[u8], x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    };
+    let range = (0.0, 10.0);
+    assert_eq!(row_of(10.0, h, range), Some(0));
+    assert_eq!(row_of(0.0, h, range), Some(h - 1));
+    assert_eq!(row_of(5.0, h, range), Some(5));
+    for v in [-1.0, 11.0, f64::NAN] {
+        assert_eq!(row_of(v, h, range), None, "{v}");
+    }
+    assert_eq!(row_of(1.0, h, (1.0, 1.0)), None, "an empty range");
+
+    // Samples from 1 to 2 drawn over 0..10 sit low; the level at 8 is dashed above them.
+    let low = [[0.0, 1.0], [1.0, 2.0]];
+    draw_in(&mut px, w, h, &low, Some(range), colors);
+    assert_eq!(at(&px, 0, row_of(1.0, h, range).unwrap()), colors.line);
+    assert_eq!(at(&px, w - 1, row_of(2.0, h, range).unwrap()), colors.line);
+    let y = row_of(8.0, h, range).unwrap();
+    draw_level(&mut px, w, h, y, colors.zero);
+    assert_eq!(at(&px, 0, y), colors.zero);
+    assert_eq!(at(&px, 4, y), colors.background, "a gap in the dashes");
+    draw_level(&mut px, w, h, h, colors.zero); // outside: nothing, no panic
+
+    assert_eq!(column_of(0, 8, w), 0);
+    assert_eq!(column_of(7, 8, w), w - 1);
+    assert_eq!(column_of(99, 8, w), w - 1);
+    assert_eq!(column_of(3, 1, w), 0);
+    draw_column(&mut px, w, h, 5, 2..99, colors.line);
+    assert_eq!(at(&px, 5, 1), colors.background);
+    assert_eq!(at(&px, 5, 2), colors.line);
+    assert_eq!(at(&px, 5, h - 1), colors.line);
+    draw_column(&mut px, w, h, w, 0..h, colors.line); // outside: nothing, no panic
+
+    // No range, or an empty one, leaves the background.
+    draw_in(&mut px, w, h, &low, None, colors);
+    assert!(px.chunks_exact(4).all(|p| p == colors.background));
+    draw_in(&mut px, w, h, &[], Some(range), colors);
+    assert!(px.chunks_exact(4).all(|p| p == colors.background));
+}
+
 /// The whole kit on `DefaultPlugins` without a window system or GPU: text is still laid out and
 /// its glyphs rasterized into font atlases on the CPU.
 fn text_app() -> App {

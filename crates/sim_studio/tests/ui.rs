@@ -1,8 +1,9 @@
 //! The screens themselves, headless (verification §8.3): the full UI stack without a window or a
 //! GPU, driven by activating buttons the way a click does. Checks that the Launcher and the shell
 //! spawn, that their buttons are wired to the commands they name, that the shell fills its
-//! regions, that the Builder's panels edit, undo and export the scenario, and that the Preview
-//! Run plays, steps, plots and stops, with its 3D viewport.
+//! regions, that the Builder's panels edit, undo and export the scenario, that the Preview Run
+//! plays, steps, plots and stops, with its 3D viewport, and that a crashed preview scrubs in
+//! Crash Replay.
 
 use std::path::{Path, PathBuf};
 
@@ -19,16 +20,18 @@ use sim_studio::actions::{
 };
 use sim_studio::builder::ReqItem;
 use sim_studio::preview::{ParamChoice, Speed};
+use sim_studio::replay::{Jump, ReplaySource, ReplayState, finite_body, last_finite_position};
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
 use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
+use sim_studio::ui::replay::{ReplayLive, ReplayTrack, TrackKind};
 use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::ui::viewport::{
     BodyVisual, GridLabelSlot, HudPanel, HudText, ViewportCamera, ViewportView,
 };
-use sim_studio::viewport::{FocusMode, FocusPhase, ViewportState};
+use sim_studio::viewport::{FocusMode, FocusPhase, ViewSource, ViewportState};
 use sim_studio::workspace::{Pack, Workspace};
 use sim_studio::{StudioCorePlugin, StudioUiPlugin};
 use sim_studio_ui::KitPlugin;
@@ -651,10 +654,174 @@ fn the_preview_runs_steps_plots_and_stops() {
         q.single(app.world()).unwrap().0.clone()
     };
     assert!(crumb.contains("preview, seed 43"), "{crumb}");
+
+    // Crash Replay opens on the crashed state, from memory, with the viewport and two tracks.
+    for _ in 0..3 {
+        app.update();
+    }
+    let replay = |app: &App| app.world().resource::<ReplayState>().clone();
+    let r = replay(&app);
+    let n = r.len();
+    let shown = r.replay.clone().unwrap();
+    assert_eq!(shown.source, ReplaySource::Preview);
+    let ticks = |f: &[sim_schema::TickFrame]| f.iter().map(|f| f.tick).collect::<Vec<_>>();
+    assert_eq!(ticks(&shown.frames), ticks(&crash.frames));
+    assert_eq!(r.scrub.index, n - 1);
+    assert_eq!(count::<ViewportView>(&mut app), 1);
+    assert_eq!(count::<ReplayTrack>(&mut app), 2);
+    let flagged = shown.frames[n - 1]
+        .bodies
+        .iter()
+        .filter(|b| {
+            (b.flags & sim_schema::FLAG_NAN_ORIGIN != 0 || !finite_body(b))
+                && last_finite_position(&shown.frames, b.sim_id).is_some()
+        })
+        .count();
+    assert_eq!(app.world().resource::<ViewSource>().alarms.len(), flagged);
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(
+        position.contains(&format!("frame {n} of {n}")),
+        "{position}"
+    );
+    let selected = r.selected.unwrap();
+    let snapshot = live_replay(&mut app, ReplayLive::Snapshot);
+    assert!(snapshot.starts_with(&format!("#{selected}")), "{snapshot}");
+
+    // The transport, a track and the keys move the playhead.
+    press(&mut app, "First");
+    assert_eq!(replay(&app).scrub.index, 0);
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(position.contains(&format!("frame 1 of {n}")), "{position}");
+    assert_eq!(
+        live_replay(&mut app, ReplayLive::Growth),
+        "Nothing to compare at the first frame."
+    );
+    press(&mut app, "Step");
+    assert_eq!(replay(&app).scrub.index, 1.min(n - 1));
+    let track = {
+        let mut q = app.world_mut().query::<(Entity, &ReplayTrack)>();
+        q.iter(app.world())
+            .find(|(_, t)| t.kind == TrackKind::Energy)
+            .map(|(e, _)| e)
+            .unwrap()
+    };
+    press_track(&mut app, track, 0.5);
+    assert_eq!(replay(&app).scrub.index, n - 1);
+    press_track(&mut app, track, -0.5);
+    assert_eq!(replay(&app).scrub.index, 0);
+    key(&mut app, KeyCode::End);
+    assert_eq!(replay(&app).scrub.index, n - 1);
+    key(&mut app, KeyCode::Home);
+    assert_eq!(replay(&app).scrub.index, 0);
+    key(&mut app, KeyCode::ArrowRight);
+    assert_eq!(replay(&app).scrub.index, 1.min(n - 1));
+    match Jump::FirstNonFinite.target(&shown) {
+        Some(i) => {
+            press(&mut app, "First non-finite");
+            assert_eq!(replay(&app).scrub.index, i);
+        }
+        None => press(&mut app, "First non-finite (none)"),
+    }
+    press(&mut app, &format!("Show #{selected}"));
+    assert_eq!(replay(&app).selected, Some(selected));
+    let (scale, log) = if r.log_energy {
+        ("Linear scale", false)
+    } else {
+        ("Log scale", true)
+    };
+    press(&mut app, scale);
+    assert_eq!(replay(&app).log_energy, log);
+    assert_eq!(count::<ReplayTrack>(&mut app), 2, "laid out again, once");
     labelled(&mut app, "Replay (P)");
     press(&mut app, "Scenario Builder (B)");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
+
+/// A stream of two dumps lists them with an Open button each; opening one shows its frames with
+/// the transport, jumps and tracks, and the list comes back.
+#[test]
+fn a_crash_stream_lists_its_dumps_and_opens_one() {
+    let dir = scratch("crash-stream");
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/shared/io");
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenCrash(golden.join("crashes.zst")));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::CrashReplay);
+    assert_eq!(count::<ReplayTrack>(&mut app), 0, "the list, no replay yet");
+    labelled(&mut app, "Open run 7");
+    press(&mut app, "Open run 2");
+    let replay = app.world().resource::<ReplayState>().clone();
+    let shown = replay.replay.as_ref().unwrap();
+    assert!(
+        matches!(shown.source, ReplaySource::Dump { run_id: 2, .. }),
+        "{:?}",
+        shown.source
+    );
+    assert!(
+        shown.other_build,
+        "the goldens come from a synthetic writer"
+    );
+    assert_eq!(count::<ReplayTrack>(&mut app), 2);
+    assert_eq!(count::<ViewportView>(&mut app), 1);
+    let n = replay.len();
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(
+        position.contains(&format!("frame {n} of {n}")),
+        "{position}"
+    );
+    let entities = live_replay(&mut app, ReplayLive::Entities);
+    assert_eq!(entities, "! #1     NaN origin, non-finite");
+    assert_eq!(
+        app.world().resource::<ViewSource>().alarms.len(),
+        1,
+        "ringed"
+    );
+    press(&mut app, "Back to the dump list");
+    assert!(app.world().resource::<ReplayState>().replay.is_none());
+    labelled(&mut app, "Open run 7");
+    assert_eq!(count::<ReplayTrack>(&mut app), 0);
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
+
+fn live_replay(app: &mut App, kind: ReplayLive) -> String {
+    let mut q = app.world_mut().query::<(&ReplayLive, &Text)>();
+    q.iter(app.world())
+        .find(|(k, _)| **k == kind)
+        .map(|(_, t)| t.0.clone())
+        .unwrap()
+}
+
+/// Press on `entity` at `x` across it (−0.5 left edge, 0.5 right), as the UI picking backend
+/// reports a press.
+fn press_track(app: &mut App, entity: Entity, x: f32) {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{Pointer, PointerPress};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+    let pointer = Pointer::new(
+        PointerId::Mouse,
+        Location {
+            target: NormalizedRenderTarget::None {
+                width: 1,
+                height: 1,
+            },
+            position: Vec2::ZERO,
+        },
+    );
+    app.world_mut().trigger(PointerPress {
+        entity,
+        pointer,
+        button: PointerButton::Primary,
+        hit: HitData::new(entity, 0.0, Some(Vec3::new(x, 0.0, 0.0)), None),
+        count: 1,
+    });
+    for _ in 0..3 {
+        app.update();
+    }
 }
 
 fn view(app: &App) -> &ViewportState {
