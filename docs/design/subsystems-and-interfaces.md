@@ -49,6 +49,11 @@ v0.16 (2026-11-02, build step 3c) records `saber.sweep` and the local half of `s
 the samplers, the replicate-seed rule and the sampler footer (IB-02), `campaign.toml` written from Python with
 `sim_hpc`'s defaults, and exit codes mapped to campaign statuses (IB-04). Preflight now also refuses a manifest
 drawn for another scene (`ManifestError::SceneMismatch`, IB-02), the check seq §4 gave the login node.
+v0.17 (2026-11-03, build step 4a) records MPI dispatch and the crash policy as built (§5.6): one rank loop over a
+`Transport` (MPI behind the `mpi` feature, one rank for `--local`, threads for tests), the init broadcast with
+BLAKE3 checks and the `build_id` gather, the message rules that leave no message unread (IB-05), the crash-storm
+and setup-error aborts with exit 6, and the `campaign_status.json` heartbeat with `output.heartbeat_s` (IB-15,
+IB-04). `Timeout` counts toward the crash-storm rule, the recommended answer to O8, pending Alex.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -561,6 +566,36 @@ frames, the panic message) while the node's `Quota` for that `param_set_id` is b
 the kernel's `RunOutput`, the `RunVerdictRow` and the manifest row; `SetupError` and `Panicked` rows carry `NaN`
 statistics and `Inconclusive` verdicts. The campaign crash policy (storm abort) is rank 0's and arrives with 4a;
 SIGTERM drain and `--resume` with 4b.
+
+**As built (step 4a), MPI dispatch and the crash policy.** Every rank, `--local` included, runs one loop
+(`sim_hpc::rank`) over a `Transport` trait (`broadcast`, tagged `send`, `try_recv`, `try_recv_tag`, `recv_tag`):
+`Mpi` (rsmpi 0.8 with `MPI_THREAD_FUNNELED`, behind the crate's `mpi` feature, so the default build needs no MPI
+library), `Single` (one rank, `--local`) and `Threads` (ranks as threads over channels, for the protocol tests).
+`start` is the init phase: rank 0 reads the four files once (`Sources`) and preflights them, then broadcasts an
+`Init` header and each file's bytes; rank N checks each file's length and BLAKE3 and preflights the same bytes
+(`Campaign::from_sources`), and rank 0 gathers `ReadyAck { rank, threads, build_id, error }` and broadcasts one
+verdict, so a refusal anywhere (rank 0's preflight, a damaged broadcast, mixed builds) ends every rank with the
+same exit code before any run. `run_rank` is the rest. Each rank's worker threads take runs one at a time from a
+local queue of assigned chunks; the main thread asks for the next chunk once no more runs are queued than there are
+threads (one request ahead), and its `ChunkRequest` carries the deltas: finished chunks, a `Tally` (runs, setup
+errors, runs by `SimStatus`, crashes and kept dumps by `param_set_id`, verdict counts per requirement) and the runs
+in parts the stager committed since. Rank 0's main thread serves requests from a `Dispatcher` (plain state: the
+chunk order, the campaign totals, which chunk went to which rank) and its own requests without a message; with
+several ranks it runs one fewer worker thread. The `Quota` view is the campaign-wide counts from the last
+`ChunkAssign` (for the parameter sets the rank reported, and every set whose quota is used up) plus the dumps kept
+since. The crash policy runs on every request: more than `abort_max_setup_errors` `SetupError` runs trip
+`SetupErrors`; at least `abort_min_runs` finished runs of which more than `abort_crash_fraction` crashed or timed
+out trip `CrashStorm` (`Timeout` counts, O8). On a trip the dispatcher answers every further request with
+`Terminate`, `Abort` reaches the ranks still waiting for work, every rank stops taking runs (a run in progress
+finishes; the 1024-tick in-run check is not built) and commits its open part, so the evidence is kept. Every rank
+then sends a `NodeReport` (its full tally, parts, failed parts, finished chunks, kept dumps), rank 0 writes
+`_MANIFEST.json` (status `complete`, `partial`, `io_failed` or `aborted`, the abort reason and numbers, the crash
+histogram by `SimStatus` and `param_set_id`, the `run_id`s of kept dumps, and per rank the chunks assigned and
+done) and broadcasts the exit code, which every rank returns: `6` aborted, then `2` (a rank's output paths do not
+resolve), `4` (a write or stage-out failed), `5` (runs missing), `0`. A rank whose output fails asks for no more
+work (`done` on its request); its chunks are not re-queued, they are listed as missing for `--resume` (4b). Rank 0
+writes `campaign_status.json` (IB-15) when the run starts, every `output.heartbeat_s`, and at the end from the
+ranks' final reports.
 
 ### 5.7 `saber` Python package
 
@@ -1220,6 +1255,7 @@ auto_resume           = 3        # resubmit up to N times (PBS depend=afterany /
 [output]
 scratch_dir = "${TMPDIR}"
 shared_out = "campaigns/drn-hover-a/out"
+heartbeat_s = 15                 # campaign_status.json (IB-15)
 ```
 
 | | |
@@ -1230,6 +1266,7 @@ shared_out = "campaigns/drn-hover-a/out"
 | Errors | Exit codes: `0` ok (or nothing left to resume), `2` config/validation error (incl. resume mismatch), `3` build_id mismatch, `4` I/O / stage-out failure (some parts not committed), `5` partial (drained before walltime or runs missing; resumable), `6` aborted by crash policy (`CrashStorm` or `SetupErrors`; evidence committed), `70` internal. Python maps exit codes to campaign status. `auto_resume` resubmits after `4`, `5` or a killed job, and stops on `2`, `3` or `6`, or when the last attempt made no progress. |
 | As built (step 3b) | `sim_hpc::CampaignConfig` reads every key above (unknown keys are errors) plus `execution.max_events_per_run` (default 4096) and `execution.threads` (default: available parallelism); paths are relative to the file, and `scratch_dir`/`shared_out` expand `${VAR}` (`${TMPDIR}` falls back to the system temp directory). `flight_recorder_ticks` overrides the scenario's `recorder_frames` (not hashed). `snapshot_policy.adaptive` is accepted with a warning and sampling stays at `base_every`. CLI: `--local` and `--validate-only` (`--json` for both, `--threads N`); without `--local` the binary exits `64` until MPI lands (4a), and `--resume` / `--override-crash-policy` exit `64` until 4b. Exit `64` is a usage error. |
 | As built (step 3c) | `saber.campaign` maps exit codes to statuses: `0` completed, `2` invalid, `3` build mismatch, `4` I/O error, `5` partial, `6` aborted, `64` usage, `70` (or any other code) internal, and a signal (a negative code from Python, or 129–159 from a shell) killed; `4`, `5` and killed are resumable. With `--json`, `sim_hpc` prints one object: on a refusal `{ok: false, exit, kind, error}` with `kind` one of `Config`, `Scene`, `Requirements`, `Manifest`, `SceneMismatch`, `BuildMismatch`; `--validate-only` adds `req_set_hash` and `param_keys` to step 3b's fields; `--local` adds `campaign_id` and `threads`. |
+| As built (step 4a) | Without `--local` or `--validate-only`, `sim_hpc --campaign c.toml` is one rank of an MPI job (`mpiexec -n N sim_hpc --campaign c.toml [--threads N] [--json]`); a binary built without the `mpi` feature refuses that with `64`. Every rank exits with the code rank 0 broadcasts; only rank 0 prints. `--json` adds `ranks`, `abort` (`{reason, detail}`), an `error` sentence for an abort, and `status` (the heartbeat's path). New key `output.heartbeat_s` (default 15, positive, at most a day), mirrored by `saber.campaign.Output`. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
 
@@ -1248,6 +1285,29 @@ requests **ahead** (keeps one chunk queued locally) to hide latency and `Iprobe`
 its pool works; Rank 0 records `chunk_id → rank` so a lost rank's chunks can be listed in `_MANIFEST.json`.
 No extra MPI messages are needed for the crash policy or checkpointing in the normal case: everything
 piggybacks on `ChunkRequest`/`ChunkAssign`.
+
+**As built (step 4a)** (`sim_hpc::protocol`, `sim_hpc::transport`). Messages are bincode (serde, standard
+config); every rank runs the same binary, and `Init` carries `PROTOCOL = 1`. Tags: `1 RequestWork`,
+`2 AssignWork`, `3 Terminate`, `4 Abort`, `5 Gather`, `6 Report`. Byte messages are received with a matched probe,
+broadcasts send the length and then pieces of at most 1 GiB.
+
+| Phase | Op | Payload as built |
+|---|---|---|
+| Init | `Bcast` | `Init::Go { protocol, attempt, base, blobs: [BlobHeader { kind, len, blake3 }] }` then one broadcast per blob (campaign, scene, requirements if any, manifest), or `Init::Refused(Refusal { exit, kind, error })` when rank 0's preflight fails (then nothing follows) |
+| Init | `Gather` + `Bcast` | `ReadyAck { rank, threads, build_id, error: Option<Refusal> }`; rank 0 broadcasts `Option<Refusal>`: the first rank's error (`BroadcastHash` exits `70`), or `BuildMismatch` (`3`) when two `build_id`s differ |
+| Work | `RequestWork` | `ChunkRequest { rank, completed: [chunk_id], delta: Tally, committed: RangeSet, done }`; `Tally { runs, setup_errors, status_counts, crashes_by_param_set, dumps_by_param_set, req_tallies }` |
+| Work | `AssignWork` | `ChunkAssign { chunk_id, start, end, global_dumps }`, a reply |
+| Drain | `Terminate` | `Terminate { abort: Option<AbortMsg> }`, a reply and the rank's last: manifest exhausted, the rank said `done`, or the policy tripped |
+| Fatal | `Abort` | `AbortMsg { reason, detail }`, unsolicited, to the ranks still waiting for work when the policy trips |
+| Finish | `Report` + `Bcast` | `NodeReport { rank, threads, exit, tally, setup_messages, committed, failed, io_error, chunk_ids, dump_run_ids }`, then `Final { exit }` from rank 0 |
+
+No message is left unread at `MPI_Finalize`: every request is answered exactly once, by `AssignWork` or by
+`Terminate` (the last); `Abort` goes at most once and only to a rank not yet sent `Terminate`, and rank 0 sends it
+before any later reply, so a rank that sees `Abort` while a request is out waits for that reply; a rank's
+`NodeReport` is its last message, sent once its last request is answered, and rank 0 keeps serving requests until
+every report is in. A first broadcast that does not decode can only come from another build, and the collectives
+after it cannot be matched, so that rank panics (ending the MPI job) rather than wait. Re-queuing a failed rank's
+chunks to healthy ranks is not built; they are missing in `_MANIFEST.json` and `--resume` (4b) runs them.
 
 ### IB-06 · Worker ↔ IO.Mux channel (in-process, per node)
 
@@ -1409,6 +1469,7 @@ truth until a requirements repository exists (D3).
 | Contract | Written atomically (write temp + rename) by Rank 0 to `$SHARED_OUT/campaign_status.json` every `heartbeat_s` (default 15 s): `{campaign_id, attempt, started_utc, updated_utc, state: Starting|Running|Draining|Done|Failed, abort_reason?: CrashStorm|SetupErrors, runs_total, runs_done, runs_committed, setup_errors, chunks_outstanding, queue_depth, per_rank: [{rank, runs_done, crashes, last_seen_utc}], crashes_by_param_set: {id: count}, status_counts: {SimStatus: n}, req_tallies: {req_id: {pass, fail, inconclusive}}}`. Per-rank counts arrive piggybacked on `ChunkRequest` (IB-05), so no extra MPI traffic. |
 | Owner | `sim_schema::CampaignStatus` (JSON Schema exported for Python and Studio). |
 | Errors | Readers treat `updated_utc` older than 3 × `heartbeat_s` as *stale* (job may be dead; check scheduler). A rank whose `last_seen_utc` lags is flagged *suspect*. |
+| As built (step 4a) | `sim_schema::CampaignStatus` (serde; no JSON Schema export yet) with the fields above plus `format: "saber-campaign-status"`, `heartbeat_s`, `ranks`, `crashes` and `abort_detail`; `per_rank[].last_seen_utc` is `null` before a rank's first request, and status names are `SimStatus` variant names. `heartbeat_s` is `output.heartbeat_s` in `campaign.toml`. Rank 0 writes it when the run starts, every `heartbeat_s`, and at the end with the ranks' final counts (`Done`, or `Failed` after an abort or with runs not committed); `Starting` is not written yet. `--local` writes it too. `saber.campaign.read_heartbeat` reads it, with `Heartbeat.stale()` for the 3 × rule. |
 
 
 ### IB-16 · Fragmentation hook (fragmentation model → sim_core)
@@ -1647,7 +1708,7 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | # | Question | Where |
 |---|---|---|
 | O1 | Fragmentation physics: trigger criteria, fragment mass and velocity distributions, fragment lifetime when nothing is hit. | IB-16 (designed separately) |
-| O8 | Whether a `Timeout` run counts as a failure in the campaign crash policy and in `saber.verify`'s statistics (seq §11 says yes by default; §8.2 treats it as inconclusive, not a crash). What reaching `max_ticks` means is decided (D19). | §8.2, seq §11; needed by step 4a |
+| O8 | Whether a `Timeout` run counts as a failure in the campaign crash policy and in `saber.verify`'s statistics (seq §11 says yes by default; §8.2 treats it as inconclusive, not a crash). What reaching `max_ticks` means is decided (D19). Step 4a is built on the recommended answer, pending Alex: `Timeout` counts toward the crash-storm rule (`sim_hpc::protocol::counts_toward_storm`), and is `Inconclusive`, not a failure, in verdict statistics (step 4c). | §8.2, seq §11; step 4a (built on the recommendation), step 4c |
 
 ---
 

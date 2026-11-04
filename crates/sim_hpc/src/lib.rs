@@ -1,22 +1,30 @@
-//! `sim_hpc`: the headless campaign runner (subsystems §5.6, IB-04 to IB-07,
+//! `sim_hpc`: the headless campaign runner (subsystems §5.6, IB-04 to IB-07, IB-15,
 //! `docs/design/sequence-diagrams.md` §5 to §8).
 //!
-//! Build step 3b provides the single-machine runner, `sim_hpc --campaign campaign.toml --local`:
-//! preflight ([`campaign`]), worker threads that each reuse one World and turn finished, crashed and
+//! Preflight ([`campaign`]), worker threads that each reuse one World and turn finished, crashed and
 //! panicked runs into rows ([`worker`]), `IO.Mux` with rolling parts and `IO.Stager` with the
-//! summaries-last commit ([`io`]), and the local dispatcher ([`local`]). MPI dispatch and the
-//! campaign crash policy arrive with step 4a, resume and walltime drain with step 4b.
+//! summaries-last commit ([`io`]). Step 4a adds the rank loop every run goes through ([`rank`]):
+//! rank 0's [`dispatch::Dispatcher`] with the campaign crash policy, the IB-05 messages
+//! ([`protocol`]) over a [`transport::Transport`] (MPI with the `mpi` feature, one rank for
+//! `--local`, threads for tests), and the `campaign_status.json` heartbeat. Resume and walltime
+//! drain arrive with step 4b.
 
 pub mod campaign;
 pub mod config;
+pub mod dispatch;
 pub mod io;
-pub mod local;
 pub mod manifest;
+#[cfg(feature = "mpi")]
+pub mod mpi;
+pub mod protocol;
+pub mod rank;
+pub mod transport;
 pub mod worker;
 
 pub use campaign::{Campaign, Library, PreflightError, standard_library};
 pub use config::CampaignConfig;
-pub use local::{Dispatch, LocalOptions, LocalReport, run_local};
+pub use dispatch::Dispatch;
+pub use rank::{RunOptions, RunReport, run_local, run_rank, start};
 
 /// Process exit codes (IB-04). Python maps them to campaign status.
 #[repr(u8)]
@@ -44,5 +52,21 @@ impl ExitCode {
     /// The numeric code.
     pub fn code(self) -> u8 {
         self as u8
+    }
+
+    /// The exit code with this number (unknown numbers are `Internal`).
+    pub fn from_code(code: u8) -> ExitCode {
+        [
+            ExitCode::Ok,
+            ExitCode::Config,
+            ExitCode::BuildMismatch,
+            ExitCode::Io,
+            ExitCode::Partial,
+            ExitCode::CrashPolicy,
+            ExitCode::Usage,
+        ]
+        .into_iter()
+        .find(|c| c.code() == code)
+        .unwrap_or(ExitCode::Internal)
     }
 }

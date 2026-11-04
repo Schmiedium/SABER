@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 3c. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step 4a. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind and a ground-impact stop, and `saber-cli validate`
@@ -16,7 +16,9 @@ aircraft.
 > campaign.toml --local` runs a whole campaign on one machine: worker threads, crash capture, rolling Parquet
 > parts committed to the output directory. From Python, `saber.sweep` draws a sweep (Monte Carlo, Latin hypercube,
 > Sobol, grid or Morris) over a scenario's parameters and writes the manifest, and `saber.campaign` writes
-> `campaign.toml`, preflights it and runs it locally. MPI runs and the crash policy come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> `campaign.toml`, preflights it and runs it locally. On a cluster, `mpiexec -n N sim_hpc --campaign campaign.toml`
+> (built with `--features mpi`) spreads the same campaign over MPI ranks with the same results, stops a crash storm
+> with exit 6 while keeping its evidence, and writes a `campaign_status.json` heartbeat. Resume and PBS/Slurm come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout
@@ -32,7 +34,7 @@ aircraft.
 | `crates/sim_studio` | Studio app: authoring, local runs, replay | §5.5, `sim_studio_ux.md` |
 | `crates/sim_explorer` | Explorer app: campaign monitor, results, queries | §5.9 |
 | `crates/sim_query` | DataFusion query engine (lib) and `sim_query serve` (bin) | §5.8 |
-| `crates/sim_hpc` | Headless MPI + rayon cluster runner | §5.6 |
+| `crates/sim_hpc` | Headless campaign runner: `--local`, or MPI ranks with `--features mpi` | §5.6 |
 | `crates/saber_cli` | `saber-cli`: validation for Python, model import and conversion | §4, §5.10 |
 | `crates/sim_testkit` | Test helpers (dev-dependency only) | verification §9.1 |
 | `python/saber` | Python package: schema, sweep, campaign, analyze, verify, report, testing; `saber/schemas/` is exported by `sim_schema` | §5.7 |

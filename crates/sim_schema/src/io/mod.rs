@@ -668,6 +668,11 @@ pub struct TableFile {
     pub metadata: Vec<(String, String)>,
 }
 
+/// Read a SABER Parquet file held in memory (a manifest broadcast to every rank, IB-05).
+pub fn read_parquet_bytes(bytes: Vec<u8>, table: Table) -> Result<TableFile, TableError> {
+    read_parquet(bytes::Bytes::from(bytes), table)
+}
+
 /// Read a SABER Parquet file of a table, checking the header and the columns first.
 pub fn read_parquet<R: ChunkReader + 'static>(
     input: R,

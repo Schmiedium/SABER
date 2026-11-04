@@ -69,7 +69,9 @@ def test_tiny_campaign_end_to_end(tmp_path, scene):
 
     run = campaign.run_local(toml, threads=2).check()
     assert run.report["runs"] == 18 and run.report["crashes"] == 0
-    assert run.manifest["status"] == "complete" and run.manifest["missing"] == []
+    assert run.manifest["status"] == "complete" and run.manifest["missing"] == [] and run.abort is None
+    hb = run.heartbeat()
+    assert (hb.state, hb.runs_total, hb.runs_committed) == ("Done", 18, 18) and not hb.stale()
     t = run.read("summaries").sort_by("run_id")
     assert t.column("run_id").to_pylist() == list(range(18))
     assert set(t.column("campaign_id").to_pylist()) == {"proj-e2e"}
@@ -116,4 +118,25 @@ def test_refusals_reach_python_as_statuses(tmp_path, scene):
     run = campaign.run_local(make(tmp_path, "stale-run", stale))
     assert run.status is Status.INVALID and not run.ok and run.files("summaries") == []
     with pytest.raises(CampaignError, match="regenerate"):
+        run.check()
+
+
+def test_a_crash_storm_is_aborted(tmp_path, scene):
+    # An energy bound that every muzzle speed above about 128 m/s breaks at once.
+    stormy = tmp_path / "stormy.scn.ron"
+    stormy.write_text(SCENE.read_text(encoding="utf-8").replace(
+        "at_max_ticks: Timeout,", "at_max_ticks: Timeout,\n        watchdog: (energy_max_j: Some(400.0)),"))
+    params = sweep.scene_params(stormy)
+    s = sweep.generate(params, {"muzzle_vz": sweep.Uniform(140, 200)}, sweep.MonteCarlo(10), replicates=10, seed=5)
+    toml = campaign.prepare(tmp_path / "storm", id="proj-storm", scene=stormy, sweep=s, scratch_dir="scratch",
+                            execution=Execution(chunk_size=4),
+                            crash_policy=campaign.CrashPolicy(abort_min_runs=8, abort_crash_fraction=0.5))
+    run = campaign.run_local(toml, threads=2)
+    assert run.status is Status.ABORTED, run.stderr
+    assert run.abort["reason"] == "CrashStorm"
+    assert run.heartbeat().state == "Failed"
+    t = run.read("summaries")
+    assert 0 < t.num_rows < 100
+    assert set(schema.enum_name("SimStatus", v) for v in t.column("status").to_pylist()) == {"CrashedEnergy"}
+    with pytest.raises(CampaignError, match="crash policy"):
         run.check()

@@ -33,12 +33,21 @@ pub struct RunRecord {
     pub setup_error: Option<String>,
 }
 
-/// The node's view of the crash-dump quota (seq §8.1): at most `M` dumps per `param_set_id`.
-/// Locally the view is the whole truth; with MPI (step 4a) it adds the campaign-wide counts.
+/// The node's view of the crash-dump quota (seq §8.1): at most `M` dumps per `param_set_id`,
+/// counted campaign-wide. The view is the campaign-wide counts from the last `ChunkAssign` plus the
+/// dumps this node kept since; with one rank it is the whole truth. A worker keeps a dump while the
+/// view is below `M`, so several ranks can overshoot `M` by a few dumps between assignments (G6).
 #[derive(Debug, Default)]
 pub struct Quota {
     m: u32,
-    kept: Mutex<BTreeMap<u32, u32>>,
+    state: Mutex<QuotaState>,
+}
+
+#[derive(Debug, Default)]
+struct QuotaState {
+    global: BTreeMap<u32, u32>,
+    since: BTreeMap<u32, u32>,
+    kept: BTreeMap<u32, u32>,
 }
 
 impl Quota {
@@ -46,25 +55,51 @@ impl Quota {
     pub fn new(m: u32) -> Self {
         Self {
             m,
-            kept: Mutex::default(),
+            state: Mutex::default(),
         }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, QuotaState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Take one dump slot for this parameter set, if one is left.
     pub fn try_keep(&self, param_set_id: u32) -> bool {
-        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-        let n = kept.entry(param_set_id).or_insert(0);
-        if *n < self.m {
-            *n += 1;
+        let mut s = self.lock();
+        let seen = s.global.get(&param_set_id).copied().unwrap_or(0)
+            + s.since.get(&param_set_id).copied().unwrap_or(0);
+        if seen < self.m {
+            *s.since.entry(param_set_id).or_insert(0) += 1;
+            *s.kept.entry(param_set_id).or_insert(0) += 1;
             true
         } else {
             false
         }
     }
 
-    /// Dumps kept so far, by parameter set.
+    /// Dumps this node kept, by parameter set.
     pub fn kept(&self) -> BTreeMap<u32, u32> {
-        self.kept.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.lock().kept.clone()
+    }
+
+    /// The dumps kept since the last call (the next `ChunkRequest`'s delta); they move into the
+    /// campaign-wide view.
+    pub fn take_since(&self) -> BTreeMap<u32, u32> {
+        let mut s = self.lock();
+        let since = std::mem::take(&mut s.since);
+        for (k, v) in &since {
+            *s.global.entry(*k).or_insert(0) += v;
+        }
+        since
+    }
+
+    /// Campaign-wide counts from rank 0; a count never goes down.
+    pub fn set_global(&self, counts: &[(u32, u32)]) {
+        let mut s = self.lock();
+        for &(k, v) in counts {
+            let g = s.global.entry(k).or_insert(0);
+            *g = (*g).max(v);
+        }
     }
 }
 

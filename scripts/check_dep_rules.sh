@@ -28,6 +28,7 @@ for c in sim_schema sim_core sim_models sim_verify; do
   for gui in sim_studio sim_studio_ui sim_explorer sim_hpc sim_query; do
     forbid "$c" "$gui" "the four core libraries never depend on GUI, MPI or query crates"
   done
+  forbid "$c" mpi "only sim_hpc links MPI, behind its mpi feature (step 4a)"
 done
 
 if [ "$fail" -ne 0 ]; then exit 1; fi
