@@ -246,3 +246,50 @@ fn reused_world_judges_every_run_afresh() {
     assert_eq!(rows[1].verdicts, vec![Pass]);
     assert_eq!(rows[1].metrics, vec![2.0, 1.0]);
 }
+
+/// The live view a Preview Run shows: metric values so far, requirements settled as soon as no
+/// later tick can change them, the last reading of each watched signal, and the end-of-run row
+/// unchanged by reading it.
+#[test]
+fn progress_shows_where_a_run_stands() {
+    use sim_verify::VerifyState;
+    let metrics = r#""max": (signal: "entity(1).Sig.x", reduce: Max),"#;
+    let reqs = format!(
+        r#"
+        (id: "max-le-2", kind: Threshold(metric: "max", op: Le, value: 2.0)),
+        (id: "max-le-10", kind: Threshold(metric: "max", op: Le, value: 10.0)),
+        (id: "never-gt-4", kind: Never(signal: "{X}", op: Gt, value: 4.0)),
+        (id: "ev-ping", kind: Eventually(event: "ping")),
+    "#
+    );
+    let set = RequirementSet::from_ron(&req_file(metrics, &reqs)).unwrap();
+    let mut sim = world(&set, 4);
+    *sim.world_mut().resource_mut::<common::Script>() = common::Script {
+        xs: vec![1.0, 3.0, 5.0, 1.0],
+        pings: vec![(4, 1)],
+    };
+    sim.start(RunSeed::default()).unwrap();
+    let progress = |sim: &sim_core::SimWorld| sim.world().resource::<VerifyState>().progress();
+
+    let p = progress(&sim);
+    assert!(p.metrics[0].is_nan(), "no samples before the first tick");
+    assert_eq!(p.settled, vec![None; 4]);
+
+    assert_eq!(sim.step(), None); // x = 1
+    let p = progress(&sim);
+    assert_eq!(p.metrics, vec![1.0]);
+    assert_eq!(p.settled, vec![None, None, None, None]);
+    assert_eq!(p.readings[2], 1.0);
+    assert!(p.readings[0].is_nan() && p.readings[3].is_nan());
+
+    assert_eq!(sim.step(), None); // x = 3: a Max above 2 cannot come back
+    assert_eq!(progress(&sim).settled, vec![Some(Fail), None, None, None]);
+    assert_eq!(sim.step(), None); // x = 5: the Never has seen its condition
+    let p = progress(&sim);
+    assert_eq!(p.settled, vec![Some(Fail), None, Some(Fail), None]);
+    assert_eq!((p.metrics[0], p.readings[2]), (5.0, 5.0));
+
+    assert_eq!(sim.step(), Some(SimStatus::Completed)); // ping at tick 4
+    let row = run_verdicts(sim.world_mut()).unwrap();
+    assert_eq!(row.verdicts, vec![Fail, Pass, Fail, Pass]);
+}

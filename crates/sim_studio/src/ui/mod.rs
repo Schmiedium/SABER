@@ -4,6 +4,7 @@
 
 pub mod builder;
 pub mod launcher;
+pub mod preview;
 pub mod requirements;
 pub mod shell;
 

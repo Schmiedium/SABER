@@ -190,3 +190,53 @@ fn toasts_are_logged_with_marks() {
     assert_eq!(marks, ["ℹ", "✓", "⚠", "✖"]);
     assert!(ToastLevel::Error.lifetime() > ToastLevel::Info.lifetime());
 }
+
+/// A plot draws its series across the whole image: the first sample at the left edge, the last
+/// at the right, the largest value at the top, the smallest at the bottom, and the zero line.
+#[test]
+fn plots_draw_a_series_across_the_image() {
+    use sim_studio_ui::plot::{PlotColors, draw, value_range};
+    let colors = PlotColors {
+        background: [0, 0, 0, 255],
+        line: [255, 0, 0, 255],
+        zero: [0, 0, 255, 255],
+    };
+    let (w, h) = (40u32, 21u32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let at = |px: &[u8], x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    };
+    let ramp: Vec<[f64; 2]> = (0..=10).map(|i| [i as f64, i as f64 - 5.0]).collect();
+    let (lo, hi) = value_range(&ramp).unwrap();
+    assert!(lo < -5.0 && hi > 5.0);
+    draw(&mut px, w, h, &ramp, colors);
+    let row_of = |v: f64| (((hi - v) / (hi - lo)) * (h - 1) as f64).round() as u32;
+    assert_eq!(
+        at(&px, 0, row_of(-5.0)),
+        colors.line,
+        "first sample, lowest"
+    );
+    assert_eq!(
+        at(&px, w - 1, row_of(5.0)),
+        colors.line,
+        "last sample, highest"
+    );
+    assert_eq!(at(&px, w / 2, 0), colors.background);
+    assert_eq!(at(&px, 2, row_of(0.0)), colors.zero, "the zero line");
+
+    // A gap where the value is not finite; a constant series still has a range.
+    let gap = [[0.0, 1.0], [1.0, f64::NAN], [2.0, 1.0]];
+    draw(&mut px, w, h, &gap, colors);
+    assert_eq!(
+        at(&px, w / 2, row_of_const(h)),
+        colors.background,
+        "no line across the gap"
+    );
+    assert_eq!(value_range(&[[0.0, 3.0]]), Some((2.0, 4.0)));
+    assert_eq!(value_range(&[[0.0, f64::NAN]]), None);
+
+    fn row_of_const(h: u32) -> u32 {
+        (h - 1) / 2
+    }
+}

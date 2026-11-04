@@ -116,6 +116,8 @@ v0.31 (2026-11-03, build step S2-2) records the bind menu as built (§5.5): `Par
 edited from the studio, with no change to their file form.
 v0.32 (2026-11-03, build step S2-3) records the Requirements tab as built (§5.5): the studio edits a `.req.ron`
 and compiles it against the open scenario with `sim_verify`'s own Tick-0 compiler (IB-03).
+v0.33 (2026-11-04, build step S3-1) records the Preview Run as built (§5.5), which builds its World the way `sim_hpc`
+does (R7), and `sim_verify`'s read-only `VerifyState::progress` for live requirement status (§5.3).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -688,6 +690,10 @@ feeds the reducers and moves every open requirement:
   stop (`StopRequests`, reason `requirement_failed`, so the run ends `Terminated` at the end of that tick).
 - **After the run,** `run_verdicts(world)` (or `VerifyState::finalize(world, status, stop_reason)`) gives the
   `RunVerdictRow` by §8.2. Ticks never allocate; the row is built once per run.
+- **While it runs** (step S3-1), `VerifyState::progress()` reads where the run stands without changing it: every
+  metric so far, every requirement's settled verdict (a `Threshold` once decided as above) or `None`, and the last
+  reading of the signal each `Envelope`, `Never` or `Eventually` watches. The studio's Preview Run shows it live;
+  the run's verdicts still come only from `finalize`.
 
 ### 5.4 `sim_schema` — formats & versions (new)
 
@@ -746,6 +752,8 @@ stateDiagram-v2
 **As built (step S2-2).** The bind menu writes the entity's `ParamBindings` and `Uncertainties` (§7, IB-01) exactly as a hand-written file would: target `Component.field.path`, the field's value as the binding default, a draw on a swept field with `apply: Add`, and the stream named `<SimId>.<target>`. Components are added with their `Default` or with every field at its `#[reflect(default)]` (what `()` reads as in a file). Every change is one undoable edit, refused if it would make a valid scene invalid (the kernel's validation decides). Details in `sim_studio_ux.md` §7.2, §7.3.
 
 **As built (step S2-3).** The Builder's Requirements tab edits the IB-03 `RequirementSet` in `sim_studio::builder::RequirementDoc`; the file form is unchanged. Edits that would fail `RequirementSet::validate` are refused. Lint builds the open scenario's World, runs Tick 0's setup and compiles each metric and requirement with `sim_verify::VerifyState::compile`, the compiler `VerifyPlugin` runs at every Tick 0, so a set that lints clean in the studio compiles in every run of that scenario on the same build. The tab needs nothing new from `sim_core` or `sim_verify`. Details in `sim_studio_ux.md` §7.4.
+
+**As built (step S3-1).** `Studio.LocalRun` is `sim_studio::preview::PreviewRun`: one `SimWorld` built like a `sim_hpc` run (`SimAppBuilder` with `sim_models::add_library`, the requirement set's `VerifyPlugin`, `set_scenario`, a 600-frame flight recorder, `start_with_params` with the row's `ParamValues` and `RunSeed`), stepped in whole ticks from a Bevy system in the studio's frame loop, at most 12 ms of ticks per frame. Nothing the studio shows writes to that World: bodies come from `FlightRecorder::latest`, plotted signals from `FieldPath::read`, requirement status from `VerifyState::progress` (§5.3). R7 is checked against `sim_hpc --local` itself (`sim_hpc` is a dev-dependency of `sim_studio`, never a dependency). A crash keeps the recorder's frames in memory and opens Crash Replay without a file. The 3D viewport is S3-2; the replay scrubber S4. Details in `sim_studio_ux.md` §7.5.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 

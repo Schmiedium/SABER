@@ -23,4 +23,4 @@ pub use spec::{
 pub use verdict::{EARLY_FAIL, Gate, RunVerdictRow, gate, threshold_decided, threshold_verdict};
 
 #[cfg(feature = "ecs")]
-pub use monitor::{VerifyPlugin, VerifyState, run_verdicts};
+pub use monitor::{Progress, VerifyPlugin, VerifyState, run_verdicts};

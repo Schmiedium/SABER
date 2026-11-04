@@ -23,6 +23,10 @@ serde.workspace = true
 serde_json.workspace = true
 ron.workspace = true
 
+[dev-dependencies]
+# R7: a preview run equals `sim_hpc --local` for the same row.
+sim_hpc.workspace = true
+
 # Every studio test binary links all of Bevy (hundreds of MB each), so the empty unit-test harnesses of
 # the library and binary are not built; the tests live in `tests/`. Set `test = true` to add unit tests.
 [lib]
