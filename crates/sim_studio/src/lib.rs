@@ -3,8 +3,9 @@
 //! Step S1 builds the frame the screens live in: the [`state::AppState`]s, workspaces
 //! (`saber.workspace.ron`, starter packs), the per-user recent list, the Launcher and the shell
 //! (title bar, activity rail, dock, status bar, notifications). Step S2-1 adds the Scenario
-//! Builder's document ([`builder`]) with its Outliner, Inspector and Lint. The other screens follow
-//! in S2–S6.
+//! Builder's document ([`builder`]) with its Outliner, Inspector and Lint, S2-2 its Parameters and
+//! S2-3 its Requirements; S3-1 the Preview Run ([`preview`]). The viewport and the other screens
+//! follow in S3-2 to S6.
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -16,6 +17,7 @@ pub mod builder;
 pub mod campaign;
 pub mod clock;
 pub mod crash;
+pub mod preview;
 pub mod recent;
 pub mod state;
 pub mod ui;
@@ -29,7 +31,7 @@ use sim_studio_ui::{KitCorePlugin, KitPlugin};
 
 use actions::{
     BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, DocChanged, ExplorerRequest,
-    LauncherCampaigns, Recent, ReqPanel, StudioCommand,
+    LauncherCampaigns, LiveCrash, PreviewChanged, PreviewState, Recent, ReqPanel, StudioCommand,
 };
 use state::AppState;
 
@@ -52,8 +54,11 @@ impl Plugin for StudioCorePlugin {
             .add_message::<StudioCommand>()
             .add_message::<ExplorerRequest>()
             .add_message::<DocChanged>()
+            .add_message::<PreviewChanged>()
             .init_resource::<BuilderDoc>()
             .init_resource::<ReqPanel>()
+            .init_resource::<PreviewState>()
+            .init_resource::<LiveCrash>()
             .insert_resource(Recent::load(self.recent_path.clone()))
             .init_resource::<CurrentWorkspace>()
             .init_resource::<CurrentScenario>()
@@ -62,7 +67,12 @@ impl Plugin for StudioCorePlugin {
             .add_systems(OnEnter(AppState::Launcher), actions::refresh_campaigns)
             .add_systems(
                 Update,
-                (actions::apply_commands, actions::save_layout).chain(),
+                (
+                    actions::apply_commands,
+                    actions::save_layout,
+                    actions::run_preview.run_if(in_state(AppState::LocalRun)),
+                )
+                    .chain(),
             );
     }
 }
@@ -93,6 +103,10 @@ impl Plugin for StudioUiPlugin {
                     ui::shell::fill_regions,
                     ui::shell::console_append,
                     (ui::builder::refresh, ui::builder::breadcrumb).after(actions::apply_commands),
+                    ui::preview::refresh.after(actions::apply_commands),
+                    ui::preview::display
+                        .after(actions::run_preview)
+                        .run_if(in_state(AppState::LocalRun)),
                 ),
             );
         for s in SHELL_STATES {

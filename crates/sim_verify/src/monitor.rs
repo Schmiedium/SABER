@@ -571,6 +571,56 @@ impl VerifyState {
     pub fn early_failed(&self) -> bool {
         self.early_failed
     }
+
+    /// Where the run stands before it ends, for a live view (the studio's Preview Run). Reads
+    /// only; the run's verdicts still come from [`Self::finalize`].
+    pub fn progress(&self) -> Progress {
+        let metrics: Vec<f64> = self.metrics.iter().map(MetricState::value).collect();
+        let reading = |source: &Source| match source {
+            Source::Probe(i) => self.readings[*i],
+            Source::Event(_) => f64::NAN,
+        };
+        let (settled, readings) = self
+            .requirements
+            .iter()
+            .map(|r| match &r.monitor {
+                Monitor::Threshold { metric, op, value } => {
+                    let m = metrics[*metric];
+                    let decided = !m.is_nan()
+                        && threshold_decided(self.metrics[*metric].reducer, *op, *value, m);
+                    let v = if op.holds(m, *value) {
+                        Verdict::Pass
+                    } else {
+                        Verdict::Fail
+                    };
+                    (decided.then_some(v), f64::NAN)
+                }
+                Monitor::Envelope { probe, .. } => (r.settled, self.readings[*probe]),
+                Monitor::Never(c) | Monitor::Eventually { cond: c, .. } => {
+                    (r.settled, reading(&c.source))
+                }
+                Monitor::Custom(_) => (r.settled, f64::NAN),
+            })
+            .unzip();
+        Progress {
+            metrics,
+            settled,
+            readings,
+        }
+    }
+}
+
+/// Where a run stands before it ends ([`VerifyState::progress`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Progress {
+    /// Every metric's value so far, in file order (`NaN` before its first sample).
+    pub metrics: Vec<f64>,
+    /// Every requirement in file order: its verdict once no later tick can change it, else
+    /// `None`. A `Threshold` is settled when its metric can no longer cross the threshold.
+    pub settled: Vec<Option<Verdict>>,
+    /// Every requirement in file order: the last reading of the signal it watches (`Envelope`,
+    /// or `Never` and `Eventually` on a signal), else `NaN`.
+    pub readings: Vec<f64>,
 }
 
 /// `SimSet::Verify`.

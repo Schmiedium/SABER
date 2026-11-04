@@ -11,7 +11,8 @@ use sim_studio_ui::prelude::*;
 use super::builder::{Breadcrumb, RegionBody};
 use super::{action, child};
 use crate::actions::{
-    BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, ReqPanel, StudioCommand,
+    BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, LiveCrash, PreviewState, ReqPanel,
+    StudioCommand,
 };
 use crate::state::{AppState, Rail, RailContext};
 
@@ -99,11 +100,18 @@ fn region_body() -> impl bevy::scene::Scene {
 }
 
 /// Build the shell for `state`.
+#[allow(clippy::type_complexity)] // a Bevy system: one parameter per resource it reads
 pub fn spawn_for(
     state: AppState,
-) -> impl Fn(Commands, Res<CurrentWorkspace>, Res<CurrentScenario>, Res<CurrentCrash>, Res<BuilderDoc>)
-{
-    move |mut commands, workspace, scenario, crash, doc| {
+) -> impl Fn(
+    Commands,
+    Res<CurrentWorkspace>,
+    Res<CurrentScenario>,
+    Res<CurrentCrash>,
+    Res<LiveCrash>,
+    Res<BuilderDoc>,
+) {
+    move |mut commands, workspace, scenario, crash, live_crash, doc| {
         let root = commands
             .spawn_scene(screen())
             .insert(DespawnOnExit(state))
@@ -119,10 +127,12 @@ pub fn spawn_for(
                 crumbs.push(info.path.clone());
             }
         }
-        if state == AppState::CrashReplay
-            && let Some(c) = &crash.0
-        {
-            crumbs.push(c.path.display().to_string());
+        if state == AppState::CrashReplay {
+            if let Some(c) = &live_crash.0 {
+                crumbs.push(format!("preview, seed {}", c.seed.replicate_seed));
+            } else if let Some(c) = &crash.0 {
+                crumbs.push(c.path.display().to_string());
+            }
         }
         crumbs.push(state.title().to_owned());
         let dirty = doc.0.as_ref().is_some_and(|d| d.dirty());
@@ -134,6 +144,12 @@ pub fn spawn_for(
             for (text, command) in [("Undo", StudioCommand::Undo), ("Redo", StudioCommand::Redo)] {
                 action(&mut commands, title_bar, plain_button(text), command);
             }
+            action(
+                &mut commands,
+                title_bar,
+                button("▶ Preview F5"),
+                StudioCommand::StartPreview,
+            );
             action(
                 &mut commands,
                 title_bar,
@@ -171,7 +187,7 @@ pub fn spawn_for(
         let rcx = RailContext {
             workspace: workspace.0.is_some(),
             run: false,
-            crash: crash.0.is_some(),
+            crash: crash.0.is_some() || live_crash.0.is_some(),
         };
         for item in Rail::ALL {
             let a11y = match item.target(rcx) {
@@ -230,10 +246,14 @@ pub fn fill_regions(
     regions: Query<(Entity, &DockRegion, &ChildOf)>,
     parents: Query<&ChildOf>,
     crash: Res<CurrentCrash>,
+    live_crash: Res<LiveCrash>,
     scenario: Res<CurrentScenario>,
     log: Res<ToastLog>,
     docs: Res<BuilderDoc>,
     panel: Res<ReqPanel>,
+    preview: Res<PreviewState>,
+    theme: Res<StudioTheme>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     for (dock_entity, PendingRegions(state)) in &pending {
         let mine: Vec<_> = regions
@@ -257,6 +277,16 @@ pub fn fill_regions(
                 && let Some(doc) = &docs.0
             {
                 super::builder::fill(&mut commands, body, kind, doc, &panel, &log);
+                continue;
+            }
+            if *state == AppState::LocalRun {
+                let inputs = super::preview::PanelInputs {
+                    preview: &preview,
+                    docs: &docs,
+                    mode: theme.mode,
+                    log: &log,
+                };
+                super::preview::fill(&mut commands, &mut images, body, kind, &inputs);
                 continue;
             }
             match kind {
@@ -286,7 +316,7 @@ pub fn fill_regions(
                     }
                     console(&mut commands, body, &log);
                 }
-                DockRegion::Center => center(&mut commands, body, *state, &crash),
+                DockRegion::Center => center(&mut commands, body, *state, &crash, &live_crash),
             }
         }
     }
@@ -307,7 +337,13 @@ pub(crate) fn console(commands: &mut Commands, body: Entity, log: &ToastLog) {
     }
 }
 
-fn center(commands: &mut Commands, body: Entity, state: AppState, crash: &CurrentCrash) {
+fn center(
+    commands: &mut Commands,
+    body: Entity,
+    state: AppState,
+    crash: &CurrentCrash,
+    live_crash: &LiveCrash,
+) {
     child(commands, body, title(state.title()));
     if let Some(step) = state.arrives_in() {
         child(
@@ -317,6 +353,12 @@ fn center(commands: &mut Commands, body: Entity, state: AppState, crash: &Curren
                 "This screen arrives with build step {step} (docs/build-plan.md)."
             )),
         );
+    }
+    if state == AppState::CrashReplay
+        && let Some(c) = &live_crash.0
+    {
+        live_crash_view(commands, body, c);
+        return;
     }
     if state == AppState::CrashReplay
         && let Some(c) = &crash.0
@@ -353,6 +395,67 @@ fn center(commands: &mut Commands, body: Entity, state: AppState, crash: &Curren
                 commands,
                 body,
                 muted(format!("… and {} more", c.index.len() - 200)),
+            );
+        }
+    }
+}
+
+/// A preview that crashed, from memory: how and when it ended, and the bodies in its last
+/// recorded frames (the scrubber over all of them arrives with S4).
+fn live_crash_view(commands: &mut Commands, body: Entity, c: &crate::preview::PreviewCrash) {
+    let why = c
+        .reason
+        .as_ref()
+        .map(|r| {
+            if r.detail.is_empty() {
+                format!("{:?}", r.kind)
+            } else {
+                format!("{:?}: {}", r.kind, r.detail)
+            }
+        })
+        .unwrap_or_else(|| "no watchdog reason".to_owned());
+    child(
+        commands,
+        body,
+        status_text(
+            Status::Fail,
+            format!("{:?} at tick {} · {why}", c.status, c.tick),
+        ),
+    );
+    child(
+        commands,
+        body,
+        label(format!(
+            "Preview run, seed {} · {} flight-recorder frame{} kept in memory",
+            c.seed.replicate_seed,
+            c.frames.len(),
+            if c.frames.len() == 1 { "" } else { "s" }
+        )),
+    );
+    for f in c.frames.iter().rev().take(3) {
+        child(
+            commands,
+            body,
+            heading(format!(
+                "Tick {} · t = {:.6} s · energy {:e} J",
+                f.tick, f.t_s, f.total_energy
+            )),
+        );
+        for b in &f.bodies {
+            child(
+                commands,
+                body,
+                mono(format!(
+                    "#{:<4} pos {:e} {:e} {:e}   vel {:e} {:e} {:e}   |F| {:e}",
+                    b.sim_id,
+                    b.pos[0],
+                    b.pos[1],
+                    b.pos[2],
+                    b.lin_vel[0],
+                    b.lin_vel[1],
+                    b.lin_vel[2],
+                    b.force_mag
+                )),
             );
         }
     }

@@ -12,11 +12,11 @@ pub enum AppState {
     Launcher,
     /// Author a scenario and its parameters and requirements; export `.scn.ron` (S2).
     ScenarioBuilder,
-    /// Run one `(param_set_id, seed)` interactively in-process (S3).
+    /// Run one `(param_set_id, seed)` interactively in-process (S3-1).
     LocalRun,
     /// Configure a sweep and submit a campaign (S6).
     CampaignSetup,
-    /// Replay a completed run from Tier 3 snapshots or by re-simulating it (S3).
+    /// Replay a completed run from Tier 3 snapshots or by re-simulating it (S4).
     RunReplay,
     /// Scrub a crashed run's flight-recorder frames (S4).
     CrashReplay,
@@ -38,10 +38,8 @@ impl AppState {
     /// The build step that brings the screen; `None` once it is built.
     pub fn arrives_in(self) -> Option<&'static str> {
         match self {
-            AppState::Launcher => None,
-            AppState::ScenarioBuilder => Some("S2"),
-            AppState::LocalRun | AppState::RunReplay => Some("S3"),
-            AppState::CrashReplay => Some("S4"),
+            AppState::Launcher | AppState::ScenarioBuilder | AppState::LocalRun => None,
+            AppState::RunReplay | AppState::CrashReplay => Some("S4"),
             AppState::CampaignSetup => Some("S6"),
         }
     }

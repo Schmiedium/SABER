@@ -1,7 +1,8 @@
 //! The screens themselves, headless (verification §8.3): the full UI stack without a window or a
 //! GPU, driven by activating buttons the way a click does. Checks that the Launcher and the shell
 //! spawn, that their buttons are wired to the commands they name, that the shell fills its
-//! regions, and that the Builder's panels edit, undo and export the scenario.
+//! regions, that the Builder's panels edit, undo and export the scenario, and that the Preview
+//! Run plays, steps, plots and stops.
 
 use std::path::{Path, PathBuf};
 
@@ -13,11 +14,15 @@ use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
-use sim_studio::actions::{BuilderDoc, BuilderTab, CurrentWorkspace, ReqPanel, StudioCommand};
+use sim_studio::actions::{
+    BuilderDoc, BuilderTab, CurrentWorkspace, LiveCrash, PreviewState, ReqPanel, StudioCommand,
+};
 use sim_studio::builder::ReqItem;
+use sim_studio::preview::{ParamChoice, Speed};
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
+use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
 use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::workspace::{Pack, Workspace};
@@ -486,4 +491,143 @@ fn the_requirements_tab_edits_and_saves_a_set() {
     press(&mut app, "Scene tab");
     assert_eq!(tab(&app), BuilderTab::Scene);
     inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
+}
+
+fn preview(app: &App) -> &PreviewState {
+    app.world().resource::<PreviewState>()
+}
+
+fn tick(app: &App) -> u64 {
+    preview(app).run.as_ref().unwrap().tick()
+}
+
+fn live(app: &mut App, kind: Live) -> String {
+    let mut q = app.world_mut().query::<(&Live, &Text)>();
+    q.iter(app.world())
+        .find(|(k, _)| **k == kind)
+        .map(|(_, t)| t.0.clone())
+        .unwrap_or_else(|| panic!("no live text {kind:?}"))
+}
+
+fn set_field(app: &mut App, id: &'static str, text: &'static str) {
+    app.world_mut()
+        .run_system_once(move |mut f: Fields| f.set(id, text))
+        .unwrap();
+    app.update();
+}
+
+/// Update until `done` holds, at most `frames` times.
+fn until(app: &mut App, frames: usize, done: impl Fn(&App) -> bool) {
+    for _ in 0..frames {
+        if done(app) {
+            return;
+        }
+        app.update();
+    }
+    assert!(done(app), "not done after {frames} frames");
+}
+
+/// Preview Run (F5): the Builder's Preview button runs the open scenario in the studio; Pause
+/// and Step move it one tick, the live texts follow; parameter corners and seeds rebuild it from
+/// tick 0; a channel added by its signal gets a plot that is redrawn as the run steps, and goes
+/// again; at max speed the run plays to its end and is checked against its requirements; Reset
+/// and Stop work. A preview that crashes opens Crash Replay from memory.
+#[test]
+fn the_preview_runs_steps_plots_and_stops() {
+    let dir = scratch("preview");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+
+    press(&mut app, "▶ Preview F5");
+    assert_eq!(state(&app), AppState::LocalRun);
+    assert_eq!(count::<ShellRoot>(&mut app), 1);
+    assert_eq!(count::<PendingRegions>(&mut app), 0);
+    assert!(preview(&app).playing);
+    press(&mut app, "⏸ Pause");
+    assert!(!preview(&app).playing);
+    let t0 = tick(&app);
+    press(&mut app, "⏭ Step");
+    assert_eq!(tick(&app), t0 + 1);
+    let status = live(&mut app, Live::Status);
+    assert!(
+        status.contains(&format!("tick {} / 3000", t0 + 1)) && status.contains("paused"),
+        "{status}"
+    );
+    assert!(live(&mut app, Live::Bodies).starts_with("#1"));
+    assert!(live(&mut app, Live::Requirements).contains("R-hold-low"));
+
+    press(&mut app, "Params: Max corner");
+    assert_eq!(preview(&app).choice, ParamChoice::MaxCorner);
+    assert_eq!(tick(&app), 0, "rebuilt");
+    set_field(&mut app, preview_field::SEED, "42");
+    press(&mut app, "Use seed");
+    assert_eq!(preview(&app).seed, 42);
+    press(&mut app, "Next seed");
+    assert_eq!(preview(&app).seed, 43);
+    let run_seed = |app: &App| preview(app).run.as_ref().unwrap().seed().replicate_seed;
+    assert_eq!(run_seed(&app), 43);
+    set_field(&mut app, preview_field::SEED, "forty");
+    press(&mut app, "Use seed");
+    assert_eq!(preview(&app).seed, 43, "not a seed: unchanged");
+
+    let vz = "entity(1).RigidBody6.velocity.z";
+    let channels = |app: &App| preview(app).run.as_ref().unwrap().channels().len();
+    let before = channels(&app);
+    set_field(&mut app, preview_field::CHANNEL, vz);
+    press(&mut app, "+ Channel");
+    assert_eq!(channels(&app), before + 1);
+    assert_eq!(count::<ChannelPlot>(&mut app), before + 1, "one plot each");
+    for _ in 0..3 {
+        press(&mut app, "⏭ Step");
+    }
+    let drawn = {
+        let mut q = app.world_mut().query::<&ChannelPlot>();
+        q.iter(app.world())
+            .find(|p| p.signal == vz)
+            .map(|p| p.drawn)
+            .unwrap()
+    };
+    assert_eq!(drawn.0, tick(&app), "redrawn as the run steps");
+    press(&mut app, &format!("Remove {vz}"));
+    assert_eq!(channels(&app), before);
+
+    press(&mut app, "Speed max");
+    assert_eq!(preview(&app).speed, Speed::Max);
+    press(&mut app, "▶ Play");
+    until(&mut app, 20_000, |app| {
+        preview(app).run.as_ref().unwrap().status().is_some()
+    });
+    let run = preview(&app).run.as_ref().unwrap();
+    assert_eq!(run.status(), Some(sim_schema::SimStatus::Completed));
+    assert!(run.verdicts().is_some(), "checked against its requirements");
+    assert!(!preview(&app).playing);
+    assert_eq!(state(&app), AppState::LocalRun);
+    press(&mut app, "⟲ Reset");
+    assert_eq!(tick(&app), 0);
+    press(&mut app, "■ Stop");
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+    assert!(preview(&app).run.is_none());
+
+    // A vehicle with no mass cannot be integrated: the preview crashes into Crash Replay.
+    let (_, input) = inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
+    submit(&mut app, input, "1e-300");
+    press(&mut app, "▶ Preview F5");
+    until(&mut app, 20_000, |app| state(app) == AppState::CrashReplay);
+    let crash = app.world().resource::<LiveCrash>().0.clone().unwrap();
+    assert!(crash.status.is_crash(), "{:?}", crash.status);
+    assert!(!crash.frames.is_empty());
+    let crumb = {
+        let mut q = app.world_mut().query_filtered::<&Text, With<Breadcrumb>>();
+        q.single(app.world()).unwrap().0.clone()
+    };
+    assert!(crumb.contains("preview, seed 43"), "{crumb}");
+    labelled(&mut app, "Replay (P)");
+    press(&mut app, "Scenario Builder (B)");
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
 }

@@ -14,6 +14,7 @@ publish = false
 # (docs/design/subsystems-and-interfaces.md §4).
 [workspace.dependencies]
 sim_schema = { path = "crates/sim_schema" }
+sim_hpc = { path = "crates/sim_hpc" }
 sim_core = { path = "crates/sim_core" }
 sim_models = { path = "crates/sim_models" }
 sim_verify = { path = "crates/sim_verify", default-features = false }

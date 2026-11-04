@@ -4,12 +4,13 @@
 //! Panels compose the scene functions in [`widgets`] with `bsn!` and listen to kit events
 //! ([`widgets::KitActivated`], [`widgets::KitChanged`]); colors come from [`theme`] tokens. The
 //! kit's own widgets so far are the [`dock`] (fixed regions and splitters) and [`toast`]
-//! notifications; the data table, tree, plot canvas, pickers and command palette follow with the
-//! screens that need them (S2–S6).
+//! notifications, and [`plot`] (line plots drawn on the CPU); the data table, tree, pickers and
+//! command palette follow with the screens that need them (S2–S6).
 //!
 //! Design: `docs/design/sim_studio_ux.md` §6.1, §10, §11; subsystems §5.5 (`Studio.UiKit`, D11).
 
 pub mod dock;
+pub mod plot;
 pub mod theme;
 pub mod toast;
 pub mod widgets;

@@ -14,10 +14,11 @@ use sim_studio_ui::theme::{StudioTheme, ThemeMode};
 use sim_studio_ui::toast::Toast;
 
 use crate::builder::requirements::{pick, sets};
-use crate::builder::{FieldRef, ReqItem, RequirementDoc, ScenarioDoc};
+use crate::builder::{FieldRef, LintLevel, ReqItem, RequirementDoc, ScenarioDoc};
 use crate::campaign::CampaignCard;
 use crate::clock;
 use crate::crash::OpenCrash;
+use crate::preview::{ParamChoice, PreviewCrash, PreviewRun, Speed, params_for, sweeps};
 use crate::recent::RecentList;
 use crate::state::{AppState, Rail, RailContext, RailTarget};
 use crate::workspace::{Pack, Workspace, WorkspaceError};
@@ -120,7 +121,62 @@ pub enum StudioCommand {
     RemoveReq(ReqItem),
     /// Write the requirement set file (`.req.ron`).
     ExportRequirements,
+    /// Run the open scenario in the studio (Preview Run, F5).
+    StartPreview,
+    /// Run the preview again with these parameter values.
+    PreviewParams(ParamChoice),
+    /// Run the preview again with this replicate seed, as typed.
+    PreviewSeed(String),
+    /// Play (`true`) or pause the preview.
+    PreviewPlay(bool),
+    /// Step the preview one tick, paused.
+    PreviewStep,
+    /// How fast the preview runs.
+    PreviewSpeed(Speed),
+    /// Start the preview again from Tick 0.
+    PreviewReset,
+    /// End the preview and go back to the Builder.
+    StopPreview,
+    /// Plot a signal in the preview.
+    AddChannel(String),
+    /// Stop plotting a signal.
+    RemoveChannel(String),
 }
+
+/// The Preview Run screen (`sim_studio_ux.md` §7.5): the run and how it is driven.
+#[derive(Resource, Debug)]
+pub struct PreviewState {
+    /// The run, while the screen is open.
+    pub run: Option<PreviewRun>,
+    /// Its parameter values.
+    pub choice: ParamChoice,
+    /// Its replicate seed (parameter set 0).
+    pub seed: u64,
+    /// How fast it runs.
+    pub speed: Speed,
+    /// Whether it is running (else paused).
+    pub playing: bool,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            run: None,
+            choice: ParamChoice::Nominal,
+            seed: 1,
+            speed: Speed::RealTime,
+            playing: false,
+        }
+    }
+}
+
+/// A preview run that crashed, opened in Crash Replay from memory (§7.5).
+#[derive(Resource, Debug, Default)]
+pub struct LiveCrash(pub Option<PreviewCrash>);
+
+/// The preview was rebuilt, reset or changed its channels: its panels are laid out again.
+#[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreviewChanged;
 
 /// The Builder's left-dock tabs (`sim_studio_ux.md` §7.2): the scene, or its requirements.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -330,6 +386,9 @@ pub struct CommandCx<'w> {
     doc: ResMut<'w, BuilderDoc>,
     req: ResMut<'w, ReqPanel>,
     changed: MessageWriter<'w, DocChanged>,
+    preview: ResMut<'w, PreviewState>,
+    live_crash: ResMut<'w, LiveCrash>,
+    preview_changed: MessageWriter<'w, PreviewChanged>,
 }
 
 /// Carry out the user's commands.
@@ -375,6 +434,9 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                     )));
                 }
                 cx.req.files.clear();
+                cx.preview.run = None;
+                cx.preview.playing = false;
+                cx.live_crash.0 = None;
                 cx.scenario.0 = None;
                 cx.next.set(AppState::Launcher);
             }
@@ -394,6 +456,7 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                         if n == 1 { "" } else { "s" }
                     )));
                     cx.crash.0 = Some(crash);
+                    cx.live_crash.0 = None;
                     cx.next.set(AppState::CrashReplay);
                 }
                 Err(e) => {
@@ -422,7 +485,7 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                 let rcx = RailContext {
                     workspace: cx.workspace.0.is_some(),
                     run: false,
-                    crash: cx.crash.0.is_some(),
+                    crash: cx.crash.0.is_some() || cx.live_crash.0.is_some(),
                 };
                 match rail.target(rcx) {
                     Ok(RailTarget::State(s)) => cx.next.set(s),
@@ -444,6 +507,16 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                     save_workspace(ws, &mut cx.toasts);
                 }
             }
+            StudioCommand::StartPreview
+            | StudioCommand::PreviewParams(_)
+            | StudioCommand::PreviewSeed(_)
+            | StudioCommand::PreviewPlay(_)
+            | StudioCommand::PreviewStep
+            | StudioCommand::PreviewSpeed(_)
+            | StudioCommand::PreviewReset
+            | StudioCommand::StopPreview
+            | StudioCommand::AddChannel(_)
+            | StudioCommand::RemoveChannel(_) => preview_command(command, &mut cx),
             StudioCommand::Undo | StudioCommand::Redo if cx.req.tab == BuilderTab::Requirements => {
                 edit_requirements(command, &mut cx);
             }
@@ -676,6 +749,188 @@ fn edit_requirements(command: &StudioCommand, cx: &mut CommandCx) {
     cx.changed.write(DocChanged);
 }
 
+/// Build the preview of the open scenario as it is now (unsaved edits included), with the
+/// requirement set when it lints clean.
+fn build_preview(cx: &mut CommandCx) -> Result<PreviewRun, String> {
+    let doc = cx.doc.0.as_ref().ok_or("No scenario is open")?;
+    let scenario = Arc::new(
+        doc.scenario()
+            .map_err(|e| format!("the scenario does not validate: {e}"))?,
+    );
+    let requirements = match &cx.req.doc {
+        Some(r) if r.lint().iter().any(|l| l.level == LintLevel::Error) => {
+            cx.toasts.write(Toast::warning(format!(
+                "{} has lint errors, so this preview checks no requirements",
+                r.rel
+            )));
+            None
+        }
+        Some(r) => Some(Arc::new(r.set().clone())),
+        None => None,
+    };
+    let params = params_for(cx.preview.choice, &sweeps(&scenario));
+    PreviewRun::new(
+        scenario,
+        requirements,
+        sim_core::RunSeed::new(0, cx.preview.seed),
+        params,
+    )
+}
+
+/// What a finished preview says: a crash opens Crash Replay from memory, anything else a toast
+/// with its verdicts.
+fn preview_ended(
+    run: &PreviewRun,
+    toasts: &mut MessageWriter<Toast>,
+    live_crash: &mut LiveCrash,
+    next: &mut NextState<AppState>,
+) {
+    let Some(status) = run.status() else {
+        return;
+    };
+    if let Some(crash) = run.crash() {
+        let why = crash
+            .reason
+            .as_ref()
+            .map(|r| {
+                if r.detail.is_empty() {
+                    format!(": {:?}", r.kind)
+                } else {
+                    format!(": {:?}, {}", r.kind, r.detail)
+                }
+            })
+            .unwrap_or_default();
+        toasts.write(Toast::error(format!(
+            "Crashed at tick {} ({status:?}){why}. Opened in Crash Replay.",
+            crash.tick
+        )));
+        live_crash.0 = Some(crash);
+        next.set(AppState::CrashReplay);
+        return;
+    }
+    let live = run.requirements();
+    let pass = live
+        .iter()
+        .filter(|r| r.verdict == Some(sim_schema::Verdict::Pass))
+        .count();
+    let verdicts = if live.is_empty() {
+        String::new()
+    } else {
+        format!("; {pass} of {} requirements pass", live.len())
+    };
+    toasts.write(Toast::success(format!(
+        "Preview ended: {status:?} at tick {}{verdicts}",
+        run.tick()
+    )));
+}
+
+/// The Preview Run's commands.
+fn preview_command(command: &StudioCommand, cx: &mut CommandCx) {
+    let rebuild = |cx: &mut CommandCx| match build_preview(cx) {
+        Ok(run) => {
+            cx.preview.run = Some(run);
+            true
+        }
+        Err(e) => {
+            cx.toasts
+                .write(Toast::error(format!("Preview not started: {e}")));
+            false
+        }
+    };
+    match command {
+        StudioCommand::StartPreview => {
+            if rebuild(cx) {
+                cx.preview.playing = true;
+                cx.next.set(AppState::LocalRun);
+            }
+        }
+        StudioCommand::PreviewParams(choice) => {
+            cx.preview.choice = *choice;
+            rebuild(cx);
+        }
+        StudioCommand::PreviewSeed(text) => match text.trim().parse::<u64>() {
+            Ok(seed) => {
+                cx.preview.seed = seed;
+                rebuild(cx);
+            }
+            Err(_) => {
+                cx.toasts.write(Toast::error(format!(
+                    "{text:?} is not a seed: a whole number from 0 to {}",
+                    u64::MAX
+                )));
+            }
+        },
+        StudioCommand::PreviewSpeed(speed) => cx.preview.speed = *speed,
+        StudioCommand::StopPreview => {
+            cx.preview.run = None;
+            cx.preview.playing = false;
+            cx.next.set(AppState::ScenarioBuilder);
+        }
+        _ => {
+            let preview = &mut *cx.preview;
+            let Some(run) = &mut preview.run else {
+                cx.toasts.write(Toast::warning("No preview is running"));
+                return;
+            };
+            match command {
+                StudioCommand::PreviewPlay(play) => {
+                    if *play
+                        && run.status().is_some()
+                        && let Err(e) = run.reset()
+                    {
+                        cx.toasts.write(Toast::error(e));
+                    }
+                    preview.playing = *play;
+                }
+                StudioCommand::PreviewStep => {
+                    preview.playing = false;
+                    if run.status().is_none() && run.step(1).is_some() {
+                        preview_ended(run, &mut cx.toasts, &mut cx.live_crash, &mut cx.next);
+                    }
+                }
+                StudioCommand::PreviewReset => {
+                    if let Err(e) = run.reset() {
+                        cx.toasts.write(Toast::error(e));
+                    }
+                }
+                StudioCommand::AddChannel(signal) => {
+                    if let Err(e) = run.add_channel(signal) {
+                        cx.toasts.write(Toast::error(format!("{signal}: {e}")));
+                    }
+                }
+                StudioCommand::RemoveChannel(signal) => run.remove_channel(signal),
+                _ => return,
+            }
+        }
+    }
+    cx.preview_changed.write(PreviewChanged);
+}
+
+/// Step the playing preview once per frame, as fast as its speed asks, within a frame budget.
+pub fn run_preview(
+    time: Res<Time>,
+    mut preview: ResMut<PreviewState>,
+    mut live_crash: ResMut<LiveCrash>,
+    mut next: ResMut<NextState<AppState>>,
+    mut toasts: MessageWriter<Toast>,
+) {
+    let preview = &mut *preview;
+    let Some(run) = &mut preview.run else {
+        return;
+    };
+    if !preview.playing || run.status().is_some() {
+        return;
+    }
+    let budget = std::time::Duration::from_millis(12);
+    if run
+        .advance(preview.speed, time.delta_secs_f64(), budget)
+        .is_some()
+    {
+        preview.playing = false;
+        preview_ended(run, &mut toasts, &mut live_crash, &mut next);
+    }
+}
+
 fn report(result: Result<(), String>, cx: &mut CommandCx) {
     if let Err(e) = result {
         cx.toasts.write(Toast::error(e));
@@ -720,6 +975,9 @@ pub fn builder_keys(
         .is_some_and(|e| editing.contains(e))
     {
         return;
+    }
+    if keys.just_pressed(KeyCode::F5) {
+        out.write(StudioCommand::StartPreview);
     }
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);

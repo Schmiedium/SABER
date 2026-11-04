@@ -4698,6 +4698,7 @@ dependencies = [
  "serde_json",
  "sim_assets",
  "sim_core",
+ "sim_hpc",
  "sim_models",
  "sim_schema",
  "sim_studio_ui",
