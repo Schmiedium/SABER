@@ -20,6 +20,7 @@ use crate::clock;
 use crate::crash::OpenCrash;
 use crate::preview::{ParamChoice, PreviewCrash, PreviewRun, Speed, params_for, sweeps};
 use crate::recent::RecentList;
+use crate::replay::{FPS, Jump, Replay, ReplaySource, ReplayState, find_scenario};
 use crate::state::{AppState, Rail, RailContext, RailTarget};
 use crate::viewport::{FocusMode, ViewToggle, ViewportState};
 use crate::workspace::{Pack, Workspace, WorkspaceError};
@@ -146,6 +147,30 @@ pub enum StudioCommand {
     CameraFocus(Option<u32>, FocusMode),
     /// Show or hide part of the viewport.
     ToggleView(ViewToggle),
+    /// Open the crash stream's dump at this position in its index in Crash Replay.
+    OpenDump(usize),
+    /// Close the dump and show the stream's index again.
+    CloseDump,
+    /// Show this recorded frame (an index into the replay's frames).
+    ReplaySeek(usize),
+    /// Step this many frames (negative: back), paused.
+    ReplayStep(i64),
+    /// Play (`true`) or pause the replay.
+    ReplayPlay(bool),
+    /// Play at this many frames per second (one of `replay::FPS`).
+    ReplayFps(f64),
+    /// Jump to a frame of interest.
+    ReplayJump(Jump),
+    /// Show this body (`SimId`) in the snapshot panel and point the camera at it.
+    ReplaySelect(u32),
+    /// The energy track on the signed log scale (`true`) or linear.
+    ReplayLogEnergy(bool),
+    /// Start the loop at the frame shown.
+    ReplayLoopFrom,
+    /// End the loop at the frame shown.
+    ReplayLoopTo,
+    /// Play through to the end again instead of looping.
+    ReplayLoopClear,
 }
 
 /// The Preview Run screen (`sim_studio_ux.md` §7.5): the run and how it is driven.
@@ -182,6 +207,11 @@ pub struct LiveCrash(pub Option<PreviewCrash>);
 /// The preview was rebuilt, reset or changed its channels: its panels are laid out again.
 #[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PreviewChanged;
+
+/// A replay was opened or closed, or its layout changed (selection, scale, loop, speed): Crash
+/// Replay's panels are laid out again. Seeking only rewrites the texts in place.
+#[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayChanged;
 
 /// The Builder's left-dock tabs (`sim_studio_ux.md` §7.2): the scene, or its requirements.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -395,6 +425,8 @@ pub struct CommandCx<'w> {
     live_crash: ResMut<'w, LiveCrash>,
     preview_changed: MessageWriter<'w, PreviewChanged>,
     view: ResMut<'w, ViewportState>,
+    replay: ResMut<'w, ReplayState>,
+    replay_changed: MessageWriter<'w, ReplayChanged>,
 }
 
 /// Carry out the user's commands.
@@ -443,6 +475,15 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                 cx.preview.run = None;
                 cx.preview.playing = false;
                 cx.live_crash.0 = None;
+                // A preview's crash belongs to the workspace; a dump's stays with its stream.
+                if cx
+                    .replay
+                    .replay
+                    .as_ref()
+                    .is_some_and(|r| r.source == ReplaySource::Preview)
+                {
+                    cx.replay.replay = None;
+                }
                 cx.scenario.0 = None;
                 cx.next.set(AppState::Launcher);
             }
@@ -463,6 +504,11 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                     )));
                     cx.crash.0 = Some(crash);
                     cx.live_crash.0 = None;
+                    cx.replay.replay = None;
+                    if n == 1 {
+                        open_dump(0, &mut cx);
+                    }
+                    cx.replay_changed.write(ReplayChanged);
                     cx.next.set(AppState::CrashReplay);
                 }
                 Err(e) => {
@@ -526,6 +572,24 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             StudioCommand::CameraFocus(..) | StudioCommand::ToggleView(_) => {
                 view_command(command, &mut cx);
             }
+            StudioCommand::OpenDump(i) => {
+                open_dump(*i, &mut cx);
+                cx.replay_changed.write(ReplayChanged);
+            }
+            StudioCommand::CloseDump => {
+                cx.replay.replay = None;
+                cx.replay_changed.write(ReplayChanged);
+            }
+            StudioCommand::ReplaySeek(_)
+            | StudioCommand::ReplayStep(_)
+            | StudioCommand::ReplayPlay(_)
+            | StudioCommand::ReplayFps(_)
+            | StudioCommand::ReplayJump(_)
+            | StudioCommand::ReplaySelect(_)
+            | StudioCommand::ReplayLogEnergy(_)
+            | StudioCommand::ReplayLoopFrom
+            | StudioCommand::ReplayLoopTo
+            | StudioCommand::ReplayLoopClear => replay_command(command, &mut cx),
             StudioCommand::Undo | StudioCommand::Redo if cx.req.tab == BuilderTab::Requirements => {
                 edit_requirements(command, &mut cx);
             }
@@ -792,6 +856,8 @@ fn preview_ended(
     run: &PreviewRun,
     toasts: &mut MessageWriter<Toast>,
     live_crash: &mut LiveCrash,
+    replay: &mut ReplayState,
+    view: &mut ViewportState,
     next: &mut NextState<AppState>,
 ) {
     let Some(status) = run.status() else {
@@ -813,6 +879,7 @@ fn preview_ended(
             "Crashed at tick {} ({status:?}){why}. Opened in Crash Replay.",
             crash.tick
         )));
+        show_replay(Replay::from_preview(&crash), replay, view);
         live_crash.0 = Some(crash);
         next.set(AppState::CrashReplay);
         return;
@@ -895,7 +962,14 @@ fn preview_command(command: &StudioCommand, cx: &mut CommandCx) {
                 StudioCommand::PreviewStep => {
                     preview.playing = false;
                     if run.status().is_none() && run.step(1).is_some() {
-                        preview_ended(run, &mut cx.toasts, &mut cx.live_crash, &mut cx.next);
+                        preview_ended(
+                            run,
+                            &mut cx.toasts,
+                            &mut cx.live_crash,
+                            &mut cx.replay,
+                            &mut cx.view,
+                            &mut cx.next,
+                        );
                     }
                 }
                 StudioCommand::PreviewReset => {
@@ -931,6 +1005,135 @@ fn view_command(command: &StudioCommand, cx: &mut CommandCx) {
         _ => return,
     }
     cx.preview_changed.write(PreviewChanged);
+    cx.replay_changed.write(ReplayChanged);
+}
+
+/// Read dump `i` of the open crash stream and show it, matched to its scenario by `scene_hash`
+/// among the open workspace's scenarios and the files next to the stream.
+fn open_dump(i: usize, cx: &mut CommandCx) {
+    let Some(crash) = &cx.crash.0 else {
+        return;
+    };
+    let Some(entry) = crash.index.get(i).copied() else {
+        cx.toasts.write(Toast::error(format!(
+            "No dump {i} in {}",
+            crash.path.display()
+        )));
+        return;
+    };
+    let path = crash.path.clone();
+    let dump = match crate::crash::read_dump(&path, &entry) {
+        Ok(d) => d,
+        Err(e) => {
+            cx.toasts.write(Toast::error(e));
+            return;
+        }
+    };
+    let mut dirs = Vec::new();
+    if let Some(ws) = &cx.workspace.0 {
+        dirs.push((ws.root.join("scenarios"), "scenarios/".to_owned()));
+    }
+    if let Some(dir) = path.parent() {
+        dirs.push((dir.to_owned(), String::new()));
+        if let Some(up) = dir.parent() {
+            dirs.push((up.to_owned(), "../".to_owned()));
+        }
+    }
+    let found = dump.header.scene_hash.and_then(|h| find_scenario(h, &dirs));
+    if found.is_none() {
+        cx.toasts.write(Toast::warning(
+            "No scenario here has this dump's scene_hash: positions are shown as recorded, as if in ENU",
+        ));
+    }
+    let replay = Replay::from_dump(dump, &path, found);
+    show_replay(replay, &mut cx.replay, &mut cx.view);
+}
+
+/// Open `replay` at its crashed state with the camera on the body that caused it.
+fn show_replay(replay: Replay, state: &mut ReplayState, view: &mut ViewportState) {
+    // The oldest frame anchors the display frame: the crashed one may hold no finite position.
+    let first = replay
+        .frames
+        .first()
+        .map(|f| f.bodies.clone())
+        .unwrap_or_default();
+    view.show(replay.frame, &first);
+    if let Some(id) = replay.origin() {
+        // A body that is no longer finite holds the camera where it last was.
+        if let Some(p) = crate::replay::last_finite_position(&replay.frames, id) {
+            view.rig.pivot = view.frame.position(p);
+        }
+        let rig = view.rig;
+        view.focus.set(id, FocusMode::Follow, &rig);
+    }
+    state.open(replay);
+}
+
+/// Crash Replay's playhead and panels.
+fn replay_command(command: &StudioCommand, cx: &mut CommandCx) {
+    let len = cx.replay.len();
+    let Some(replay) = &cx.replay.replay else {
+        return;
+    };
+    let mut relayout = false;
+    match command {
+        StudioCommand::ReplaySeek(i) => cx.replay.scrub.seek(*i, len),
+        StudioCommand::ReplayStep(d) => cx.replay.scrub.step(*d, len),
+        StudioCommand::ReplayPlay(on) => cx.replay.scrub.play(*on, len),
+        StudioCommand::ReplayFps(f) => {
+            if FPS.contains(f) {
+                cx.replay.scrub.fps = *f;
+                relayout = true;
+            }
+        }
+        StudioCommand::ReplayJump(j) => match j.target(replay) {
+            Some(i) => {
+                cx.replay.scrub.seek(i, len);
+                cx.replay.scrub.playing = false;
+            }
+            None => {
+                cx.toasts.write(Toast::info(format!(
+                    "{}: no recorded frame matches{}",
+                    j.label(),
+                    if *j == Jump::EnergyBound && replay.energy_max_j.is_none() {
+                        " (no energy bound is known for this scenario)"
+                    } else {
+                        ""
+                    }
+                )));
+            }
+        },
+        StudioCommand::ReplaySelect(id) => {
+            cx.replay.selected = Some(*id);
+            let rig = cx.view.rig;
+            let mode = cx.view.focus.mode;
+            cx.view.focus.set(*id, mode, &rig);
+            relayout = true;
+        }
+        StudioCommand::ReplayLogEnergy(on) => {
+            cx.replay.log_energy = *on;
+            relayout = true;
+        }
+        StudioCommand::ReplayLoopFrom | StudioCommand::ReplayLoopTo => {
+            let i = cx.replay.scrub.index;
+            let span = match (command, cx.replay.scrub.span) {
+                (StudioCommand::ReplayLoopFrom, Some((_, b))) => (i, b),
+                (StudioCommand::ReplayLoopFrom, None) => (i, len.saturating_sub(1)),
+                (_, Some((a, _))) => (a, i),
+                (_, None) => (0, i),
+            };
+            cx.replay.scrub.set_span(Some(span), len);
+            relayout = true;
+        }
+        StudioCommand::ReplayLoopClear => {
+            cx.replay.scrub.set_span(None, len);
+            relayout = true;
+        }
+        _ => {}
+    }
+    if relayout {
+        cx.replay_changed.write(ReplayChanged);
+    }
 }
 
 /// The viewport's keys in Preview Run (`sim_studio_ux.md` §9.6): F frames the focus target (or
@@ -938,7 +1141,7 @@ fn view_command(command: &StudioCommand, cx: &mut CommandCx) {
 pub fn viewport_keys(
     keys: Res<ButtonInput<KeyCode>>,
     view: Res<ViewportState>,
-    preview: Res<PreviewState>,
+    source: Res<crate::viewport::ViewSource>,
     focus: Option<Res<InputFocus>>,
     editing: Query<(), With<EditableText>>,
     mut out: MessageWriter<StudioCommand>,
@@ -954,12 +1157,10 @@ pub fn viewport_keys(
     if ctrl {
         return;
     }
-    let target = view.focus.target.or_else(|| {
-        preview
-            .run
-            .as_ref()
-            .and_then(|r| r.bodies().first().map(|b| b.sim_id))
-    });
+    let target = view
+        .focus
+        .target
+        .or_else(|| source.bodies.first().map(|b| b.sim_id));
     if keys.just_pressed(KeyCode::KeyF)
         && let Some(t) = target
     {
@@ -979,10 +1180,13 @@ pub fn viewport_keys(
 }
 
 /// Step the playing preview once per frame, as fast as its speed asks, within a frame budget.
+#[allow(clippy::too_many_arguments)]
 pub fn run_preview(
     time: Res<Time>,
     mut preview: ResMut<PreviewState>,
     mut live_crash: ResMut<LiveCrash>,
+    mut replay: ResMut<ReplayState>,
+    mut view: ResMut<ViewportState>,
     mut next: ResMut<NextState<AppState>>,
     mut toasts: MessageWriter<Toast>,
 ) {
@@ -999,7 +1203,14 @@ pub fn run_preview(
         .is_some()
     {
         preview.playing = false;
-        preview_ended(run, &mut toasts, &mut live_crash, &mut next);
+        preview_ended(
+            run,
+            &mut toasts,
+            &mut live_crash,
+            &mut replay,
+            &mut view,
+            &mut next,
+        );
     }
 }
 
@@ -1118,5 +1329,51 @@ pub fn rail_keys(
         if keys.just_pressed(rail.key()) {
             out.write(StudioCommand::Rail(rail));
         }
+    }
+}
+
+/// Crash Replay's keys (`sim_studio_ux.md` §7.9): ← and → step a frame, Home and End go to the
+/// first and last, Space plays or pauses. Not while a text field is being edited.
+pub fn replay_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    replay: Res<ReplayState>,
+    focus: Option<Res<InputFocus>>,
+    editing: Query<(), With<EditableText>>,
+    mut out: MessageWriter<StudioCommand>,
+) {
+    if replay.is_empty()
+        || focus
+            .and_then(|f| f.get())
+            .is_some_and(|e| editing.contains(e))
+    {
+        return;
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        out.write(StudioCommand::ReplayStep(-1));
+    }
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        out.write(StudioCommand::ReplayStep(1));
+    }
+    if keys.just_pressed(KeyCode::Home) {
+        out.write(StudioCommand::ReplayJump(Jump::First));
+    }
+    if keys.just_pressed(KeyCode::End) {
+        out.write(StudioCommand::ReplayJump(Jump::Last));
+    }
+    if keys.just_pressed(KeyCode::Space) {
+        out.write(StudioCommand::ReplayPlay(!replay.scrub.playing));
+    }
+}
+
+/// Play the replay: advance the playhead by wall time at its speed. Marks the replay changed
+/// only when the frame moved.
+pub fn run_replay(time: Res<Time>, mut replay: ResMut<ReplayState>) {
+    let len = replay.len();
+    let moved = replay
+        .bypass_change_detection()
+        .scrub
+        .advance(time.delta_secs_f64(), len);
+    if moved {
+        replay.set_changed();
     }
 }

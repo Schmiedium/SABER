@@ -38,8 +38,11 @@ impl AppState {
     /// The build step that brings the screen; `None` once it is built.
     pub fn arrives_in(self) -> Option<&'static str> {
         match self {
-            AppState::Launcher | AppState::ScenarioBuilder | AppState::LocalRun => None,
-            AppState::RunReplay | AppState::CrashReplay => Some("S4"),
+            AppState::Launcher
+            | AppState::ScenarioBuilder
+            | AppState::LocalRun
+            | AppState::CrashReplay => None,
+            AppState::RunReplay => Some("S4-2"),
             AppState::CampaignSetup => Some("S6"),
         }
     }

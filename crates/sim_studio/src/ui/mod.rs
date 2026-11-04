@@ -5,6 +5,7 @@
 pub mod builder;
 pub mod launcher;
 pub mod preview;
+pub mod replay;
 pub mod requirements;
 pub mod shell;
 pub mod viewport;

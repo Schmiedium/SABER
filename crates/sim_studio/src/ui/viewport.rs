@@ -1,7 +1,8 @@
-//! The 3D viewport in Preview Run (`sim_studio_ux.md` §7.10, §10.3): a camera rendering into a
-//! `ViewportNode`'s image, a sphere per body, the ground as graph paper with distance labels,
-//! velocity arrows and body axes, and the State HUD. Every position comes from the run's f64
-//! state through [`crate::viewport`]; nothing here reads a `Transform` back.
+//! The 3D viewport in Preview Run and Crash Replay (`sim_studio_ux.md` §7.10, §10.3): a camera
+//! rendering into a `ViewportNode`'s image, a sphere per body, the ground as graph paper with
+//! distance labels, velocity arrows and body axes, and the State HUD. Every position comes from
+//! the f64 state in [`ViewSource`] through [`crate::viewport`]; nothing here reads a `Transform`
+//! back.
 
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
@@ -16,11 +17,12 @@ use sim_studio_ui::prelude::*;
 
 use super::{action, child};
 use crate::actions::{PreviewState, StudioCommand};
+use crate::replay::{ReplayState, finite_body, last_finite_position};
 use crate::state::AppState;
 use crate::viewport::{
     FOV_Y, FocusMode, FocusPhase, GRID_HALF_LINES, GRID_LEVELS, HUD_PERIOD_S, LineKind, MAX_LABELS,
-    ViewProjection, ViewToggle, ViewportState, attitude_to_render, grid_labels, grid_lines, hud,
-    hud_text, marker_radius, minor_spacing, pixel_size, to_render, velocity_arrow,
+    ViewProjection, ViewSource, ViewToggle, ViewportState, attitude_to_render, grid_labels,
+    grid_lines, hud, hud_text, marker_radius, minor_spacing, pixel_size, to_render, velocity_arrow,
 };
 
 /// The viewport's height in the Preview Run's center, logical px.
@@ -29,7 +31,7 @@ pub const VIEW_H: f32 = 420.0;
 /// Focus buttons offered at most (the rest by keyboard once the picker arrives).
 pub const MAX_FOCUS_BUTTONS: usize = 12;
 
-/// The camera that renders the viewport, while Preview Run is open.
+/// The camera that renders the viewport, while Preview Run or Crash Replay is open.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ViewportCamera(pub Entity);
 
@@ -136,12 +138,15 @@ pub fn restyle(
     }
 }
 
-/// Spawn the viewport's camera and ground when Preview Run opens.
+/// Spawn the viewport's camera and ground when a screen with a viewport opens; both go when it
+/// closes.
 pub fn spawn_camera(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     assets: Res<ViewAssets>,
+    state: Res<State<AppState>>,
 ) {
+    let state = *state.get();
     let image = images.add(Image::new_target_texture(
         1,
         1,
@@ -163,7 +168,7 @@ pub fn spawn_camera(
                 fov: FOV_Y as f32,
                 ..default()
             }),
-            DespawnOnExit(AppState::LocalRun),
+            DespawnOnExit(state),
         ))
         .id();
     commands.insert_resource(ViewportCamera(camera));
@@ -173,17 +178,12 @@ pub fn spawn_camera(
         Transform::default(),
         GroundPlane,
         view_layer(),
-        DespawnOnExit(AppState::LocalRun),
+        DespawnOnExit(state),
     ));
 }
 
 /// The viewport's toolbar: focus target, focus mode, HUD, grid and gizmos.
-pub fn toolbar(
-    commands: &mut Commands,
-    body: Entity,
-    view: &ViewportState,
-    preview: &PreviewState,
-) {
+pub fn toolbar(commands: &mut Commands, body: Entity, view: &ViewportState, ids: &[u32]) {
     let row = || {
         bsn! {
             @row()
@@ -196,11 +196,6 @@ pub fn toolbar(
     };
     let r = child(commands, body, row());
     child(commands, r, muted("Focus"));
-    let ids: Vec<u32> = preview
-        .run
-        .as_ref()
-        .map(|run| run.bodies().iter().map(|b| b.sim_id).collect())
-        .unwrap_or_default();
     for id in ids.iter().take(MAX_FOCUS_BUTTONS) {
         let text = format!("Focus #{id}");
         let command = StudioCommand::CameraFocus(Some(*id), view.focus.mode);
@@ -353,16 +348,12 @@ fn on_scroll(mut scroll: On<PointerScroll>, mut view: ResMut<ViewportState>) {
 /// the Bevy camera looks at render-space zero from the eye.
 pub fn step_camera(
     time: Res<Time>,
-    preview: Res<PreviewState>,
+    source: Res<ViewSource>,
     mut view: ResMut<ViewportState>,
     camera: Option<Res<ViewportCamera>>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
-    let Some(run) = &preview.run else {
-        return;
-    };
-    let bodies = run.bodies();
-    let target = view.target_state(&bodies);
+    let target = view.target_state(&source.bodies);
     let view = &mut *view;
     crate::viewport::update_focus(
         &mut view.rig,
@@ -389,18 +380,19 @@ pub fn step_camera(
 #[allow(clippy::too_many_arguments)]
 pub fn draw_bodies(
     mut commands: Commands,
-    preview: Res<PreviewState>,
+    source: Res<ViewSource>,
     view: Res<ViewportState>,
+    state: Res<State<AppState>>,
     assets: Option<Res<ViewAssets>>,
     nodes: Query<&ComputedNode, With<ViewportView>>,
     mut visuals: Query<(Entity, &BodyVisual, &mut Transform)>,
     mut gizmos: Gizmos<BodyGizmos>,
     colors: ThemeColors,
 ) {
-    let (Some(run), Some(assets)) = (&preview.run, assets) else {
+    let Some(assets) = assets else {
         return;
     };
-    let bodies = run.bodies();
+    let bodies = &source.bodies;
     let projection = ViewProjection::new(&view.rig, view_size(&nodes));
     let origin = view.rig.pivot;
     let frame = &view.frame;
@@ -430,8 +422,21 @@ pub fn draw_bodies(
             Transform::from_scale(Vec3::ZERO),
             BodyVisual(b.sim_id),
             view_layer(),
-            DespawnOnExit(AppState::LocalRun),
+            DespawnOnExit(*state.get()),
         ));
+    }
+    let fail = colors.color(&token::STATUS_FAIL);
+    for p in &source.alarms {
+        let p = frame.position(*p);
+        if !p.is_finite() {
+            continue;
+        }
+        let r = 3.0 * marker_radius(projection.pixel_size_at(p));
+        gizmos.sphere(
+            Isometry3d::from_translation(to_render(p, origin)),
+            r as f32,
+            fail,
+        );
     }
     if !view.gizmos {
         return;
@@ -442,7 +447,7 @@ pub fn draw_bodies(
         colors.color(&token::GRID_AXIS_Y),
         colors.color(&token::FG_MUTED),
     ];
-    for b in &bodies {
+    for b in bodies {
         let p = frame.position(b.pos);
         let v = frame.vector(DVec3::from(b.lin_vel));
         if !(p.is_finite() && v.is_finite()) {
@@ -545,7 +550,7 @@ pub fn draw_grid(
 /// Write the State HUD: every frame while paused, ten times a second while running.
 pub fn draw_hud(
     time: Res<Time>,
-    preview: Res<PreviewState>,
+    source: Res<ViewSource>,
     view: Res<ViewportState>,
     mut age: Local<f64>,
     mut panels: Query<&mut Visibility, With<HudPanel>>,
@@ -561,31 +566,23 @@ pub fn draw_hud(
             *v = want;
         }
     }
-    let Some(run) = &preview.run else {
-        return;
-    };
     *age += time.delta_secs_f64();
     let fresh = texts.iter().any(|t| t.0.is_empty());
-    if preview.playing && run.status().is_none() && *age < HUD_PERIOD_S && !fresh {
+    if source.moving && *age < HUD_PERIOD_S && !fresh {
         return;
     }
     *age = 0.0;
-    let bodies = run.bodies();
     let body = view
         .focus
         .target
-        .and_then(|t| bodies.iter().find(|b| b.sim_id == t));
-    let state = match run.status() {
-        Some(s) => format!("ended: {s:?}"),
-        None if preview.playing => "live".to_owned(),
-        None => "paused".to_owned(),
-    };
+        .and_then(|t| source.bodies.iter().find(|b| b.sim_id == t));
     let text = match body {
         Some(b) => format!(
-            "{}\nt = {:.3} s   tick {}   {state}",
+            "{}\nt = {:.3} s   tick {}   {}",
             hud_text(&hud(&view.frame, b, None), &view.frame),
-            run.elapsed_s(),
-            run.tick()
+            source.t_s,
+            source.tick,
+            source.state
         ),
         None => "No focus target: press F, or a Focus button.".to_owned(),
     };
@@ -594,4 +591,72 @@ pub fn draw_hud(
             t.0.clone_from(&text);
         }
     }
+}
+
+/// Hand the preview's latest tick to the viewport.
+pub fn preview_source(preview: Res<PreviewState>, mut source: ResMut<ViewSource>) {
+    let Some(run) = &preview.run else {
+        if !source.bodies.is_empty() {
+            *source = ViewSource::default();
+        }
+        return;
+    };
+    let state = match run.status() {
+        Some(s) => format!("ended: {s:?}"),
+        None if preview.playing => "live".to_owned(),
+        None => "paused".to_owned(),
+    };
+    let moving = preview.playing && run.status().is_none();
+    if !moving && source.tick == run.tick() && source.state == state && !source.bodies.is_empty() {
+        return;
+    }
+    *source = ViewSource {
+        bodies: run.bodies(),
+        t_s: run.elapsed_s(),
+        tick: run.tick(),
+        state,
+        moving,
+        alarms: Vec::new(),
+    };
+}
+
+/// Hand the replay frame under the playhead to the viewport.
+pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
+    let Some(frame) = replay.frame() else {
+        if !source.bodies.is_empty() {
+            *source = ViewSource::default();
+        }
+        return;
+    };
+    let state = format!(
+        "frame {} of {}{}",
+        replay.scrub.index + 1,
+        replay.len(),
+        if replay.scrub.playing {
+            ", playing"
+        } else {
+            ""
+        }
+    );
+    if source.tick == frame.tick && source.state == state && !source.bodies.is_empty() {
+        return;
+    }
+    let shown = replay
+        .replay
+        .as_ref()
+        .map_or(&[][..], |r| &r.frames[..=replay.scrub.index]);
+    let alarms = frame
+        .bodies
+        .iter()
+        .filter(|b| b.flags & sim_schema::FLAG_NAN_ORIGIN != 0 || !finite_body(b))
+        .filter_map(|b| last_finite_position(shown, b.sim_id))
+        .collect();
+    *source = ViewSource {
+        bodies: frame.bodies.clone(),
+        t_s: frame.t_s,
+        tick: frame.tick,
+        state,
+        moving: false,
+        alarms,
+    };
 }

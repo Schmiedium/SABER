@@ -179,6 +179,10 @@ pub struct PreviewCrash {
     pub seed: RunSeed,
     /// The flight recorder's frames, oldest first.
     pub frames: Vec<TickFrame>,
+    /// The scenario's world frame.
+    pub frame: Frame,
+    /// The watchdog's energy bound, J, when set.
+    pub energy_max_j: Option<f64>,
 }
 
 /// One run of a scenario in the studio.
@@ -577,6 +581,8 @@ impl PreviewRun {
                 .world()
                 .resource::<FlightRecorder>()
                 .drain_chronological(),
+            frame: self.frame,
+            energy_max_j: self.sim.config().watchdog.energy_max_j,
         })
     }
 }

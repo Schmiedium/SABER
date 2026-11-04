@@ -135,7 +135,12 @@ pub fn fill(
             toolbar(commands, body, preview);
             let s = child(commands, body, mono(""));
             commands.entity(s).insert(Live::Status);
-            super::viewport::toolbar(commands, body, view, preview);
+            let ids: Vec<u32> = preview
+                .run
+                .as_ref()
+                .map(|run| run.bodies().iter().map(|b| b.sim_id).collect())
+                .unwrap_or_default();
+            super::viewport::toolbar(commands, body, view, &ids);
             let f = child(commands, body, muted(""));
             commands.entity(f).insert(Live::Focus);
             if let Some(camera) = camera {

@@ -57,13 +57,31 @@ pub fn value_range(samples: &[[f64; 2]]) -> Option<(f64, f64)> {
 /// top): time from the first to the last sample across, the value range up the side. Non-finite
 /// values break the line.
 pub fn draw(pixels: &mut [u8], width: u32, height: u32, samples: &[[f64; 2]], colors: PlotColors) {
+    draw_in(pixels, width, height, samples, value_range(samples), colors);
+}
+
+/// [`draw`] over a given value range `(lo, hi)` instead of the samples' own, so a reference
+/// level outside the samples (an energy bound) can share the axis. `None` draws only the
+/// background.
+pub fn draw_in(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    samples: &[[f64; 2]],
+    range: Option<(f64, f64)>,
+    colors: PlotColors,
+) {
     let (w, h) = (width as i64, height as i64);
     for px in pixels.chunks_exact_mut(4) {
         px.copy_from_slice(&colors.background);
     }
-    let Some((lo, hi)) = value_range(samples) else {
+    let Some((lo, hi)) = range.filter(|(lo, hi)| lo.is_finite() && hi.is_finite() && hi > lo)
+    else {
         return;
     };
+    if samples.is_empty() {
+        return;
+    }
     let (t0, t1) = (samples[0][0], samples[samples.len() - 1][0]);
     let span = if t1 > t0 { t1 - t0 } else { 1.0 };
     let x = |t: f64| (((t - t0) / span) * (w - 1) as f64).round() as i64;
@@ -138,4 +156,51 @@ pub fn spawn_plot(
             ChildOf(parent),
         ))
         .id()
+}
+
+/// The row a value falls on in a plot of `height` pixels over `(lo, hi)` (row 0 at the top), or
+/// `None` outside the range.
+pub fn row_of(value: f64, height: u32, (lo, hi): (f64, f64)) -> Option<u32> {
+    if !(value.is_finite() && hi > lo) || value < lo || value > hi {
+        return None;
+    }
+    Some((((hi - value) / (hi - lo)) * f64::from(height.max(1) - 1)).round() as u32)
+}
+
+/// A dashed horizontal line at row `y` (4 pixels on, 4 off), for a reference level.
+pub fn draw_level(pixels: &mut [u8], width: u32, height: u32, y: u32, color: [u8; 4]) {
+    if y >= height {
+        return;
+    }
+    for x in (0..width).filter(|x| x % 8 < 4) {
+        let i = ((y * width + x) * 4) as usize;
+        pixels[i..i + 4].copy_from_slice(&color);
+    }
+}
+
+/// A vertical line at column `x` over `rows` (clamped to the image), for a cursor or a mark.
+pub fn draw_column(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    rows: std::ops::Range<u32>,
+    color: [u8; 4],
+) {
+    if x >= width {
+        return;
+    }
+    for y in rows.start.min(height)..rows.end.min(height) {
+        let i = ((y * width + x) * 4) as usize;
+        pixels[i..i + 4].copy_from_slice(&color);
+    }
+}
+
+/// The column of item `i` of `n` spread over `width` pixels (the first at 0, the last at
+/// `width − 1`), as [`draw`] places samples whose times are their indices.
+pub fn column_of(i: usize, n: usize, width: u32) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    ((i.min(n - 1) as f64 / (n - 1) as f64) * f64::from(width.max(1) - 1)).round() as u32
 }
