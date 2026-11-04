@@ -10,7 +10,7 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{RenderCreation, WgpuSettings};
-use bevy::text::EditableText;
+use bevy::text::{EditableText, FontAtlasSet, TextLayoutInfo};
 use bevy::ui_widgets::Activate;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
@@ -34,6 +34,7 @@ use sim_studio::{StudioCorePlugin, StudioUiPlugin};
 use sim_studio_ui::KitPlugin;
 use sim_studio_ui::widgets::Fields;
 use sim_studio_ui::widgets::KitSubmit;
+use sim_studio_ui::widgets::{heading, label, mono};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -109,6 +110,22 @@ fn state(app: &App) -> AppState {
     *app.world().resource::<State<AppState>>().get()
 }
 
+/// How many glyphs were drawn as `.notdef` (glyph 0), the empty box of a character no bundled
+/// font has. Every screen a test visits ends with none.
+fn empty_boxes(app: &App) -> usize {
+    app.world()
+        .resource::<FontAtlasSet>()
+        .values()
+        .flatten()
+        .map(|a| {
+            a.glyph_to_atlas_index
+                .keys()
+                .filter(|k| k.glyph_id == 0)
+                .count()
+        })
+        .sum()
+}
+
 /// From the Launcher, typing a name and folder and pressing a pack makes the workspace and opens
 /// the shell with filled regions; the rail and the close button work from there.
 #[test]
@@ -159,6 +176,7 @@ fn the_launcher_starts_a_workspace_and_the_shell_opens() {
     // The new workspace is now the first recent one, and opening it from there works.
     press(&mut app, "Open workspace ui_ws");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
 
 /// The value field editing `component` `path`, and its text input.
@@ -272,6 +290,7 @@ fn the_builder_edits_undoes_and_exports_a_scenario() {
     press(&mut app, "Select #100 Gravity · Atmosphere · Wind");
     assert_eq!(selected(&app), Some(0));
     inspector_field(&mut app, "sim_models::environment::Gravity", ".g");
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
 
 /// The bind menu: ⚙ on a field opens it, Sweep makes the field a parameter (listed under the
@@ -495,6 +514,7 @@ fn the_requirements_tab_edits_and_saves_a_set() {
     press(&mut app, "Scene tab");
     assert_eq!(tab(&app), BuilderTab::Scene);
     inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
 
 fn preview(app: &App) -> &PreviewState {
@@ -634,6 +654,7 @@ fn the_preview_runs_steps_plots_and_stops() {
     labelled(&mut app, "Replay (P)");
     press(&mut app, "Scenario Builder (B)");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
 
 fn view(app: &App) -> &ViewportState {
@@ -748,4 +769,88 @@ fn the_viewport_follows_a_body_and_marks_the_ground() {
     press(&mut app, "Stop");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
     assert_eq!(count::<BodyVisual>(&mut app), 0);
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
+
+/// Every non-ASCII character in a string or character literal of the studio and its kit, in the
+/// regular, bold and mono styles, has a glyph in Fira or the bundled symbol font (S3-3): no
+/// text the studio writes can draw an empty box.
+#[test]
+fn every_character_the_studio_writes_has_a_glyph() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut chars = std::collections::BTreeSet::new();
+    let literal = |line: &str, chars: &mut std::collections::BTreeSet<char>| {
+        let mut in_str = false;
+        let mut prev = ' ';
+        let b: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if in_str {
+                if c == '"' && prev != '\\' {
+                    in_str = false;
+                } else if !c.is_ascii() {
+                    chars.insert(c);
+                }
+            } else if c == '"' {
+                in_str = true;
+            } else if c == '/' && b.get(i + 1) == Some(&'/') {
+                return; // the rest is a comment
+            } else if c == '\'' && b.get(i + 2) == Some(&'\'') && !b[i + 1].is_ascii() {
+                chars.insert(b[i + 1]);
+            }
+            prev = if prev == '\\' && c == '\\' { ' ' } else { c };
+            i += 1;
+        }
+    };
+    for dir in [root.join("src"), root.join("../sim_studio_ui/src")] {
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    for line in std::fs::read_to_string(&path).unwrap().lines() {
+                        if !line.trim_start().starts_with("//") {
+                            literal(line, &mut chars);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(chars.contains(&'✓') && chars.contains(&'·'), "{chars:?}");
+    let text: String = chars.iter().collect();
+
+    let dir = scratch("glyphs");
+    let mut app = headless(&dir.join("recent.ron"));
+    let world = app.world_mut();
+    world.spawn_scene(label(text.clone())).unwrap();
+    world.spawn_scene(heading(text.clone())).unwrap();
+    world.spawn_scene(mono(text.clone())).unwrap();
+    for _ in 0..200 {
+        app.update();
+        let mut q = app.world_mut().query::<(&Text, &TextLayoutInfo)>();
+        let laid_out = q
+            .iter(app.world())
+            .filter(|(t, l)| t.0 == text && !l.glyphs.is_empty())
+            .count();
+        if laid_out == 3 {
+            break;
+        }
+    }
+    let mut q = app.world_mut().query::<(&Text, &TextLayoutInfo)>();
+    assert_eq!(
+        q.iter(app.world())
+            .filter(|(t, l)| t.0 == text && !l.glyphs.is_empty())
+            .count(),
+        3,
+        "laid out in all three styles"
+    );
+    assert_eq!(
+        empty_boxes(&app),
+        0,
+        "characters without a glyph among {text}"
+    );
 }

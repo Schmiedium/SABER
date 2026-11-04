@@ -1,13 +1,20 @@
 //! The kit's logic without a window (verification §8.3): theme tokens and their contrast (§11),
-//! dock layout arithmetic, and the toast log.
+//! dock layout arithmetic, the toast log, and text laid out with the symbol font behind Fira.
 
 use bevy::feathers::theme::{SurfaceLevel, ThemeToken};
 use bevy::feathers::tokens as ft;
 use bevy::prelude::*;
-use sim_studio_ui::KitCorePlugin;
+use bevy::render::RenderPlugin;
+use bevy::render::settings::{RenderCreation, WgpuSettings};
+use bevy::text::{FontAtlasSet, FontSource, TextLayoutInfo};
+use bevy::window::ExitCondition;
+use bevy::winit::WinitPlugin;
 use sim_studio_ui::dock::{DockLayout, DockSide};
+use sim_studio_ui::fonts::SYMBOLS;
 use sim_studio_ui::theme::{ThemeMode, contrast, theme_props, token};
 use sim_studio_ui::toast::{Toast, ToastLevel, ToastLog};
+use sim_studio_ui::widgets::{heading, label, mono};
+use sim_studio_ui::{KitCorePlugin, KitPlugin};
 
 const MODES: [ThemeMode; 2] = [ThemeMode::Dark, ThemeMode::Light];
 
@@ -239,4 +246,106 @@ fn plots_draw_a_series_across_the_image() {
     fn row_of_const(h: u32) -> u32 {
         (h - 1) / 2
     }
+}
+
+/// The whole kit on `DefaultPlugins` without a window system or GPU: text is still laid out and
+/// its glyphs rasterized into font atlases on the CPU.
+fn text_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        DefaultPlugins
+            .build()
+            .disable::<WinitPlugin>()
+            .set(WindowPlugin {
+                primary_window: Some(Window::default()),
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                    backends: None,
+                    ..default()
+                })),
+                ..default()
+            }),
+        KitPlugin,
+    ));
+    app.world_mut().spawn(Camera2d);
+    app
+}
+
+/// Update until every text has glyphs (Feathers' fonts load from embedded assets).
+fn lay_out(app: &mut App) {
+    for _ in 0..200 {
+        app.update();
+        let mut q = app.world_mut().query::<(&Text, &TextLayoutInfo)>();
+        if q.iter(app.world())
+            .all(|(t, l)| t.0.is_empty() || !l.glyphs.is_empty())
+        {
+            return;
+        }
+    }
+    panic!("text was never laid out");
+}
+
+/// The fonts (by font data id) that drew glyph 0, `.notdef`, the empty box of a character the
+/// font lacks.
+fn notdef_fonts(app: &App) -> Vec<u32> {
+    let atlases = app.world().resource::<FontAtlasSet>();
+    let mut ids: Vec<u32> = atlases
+        .iter()
+        .filter(|(_, a)| {
+            a.iter()
+                .any(|a| a.glyph_to_atlas_index.keys().any(|k| k.glyph_id == 0))
+        })
+        .map(|(k, _)| k.id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Symbols Fira lacks come from the bundled symbol font, in the regular, bold and mono styles,
+/// and none draws an empty box; a character no bundled font has still does, so the check works.
+#[test]
+fn symbols_fall_back_to_the_bundled_font() {
+    let mut app = text_app();
+    let symbols = "PASS ✓ FAIL ✖ ⚠ ◐ ☰ ▸ ⚙ ℹ ● ○ ↳ ★ −12.5 m · γ";
+    let world = app.world_mut();
+    world.spawn_scene(label(symbols)).unwrap();
+    world.spawn_scene(heading(symbols)).unwrap();
+    world.spawn_scene(mono(symbols)).unwrap();
+    lay_out(&mut app);
+
+    let mut q = app.world_mut().query::<(&Text, &TextFont)>();
+    for (_, font) in q.iter(app.world()) {
+        match &font.font {
+            FontSource::List(list) => {
+                assert_eq!(list.len(), 2);
+                assert_eq!(list[1], FontSource::Handle(SYMBOLS));
+            }
+            other => panic!("no symbol fallback: {other:?}"),
+        }
+    }
+    let symbol_id = app
+        .world()
+        .resource::<Assets<Font>>()
+        .get(&SYMBOLS)
+        .expect("the symbol font is added with the kit")
+        .data
+        .id() as u32;
+    let atlases = app.world().resource::<FontAtlasSet>();
+    assert!(
+        atlases.keys().any(|k| k.id == symbol_id),
+        "the symbols were drawn from the symbol font"
+    );
+    assert!(
+        atlases.keys().any(|k| k.id != symbol_id),
+        "the letters from Fira"
+    );
+    assert_eq!(notdef_fonts(&app), Vec::<u32>::new());
+
+    // U+23F8 (pause) is in neither Fira nor the symbol font: it draws the empty box.
+    app.world_mut().spawn_scene(label("\u{23F8}")).unwrap();
+    lay_out(&mut app);
+    assert!(!notdef_fonts(&app).is_empty());
 }
