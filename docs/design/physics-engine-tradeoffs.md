@@ -12,6 +12,8 @@ v1.2 (2026-11-02, build step 1b): §4.3 records the kernel's rigid-body dynamics
 as built; §10.2 names the body behind a `SubstepLimit`; §10.3 gives the packed state layout.
 v1.3 (2026-11-03, build step 5d): §9.7a and §9.7b record geometry, compliant and impulsive contact as
 built; §10.4 records that impact location re-integrates the bodies instead of using dense output.
+v1.4 (2026-11-03, build step 5d-3): §9.7c records the kernel ray query, range sensors and the
+persistent-penetration watchdog as built.
 Companion to `subsystems-and-interfaces.md` (§5.1 `sim_core`, §5.2 `sim_models`, §6 tick pipeline,
 IB-16 fragmentation, G8) and `flight-dynamics-sources.md`.
 
@@ -570,7 +572,7 @@ exactly and is part of `build_id`.
 
 `sim_core::geometry` and `sim_core::contact` (build step 5d-1) implement §9.2–§9.6 for `Compliant` and
 `EventOnly` pairs. `Impulsive` contact, event location, swept `EventOnly` checks and penetration recovery
-followed in step 5d-2 (§9.7b); range sensors and the persistent-penetration watchdog are step 5d-3.
+followed in step 5d-2 (§9.7b); range sensors and the persistent-penetration watchdog in step 5d-3 (§9.7c).
 Differences from the sketch above:
 
 - **Shapes.** `CollisionShape { parts: Vec<ShapePart> }`, each part a `ShapeDesc` (ball, capsule,
@@ -683,13 +685,43 @@ Differences from the sketch above:
   instead of the tick's end. `max_events_per_tick` and `max_projection` join `sim_config_hash`;
   `max_projection` must be finite and ≥ 0.
 - **Not built here.** The persistent-penetration watchdog (`max_penetration` for N ticks) and range
-  sensors are step 5d-3. Known limits: a grazing touch shorter than about 10⁻⁶ of the interval can be
+  sensors followed in step 5d-3 (§9.7c). Known limits: a grazing touch shorter than about 10⁻⁶ of the interval can be
   missed, and when a corner rolls over an edge (the closest feature changes) the cubic model can miss a
   shallow graze; both leave at most a sub-tick overlap that the next tick resolves or projects.
 - **Allocation.** Every buffer is sized at Tick 0; the reused EPA is warmed up with two overlapping balls,
   which run its full 100 iterations, so later overlaps never grow it. The allocation test drops tumbling
   boxes and balls onto the ground and each other, defers an impact, projects an overlap, and fires fast
   balls at a thin plate (one rigid, one event-only), under RK4 and adaptive Dormand–Prince.
+
+### 9.7c As built (step 5d, part 3)
+
+- **Ray query.** `Dynamics::ray_cast(world, origin, direction, max, exclude) -> Option<RayHit>` returns
+  the first collider the ray meets within `max`: `RayHit { distance, point, normal, sim_id }`, the
+  normal facing back along the ray. Every collider takes part, static ones included, each at its body's
+  pose in the World now; the collider of `exclude` is skipped. A moving collider is first tested against
+  its bounding sphere about the body's centre, a bounded static one against its box, then each part goes through Parry's ray cast inside `sim_core::geometry`. Shapes are solid, so
+  an origin inside a collider reads distance 0. Ties go to the collider first in `SimId` order. The
+  direction is normalised; a zero or non-finite direction, origin or range finds nothing. The query
+  allocates nothing.
+- **Range finders.** `RangeFinder { rate_divider, latency, mount, direction, max_range, noise, range, hit,
+  valid }` is a fourth `SensorPlugin` sensor (model library 0.1.5), on a `RigidBody6` or a `PointMass3`.
+  It samples like the others (divided rate, latency in ticks, its own stream `sensors/range/<SimId>`, the
+  shared `Noise` model): the truth is the ray from `position + attitude · mount` along
+  `attitude · direction` (world axes on a point mass; default `+z`, down in FRD body axes), skipping the
+  body's own collider. With nothing within `max_range` it reads `max_range` with `hit` false, and the
+  noise draws are taken all the same so the stream stays aligned. Noise never makes a range negative.
+  `max_range` must be finite and above 0, the direction non-zero and the mount finite.
+- **Persistent-penetration watchdog.** `config.contact.max_penetration` (m, default off) and
+  `config.contact.penetration_ticks` (default 10, at least 1). At the end of each tick every touching
+  body pair whose deepest point overlaps more than `max_penetration` counts one more tick in a row; a pair
+  that counts more than `penetration_ticks` ends the run `CrashedSolver` with the new
+  `CrashKind::Penetration` (6), naming both `SimId`s, the overlap and the limit. The depth is the one in
+  `Contacts`, before any projection of an impulsive pair. Gear points are not checked: their compression
+  is the strut's. Off by default because a soft material may rest deep on purpose and no one depth suits
+  every scale, from a fragment to an aircraft. Both settings are in `sim_config_hash`;
+  `max_penetration` must be finite and above 0.
+- **Not built here.** Scanning lidar (many rays per sample) and segment queries for fragment impacts
+  (step 7) use the same ray query when they come.
 
 ### 9.8 Effort
 

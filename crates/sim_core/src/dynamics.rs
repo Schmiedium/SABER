@@ -37,7 +37,7 @@ use sim_schema::{CrashKind, CrashReason};
 use crate::app::SetupError;
 use crate::body::{BodyState, BodyTable, Dof, PointMass3, RigidBody6, SimId};
 use crate::clock::SimClock;
-use crate::contact::{ContactConfig, ContactSolver, ImpactKind, Probe};
+use crate::contact::{ContactConfig, ContactSolver, ImpactKind, Probe, RayHit};
 use crate::environment::{EnvSample, Environment, SimEnvironment};
 use crate::events::SimEvents;
 use crate::force::{ForceModel, Stage, Wrench};
@@ -109,6 +109,26 @@ impl Dynamics {
     /// without gravity.
     pub fn tick_wrench(&self, i: usize) -> Wrench {
         self.tick_wrenches[i]
+    }
+
+    /// The first collider hit by a ray from `origin` along `direction` (normalised here) within
+    /// `max` metres, skipping `exclude`'s collider, with the bodies at their poses in `world` now:
+    /// the query behind range sensors. `None` before Tick 0, for a zero or non-finite direction, or
+    /// when nothing is hit.
+    pub fn ray_cast(
+        &self,
+        world: &World,
+        origin: DVec3,
+        direction: DVec3,
+        max: f64,
+        exclude: Option<SimId>,
+    ) -> Option<RayHit> {
+        let dir = direction.try_normalize()?;
+        if !(origin.is_finite() && max.is_finite() && max >= 0.0) {
+            return None;
+        }
+        self.contact
+            .ray_cast(world, &self.bodies, origin, dir, max, exclude)
     }
 
     /// Integrator telemetry for this run (the summary columns of physics §10.6).

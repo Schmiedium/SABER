@@ -1,7 +1,7 @@
 # SABER: Verification and Test Strategy
 
 Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2; v0.9 (2026-11-02, build step 1c) names the USSA 1976 and WGS 84 oracles actually used and the scenario-file tests, §7.1; v1.0 (2026-11-02, build step 2) lists the per-run verification tests as built, §7.8; v1.1 (2026-11-02, build step 3a) adds the golden output files read by both Rust and Python, §8.3; v1.2 (2026-11-02, build step 3b) lists the local runner's tests, R3 and R4 as built, §8.3; v1.3 (2026-11-02, build step 3c) adds the Python-driven local campaign and the shared `campaign.toml` defaults, §8.3, §8.4; v1.4 (2026-11-03, build step 4a) records R5 on 1, 2 and 4 ranks, as threads and under `mpiexec`, and the crash-storm and init-refusal tests, §8.3, §8.4; v1.5 (2026-11-03, build step 4b) records R6 and the drain, SIGTERM and resume-refusal tests, §8.4; v1.6 (2026-11-03, build step 4c) completes the tiny-campaign test with `verdicts.parquet` against hand-computed verdicts and adds the campaign-statistics tests, §8.4; v1.7 (2026-11-03, build step 5a) records the rotating-frame and aero-ballistics tests, writes out the linear yaw equation of the plugin's own force laws for M2 and narrows T2, §6.2, §7.1, §7.3, §13; v1.8 (2026-11-03, build step 5b) records the fixed-wing tests: the Stevens–Lewis F-16 check case, the book's trims, an envelope sweep against an independent port of the book's subroutines, and adds T5, §7.4, §13; v1.9 (2026-11-03, build step 5c, part 1) records the Dryden spectrum and autocorrelation tests and the actuator and sensor tests, §7.1, §7.6; v1.10 (2026-11-03, build step 5c, part 2) records the rotorcraft and control tests and leaves the RotorPy cross-check open, §7.6;
-v1.11 (2026-11-03, build step 5d, part 1) records the compliant-contact, geometry and gear tests, §7.5; v1.12 (2026-11-03, build step 5d, part 2) records the impulsive-contact tests, §7.5). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+v1.11 (2026-11-03, build step 5d, part 1) records the compliant-contact, geometry and gear tests, §7.5; v1.12 (2026-11-03, build step 5d, part 2) records the impulsive-contact tests, §7.5; v1.13 (2026-11-03, build step 5d, part 3) records the penetration-watchdog and range-finder tests, §7.5, §7.6). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -718,7 +718,7 @@ the step.
 under constant gravity is a quadratic, which every method integrates to round-off, so the bouncing-ball
 errors are those of the located impact times alone. The glancing projectile has friction (sliding
 throughout) and is checked against the closed-form impulse rather than the frictionless invariant. The
-persistent-penetration watchdog is step 5d-3.
+persistent-penetration watchdog followed in step 5d-3.
 
 | Check | Oracle | Tolerance |
 |---|---|---|
@@ -734,6 +734,14 @@ persistent-penetration watchdog is step 5d-3.
 | An `EventOnly` ball at 600 m/s through a thin plate inside one tick: one `contact` at the time it first touched, with its approach speed, the plate's `SimId` and the point on the face; not slowed | closed form | 1e-12 s; 1e-9 m/s; 1e-9 m |
 | Twelve boxes and balls raining onto the ground and each other, twice and in reversed spawn order | R1-style exact | every final state and every event bit-equal |
 | Zero allocations for 1000 ticks per run, under RK4 and adaptive Dormand–Prince, across a World reset: tumbling boxes and balls on the ground and each other, a deferred impact, a projected overlap, rigid and event-only fast balls at a thin plate | counting allocator | 0 |
+
+**As built (step 5d, part 3).** The persistent-penetration watchdog (`crates/sim_core/tests/contact.rs`),
+with synthetic values (TD1). The ray query is checked through the range finders of §7.6.
+
+| Check | Oracle | Tolerance |
+|---|---|---|
+| A 1 kg ball settling on a soft linear ground (`k` = 1000 N/m, `ζ` = 0.1) to its static overlap `m g / k` ≈ 9.8 mm: with `max_penetration` 5 mm and `penetration_ticks` 10 the run ends `CrashedSolver(Penetration)` at exactly the tick that ends the first stretch of 11 ticks deeper than 5 mm in the unwatched run, bit-identical to it until then, with both `SimId`s and the limit in the detail; with 15 mm and 100 ticks the first overshoot goes deeper for fewer ticks and the run completes; with the watchdog off (the default) it completes | exact against the unwatched run | bit-exact; exact tick |
+| `max_penetration` of 0, negative, NaN or infinite and `penetration_ticks = 0` are configuration errors; both settings change `sim_config_hash` and parse from RON as `config.contact` | error kinds, exact | exact |
 
 ### 7.6 `RotorcraftPlugin`, `ActuatorPlugin`, `SensorPlugin`, `ControlPlugin`
 
@@ -782,6 +790,16 @@ gust cases wait for a CI job that installs it or for exported reference trajecto
 | `tests/scenarios/quadrotor.scn.ron`: climb from 2 m to 10 m on cascaded GNSS loops and IMU rate loops through the mixer; ends `Completed` at 3000 ticks, within 1 cm of 10 m, level, climb rate near its 3 m/s limit | integration | 0.01 m; 1e-9 rad |
 | A native `Controller` (PD altitude hold on `Gnss` writing `MixerCommand`, with a trim error drawn at reset) inserts its command, steps every 5th tick, and settles at `target − hover·trim/k_p`; the same seed repeats the run bit for bit, another seed draws another trim | closed form, exact (R9) | 1e-4 m; bit-exact |
 | Setup errors for both plugins and for a controller; zero allocations per tick for the quadrotor scenario in Dryden wind with noisy sensors beside a second quad flown by a native controller | error kinds, integration | exact |
+
+**As built (step 5d, part 3).** Range finders on the kernel's ray query (`crates/sim_models/tests/sensors.rs`,
+`alloc.rs`), synthetic geometry (TD1).
+
+| Check | Oracle | Tolerance |
+|---|---|---|
+| A yawed, pitched and rolled 6DOF body 20 m up, beam from an offset mount through its own ball collider: the slant range `−z₀ / (q·ẑ)_z` to the ground; a point mass's world-axis beam: its height | closed form | 1e-12 relative; 1e-12 m |
+| A beam down onto a height field sloped along both axes (`z − 0.1 x − 0.2 y`), a beam to a static box's face, a beam to another body's ball; a noisy range finder whose box lies beyond `max_range` reads exactly `max_range` with `hit` false | closed form | 1e-12 m; exact |
+| A body sinking at 0.2 m/s, divider 2 and latency 3: the published range is the height at the newest due tick, nothing valid before; a noisy range finder 1 mm up never reads below 0 (about half its 2000 readings are 0) | exact, statistical | 1e-12 m; count in 800–1200 |
+| Setup errors: `max_range` 0, a zero beam direction, a NaN mount; zero allocations per tick with a noisy altimeter and a forward beam on the two quads over a ground and a box | error kinds, counting allocator | exact; 0 |
 
 ### 7.7 Fragmentation hook (IB-16)
 

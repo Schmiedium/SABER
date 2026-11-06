@@ -65,7 +65,7 @@ pub use clock::{RateDivider, SimClock};
 pub use contact::{
     CONTACT, CONTACT_DEFERRED, CONTACT_END, CONTACT_PROJECTED, ContactConfig, ContactMaterial,
     ContactModel, ContactOverride, ContactOverrides, ContactPoint, ContactPoints, Contacts,
-    DampingLaw, GearPoint, IMPACT,
+    DampingLaw, GearPoint, IMPACT, RayHit,
 };
 pub use distribution::{Distribution, Sampler};
 pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment, WorldFrame};

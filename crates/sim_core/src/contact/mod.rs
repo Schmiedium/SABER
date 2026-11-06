@@ -43,7 +43,12 @@
 //! at a tick end, N) when it stops, with both `SimId`s and the deepest point. Then it pushes
 //! overlapping `Impulsive` pairs apart (at most `contact.max_projection` per tick, logged as
 //! `contact_projected`) and looks for `EventOnly` pairs that met and parted inside the tick along
-//! the interpolated motion (logged as `contact` with the time of the touch).
+//! the interpolated motion (logged as `contact` with the time of the touch). With
+//! `contact.max_penetration` set, a pair overlapping deeper than it at the end of more than
+//! `contact.penetration_ticks` ticks in a row ends the run `CrashedSolver(Penetration)` (step 5d-3).
+//!
+//! `ContactSolver::ray_cast` (behind `Dynamics::ray_cast`) finds the first collider along a ray, for
+//! range sensors.
 
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
@@ -62,8 +67,10 @@ use crate::parametric::ResolveReport;
 use crate::watchdog::RunStatus;
 
 mod impact;
+mod ray;
 
 pub(crate) use impact::{ImpactKind, Probe, energy_grew};
+pub use ray::RayHit;
 
 /// `contact`: a pair or gear point started touching.
 pub const CONTACT: &str = "contact";
@@ -289,6 +296,10 @@ fn default_max_projection() -> f64 {
     1e-3
 }
 
+fn default_penetration_ticks() -> u32 {
+    10
+}
+
 /// Contact settings in the run configuration (`config.contact`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -304,6 +315,15 @@ pub struct ContactConfig {
     /// The most an overlapping `Impulsive` pair is pushed apart per tick, m.
     #[serde(default = "default_max_projection")]
     pub max_projection: f64,
+    /// Watchdog: two colliders overlapping deeper than this at the end of more than
+    /// `penetration_ticks` ticks in a row end the run `CrashedSolver(Penetration)`, m. Off (`None`)
+    /// by default: a soft material may rest that deep on purpose. Gear points are not checked
+    /// (their compression is the strut's).
+    #[serde(default)]
+    pub max_penetration: Option<f64>,
+    /// Ticks in a row a pair may overlap deeper than `max_penetration` (≥ 1).
+    #[serde(default = "default_penetration_ticks")]
+    pub penetration_ticks: u32,
 }
 
 impl Default for ContactConfig {
@@ -312,6 +332,8 @@ impl Default for ContactConfig {
             max_contact_pairs: default_max_pairs(),
             max_events_per_tick: default_max_events(),
             max_projection: default_max_projection(),
+            max_penetration: None,
+            penetration_ticks: default_penetration_ticks(),
         }
     }
 }
@@ -525,6 +547,10 @@ type Key = (u8, u32, u32);
 struct Active {
     key: Key,
     peak: f64,
+    /// Overlap of the deepest point at the last tick end, m, and the ticks in a row it has been
+    /// deeper than `max_penetration`.
+    depth: f64,
+    deep_ticks: u32,
 }
 
 /// The contact solver, owned by `Dynamics` (built at Tick 0).
@@ -1166,6 +1192,7 @@ impl ContactSolver {
         let mut contacts = std::mem::take(&mut world.resource_mut::<Contacts>().points);
         contacts.clear();
         let mut overflow = !ok;
+        let max_penetration = self.config.max_penetration;
         self.next_active.clear();
         let mut next = std::mem::take(&mut self.next_active);
         // Borrowed in place: `SimEvents::default()` reserves its buffer, so taking it would allocate.
@@ -1190,10 +1217,17 @@ impl ContactSolver {
                     value: deepest.approach,
                 });
             }
+            let deep = key.0 == 0 && max_penetration.is_some_and(|m| deepest.depth > m);
             if next.len() < next.capacity() {
                 next.push(Active {
                     key,
                     peak: prior.map_or(total, |p| p.peak.max(total)),
+                    depth: deepest.depth,
+                    deep_ticks: if deep {
+                        prior.map_or(0, |p| p.deep_ticks) + 1
+                    } else {
+                        0
+                    },
                 });
             }
         };
@@ -1247,10 +1281,28 @@ impl ContactSolver {
         self.resting
             .retain(|&(a, b)| next.iter().any(|n| n.key == (0, a as u32, b as u32)));
         world.resource_mut::<Contacts>().points = contacts;
+        let sunk = next
+            .iter()
+            .find(|n| n.deep_ticks > self.config.penetration_ticks)
+            .copied();
         self.next_active = active;
         self.active = next;
         self.states = states;
         self.after_tick(world, bodies, frame_rotation);
+        if let (Some(sunk), Some(limit)) = (sunk, max_penetration) {
+            let (a, b) = self.key_ids(sunk.key);
+            let tick = world.resource::<SimClock>().tick;
+            world.resource_mut::<RunStatus>().report_crash(CrashReason {
+                kind: CrashKind::Penetration,
+                sim_id: Some(a.0),
+                tick,
+                detail: format!(
+                    "SimId {} and SimId {} overlap by {} m, deeper than contact.max_penetration = \
+                     {limit} m for more than {} ticks",
+                    a.0, b.0, sunk.depth, self.config.penetration_ticks
+                ),
+            });
+        }
         if overflow && !self.overflowed {
             self.overflowed = true;
             let tick = world.resource::<SimClock>().tick;
