@@ -38,6 +38,7 @@ pub struct Stage<'a> {
     pub(crate) env: &'a [EnvSample],
     pub(crate) bodies: &'a BodyTable,
     pub(crate) frame_rotation: DVec3,
+    pub(crate) own_states: &'a [f64],
 }
 
 impl Stage<'_> {
@@ -82,6 +83,12 @@ impl Stage<'_> {
         self.frame_rotation
     }
 
+    /// The calling model's own integrated states at this stage (see [`ForceModel::state_len`]);
+    /// empty for a model without states.
+    pub fn model_states(&self) -> &[f64] {
+        self.own_states
+    }
+
     /// Body `i`'s angular velocity relative to the world frame (and so to air at rest in it),
     /// body axes, rad/s: `body_rates` less the frame's rotation. Meaningful for 6DOF bodies.
     pub fn rates_relative_to_frame(&self, i: usize) -> DVec3 {
@@ -116,4 +123,22 @@ pub trait ForceModel: Send + Sync + 'static {
 
     /// At every stage: add this model's force and moment to `out[i]` for each body `i` it acts on.
     fn eval(&self, stage: &Stage<'_>, out: &mut [Wrench]);
+
+    /// How many integrated states this model owns (for example an engine's power lag), packed after
+    /// the bodies and crossed by the World's integrator with every other state (IB-08 rule 4).
+    /// Read after `setup` and fixed for the run. Default: none.
+    fn state_len(&self) -> usize {
+        0
+    }
+
+    /// Copy this model's states out of the World into `x` (at the start of every tick). The World
+    /// is the source of truth between ticks, as for the bodies.
+    fn read_states(&self, _world: &World, _x: &mut [f64]) {}
+
+    /// Write this model's states from `x` back into the World (at the end of every tick).
+    fn write_states(&self, _world: &mut World, _x: &[f64]) {}
+
+    /// At every stage: the time derivative of this model's states, whose values are
+    /// `stage.model_states()`. Pure, like `eval`.
+    fn state_rhs(&self, _stage: &Stage<'_>, _dxdt: &mut [f64]) {}
 }

@@ -240,3 +240,178 @@ def test_an_aborted_run_names_its_reason(tmp_path):
     with pytest.raises(CampaignError, match="crash policy") as e:
         run.check()
     assert e.value.status is Status.ABORTED
+
+
+# --- Resume and cluster jobs (step 4b) ------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in binary is a script")
+def test_resume_flags_reach_sim_hpc(tmp_path):
+    ok = {"ok": True, "exit": 0, "campaign_id": "c", "runs": 12, "build_id": "b", "scene_hash": "01",
+          "manifest_hash": "02", "attempt": 3, "committed_runs": 10, "missing_runs": 2}
+    pf = campaign.preflight("c.toml", resume=True, sim_hpc=fake_sim_hpc(tmp_path, 0, ok))
+    assert argv(tmp_path)[-1] == "--resume"
+    assert (pf.attempt, pf.committed_runs, pf.missing_runs) == (3, 10, 2)
+    campaign.preflight("c.toml", resume=True, override_crash_policy=True, sim_hpc=fake_sim_hpc(tmp_path, 0, ok))
+    assert argv(tmp_path)[-2:] == ["--resume", "--override-crash-policy"]
+    with pytest.raises(ValueError, match="needs resume"):
+        campaign.preflight("c.toml", override_crash_policy=True, sim_hpc=fake_sim_hpc(tmp_path, 0, ok))
+
+    refused = {"ok": False, "exit": 2, "kind": "OutputExists", "error": "out already holds a campaign"}
+    with pytest.raises(CampaignError, match="already holds") as e:
+        campaign.preflight("c.toml", sim_hpc=fake_sim_hpc(tmp_path, 2, refused))
+    assert (e.value.status, e.value.kind) == (Status.INVALID, "OutputExists")
+
+    report = {"ok": False, "exit": 5, "stopped": "walltime", "attempt": 1}
+    run = campaign.run_local("c.toml", resume=True, deadline=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                             sim_hpc=fake_sim_hpc(tmp_path, 5, report))
+    assert argv(tmp_path)[-3:] == ["--resume", "--deadline", "1893456000.0"]
+    assert run.status is Status.PARTIAL and run.status.resumable
+
+
+def test_resources_render_pbs_and_slurm_jobs(tmp_path):
+    toml = CampaignConfig(id="proj-a", scene="s.scn.ron", manifest="m.parquet",
+                          output=Output(shared_out="out")).write(tmp_path / "c" / "campaign.toml")
+    assert campaign.Resources(walltime="1-02:03:04").walltime_s() == 93784
+    assert campaign.Resources(walltime=90).hms() == "00:01:30"
+    assert campaign.Resources(walltime="30:00").walltime_s() == 1800
+    for bad in ("soon", "1:2:3:4", 0):
+        with pytest.raises(CampaignError) as e:
+            campaign.Resources(walltime=bad).walltime_s()
+        assert e.value.status is Status.USAGE
+    assert campaign.Resources(nodes=3, launcher="srun").flags() == ["--nodes", "3", "--ntasks-per-node", "1"]
+    assert campaign.Resources(launcher="/opt/x/launch").flags() == []
+
+    r = campaign.Resources(nodes=32, cpus_per_node=64, walltime="04:00:00", queue="prod", account="ab12",
+                           threads=62, setup=["module load openmpi"], directives=["#PBS -l pmem=1gb"])
+    pbs = campaign.render_job(toml, r)
+    for line in ("#PBS -l select=32:ncpus=64:mpiprocs=1", "#PBS -l walltime=04:00:00", "#PBS -q prod",
+                 "#PBS -A ab12", "#PBS -l pmem=1gb", "module load openmpi",
+                 "export SABER_WALLTIME_END=$(( $(date +%s) + 14400 ))"):
+        assert line in pbs.splitlines(), line
+    launch = next(l for l in pbs.splitlines() if l.startswith("mpiexec "))
+    assert launch.startswith("mpiexec -n 32 --map-by ppr:1:node --bind-to none sim_hpc --campaign ")
+    assert "--threads 62" in launch and "--resume" not in launch
+    assert "auto-resume stops" not in pbs
+    # Directives come before the first command.
+    first_command = next(i for i, l in enumerate(pbs.splitlines()) if l and not l.startswith("#"))
+    assert all(not l.startswith("#PBS") for l in pbs.splitlines()[first_command:])
+
+    again = campaign.render_job(toml, r, resubmission=True, override_crash_policy=True)
+    assert "--resume --override-crash-policy" in again and "auto-resume stops" in again
+
+    slurm = campaign.render_job(toml, r, scheduler="slurm")
+    for line in ("#SBATCH --nodes=32", "#SBATCH --ntasks-per-node=1", "#SBATCH --cpus-per-task=64",
+                 "#SBATCH --time=04:00:00", "#SBATCH --partition=prod", "#SBATCH --account=ab12"):
+        assert line in slurm.splitlines(), line
+    with pytest.raises(ValueError, match="scheduler"):
+        campaign.render_job(toml, r, scheduler="lsf")
+
+
+def _script(path: Path, body: str) -> Path:
+    path.write_text(f"#!{sys.executable}\n{body}")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in tools are scripts")
+def test_submit_queues_the_job_and_its_resubmissions(tmp_path):
+    toml = CampaignConfig(id="proj-q", scene="s.scn.ron", manifest="m.parquet", output=Output(shared_out="out"),
+                          checkpoint=Checkpoint(auto_resume=2)).write(tmp_path / "campaign.toml")
+    calls = tmp_path / "calls.jsonl"
+    for name, out in (("qsub", "print(f'{n}.pbs01')"), ("sbatch", "print(f'{n};cluster')")):
+        _script(tmp_path / name, "import json, sys\n"
+                f"n = sum(1 for _ in open({str(calls)!r})) if __import__('os').path.exists({str(calls)!r}) else 0\n"
+                f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n{out}\n")
+    r = campaign.Resources(nodes=2, walltime="01:00:00")
+
+    sub = campaign.submit(toml, r, check=False, submitter=tmp_path / "qsub")
+    assert sub.job_ids == ["0.pbs01", "1.pbs01", "2.pbs01"]
+    first, again = sub.scripts
+    assert (first.name, again.name) == ("proj-q.pbs", "proj-q-resume.pbs")
+    queued = [json.loads(l) for l in calls.read_text().splitlines()]
+    assert queued == [[str(first)], ["-W", "depend=afterany:0.pbs01", str(again)],
+                      ["-W", "depend=afterany:1.pbs01", str(again)]]
+    assert "--resume" in again.read_text() and "--resume" not in first.read_text()
+    assert os.access(first, os.X_OK)
+
+    calls.unlink()
+    sub = campaign.submit(toml, r, scheduler="slurm", auto_resume=1, check=False, submitter=tmp_path / "sbatch")
+    assert sub.job_ids == ["0", "1"]
+    queued = [json.loads(l) for l in calls.read_text().splitlines()]
+    assert queued[1][:2] == ["--parsable", "--dependency=afterany:0"]
+    assert sub.scripts[1].suffix == ".slurm"
+
+    # A resume with nothing left queues nothing; a drain margin as long as the walltime is refused.
+    done = {"ok": True, "exit": 0, "campaign_id": "proj-q", "runs": 4, "build_id": "b", "scene_hash": "01",
+            "manifest_hash": "02", "attempt": 2, "committed_runs": 4, "missing_runs": 0}
+    sub = campaign.submit(toml, r, resume=True, sim_hpc=fake_sim_hpc(tmp_path, 0, done), submitter=tmp_path / "qsub")
+    assert sub.job_ids == [] and sub.preflight.missing_runs == 0
+    with pytest.raises(CampaignError, match="drain_margin_s") as e:
+        campaign.submit(toml, campaign.Resources(walltime=600), check=False, submitter=tmp_path / "qsub")
+    assert e.value.status is Status.INVALID
+    _script(tmp_path / "broken", "import sys\nprint('qsub: no queue', file=sys.stderr)\nsys.exit(3)\n")
+    with pytest.raises(CampaignError, match="no queue"):
+        campaign.submit(toml, r, check=False, submitter=tmp_path / "broken")
+
+
+@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("bash"), reason="the job script is bash")
+def test_job_scripts_run_and_resubmissions_stop_when_resuming_cannot_help(tmp_path):
+    """The rendered scripts, run by bash with a stand-in launcher and sim_hpc: a resubmission runs
+    after a resumable attempt that made progress, and exits at once otherwise."""
+    toml = CampaignConfig(id="proj-j", scene="s.scn.ron", manifest="m.parquet",
+                          output=Output(shared_out="out")).write(tmp_path / "campaign.toml")
+    (tmp_path / "out").mkdir()
+    plan = tmp_path / "plan.json"
+    calls = tmp_path / "calls.jsonl"
+    # Each call commits `commit` parts and exits `exit`, as the next plan entry says.
+    fake = _script(tmp_path / "sim_hpc", "import json, os, sys, time\n"
+                   f"plan = json.load(open({str(plan)!r}))\n"
+                   "step = plan.pop(0)\n"
+                   f"json.dump(plan, open({str(plan)!r}, 'w'))\n"
+                   f"out = {str(tmp_path / 'out')!r}\n"
+                   "for i in range(step['commit']):\n"
+                   "    open(os.path.join(out, f'node_0_a0_p{time.time_ns()}{i}_summaries.parquet'), 'w').close()\n"
+                   f"open({str(calls)!r}, 'a').write(json.dumps({{'argv': sys.argv[1:], "
+                   "'end': os.environ.get('SABER_WALLTIME_END')}) + '\\n')\n"
+                   "print(json.dumps({'ok': step['exit'] == 0, 'exit': step['exit']}))\n"
+                   "sys.exit(step['exit'] if step['exit'] < 100 else 1)\n")
+    launcher = tmp_path / "launch"
+    launcher.write_text('#!/bin/sh\nexec "$@"\n')
+    launcher.chmod(0o755)
+    r = campaign.Resources(walltime="02:00:00", launcher=str(launcher), launcher_flags=[], sim_hpc=str(fake))
+    first = tmp_path / "first.pbs"
+    first.write_text(campaign.render_job(toml, r))
+    again = tmp_path / "again.pbs"
+    again.write_text(campaign.render_job(toml, r, resubmission=True))
+    jobs = tmp_path / "jobs"
+
+    def job(script: Path, job_id: str) -> int:
+        env = dict(os.environ, PBS_JOBID=job_id)
+        return subprocess.run(["bash", str(script)], env=env, timeout=60).returncode
+
+    def ledger() -> list:
+        return [l.split("\t") for l in (jobs / "ledger.tsv").read_text().splitlines()]
+
+    def ran() -> int:
+        return len(calls.read_text().splitlines()) if calls.exists() else 0
+
+    plan.write_text(json.dumps([{"commit": 2, "exit": 5}, {"commit": 0, "exit": 5}, {"commit": 1, "exit": 6}]))
+    t0 = time.time()
+    assert job(first, "1") == 5
+    call = json.loads(calls.read_text().splitlines()[0])
+    assert "--resume" not in call["argv"] and abs(int(call["end"]) - (t0 + 7200)) < 30
+    assert json.loads((jobs / "report-1.json").read_text())["exit"] == 5
+    # Job 1 drained after committing two parts: job 2 resumes.
+    assert job(again, "2") == 5
+    assert "--resume" in json.loads(calls.read_text().splitlines()[1])["argv"]
+    # Job 2 committed nothing: job 3 stops at once.
+    assert job(again, "3") == 0 and ran() == 2
+    assert "committed no new parts" in (jobs / "job-3.log").read_text()
+    assert ledger() == [["start", "1", "0"], ["end", "1", "5"], ["start", "2", "2"], ["end", "2", "5"]]
+
+    # A killed job (a start and no end) is resumed; an aborted one (6) is not.
+    (jobs / "ledger.tsv").write_text("start\t4\t0\n")
+    assert job(again, "5") == 6 and ran() == 3
+    assert job(again, "6") == 0 and ran() == 3
+    assert "ended with exit 6" in (jobs / "job-6.log").read_text()

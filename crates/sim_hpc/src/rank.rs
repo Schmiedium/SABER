@@ -11,6 +11,13 @@
 //! cancel flag. Rank 0's main thread also serves the [`Dispatcher`], writes the heartbeat and, once
 //! every rank has sent its `NodeReport`, `_MANIFEST.json`; it then broadcasts the exit code.
 //!
+//! Resume (seq §12): rank 0 plans the attempt in [`start`] ([`crate::resume`]) and dispatches only
+//! the runs earlier attempts did not commit, with their counts restored so the crash policy and the
+//! dump quota stay campaign-wide. Drain (seq §7, §12): rank 0 stops dispatch once the walltime
+//! deadline is within `checkpoint.drain_margin_s`, and a rank whose stop flag is set (SIGTERM)
+//! abandons its in-flight runs, says `done`, and commits what finished; either way the job exits
+//! `5` with an exact resume point.
+//!
 //! Message rules that keep every message received (no strays at `MPI_Finalize`): every request is
 //! answered exactly once (`AssignWork` or `Terminate`, the last); `Abort` goes only to ranks still
 //! waiting for work, at most once, and always before their `Terminate`; a rank's `NodeReport` is its
@@ -20,8 +27,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::json;
 use sim_schema::RangeSet;
@@ -37,6 +44,7 @@ use crate::protocol::{
     AbortMsg, BlobHeader, BlobKind, ChunkAssign, ChunkRequest, Final, Init, NodeReport, PROTOCOL,
     ReadyAck, Refusal, Tally, Terminate, decode, encode,
 };
+use crate::resume::{Mode, Prior, prepare};
 use crate::transport::{Single, Tag, Transport};
 use crate::worker::{Placement, Quota, Worker};
 
@@ -46,8 +54,15 @@ pub struct RunOptions {
     /// Worker threads per rank (overrides `execution.threads`). With several ranks, rank 0 runs
     /// one fewer, since its main thread also dispatches.
     pub threads: Option<usize>,
-    /// The attempt number (resume arrives with step 4b).
+    /// The attempt number, in every part file name.
     pub attempt: u16,
+    /// What earlier attempts committed ([`start`] or [`prepare`]); rank 0 dispatches only the
+    /// missing runs and starts from their counts. `None` runs every run.
+    pub prior: Option<Prior>,
+    /// The job's walltime end: rank 0 stops dispatch `checkpoint.drain_margin_s` before it.
+    pub deadline: Option<SystemTime>,
+    /// Set (by a SIGTERM handler) to stop: in-flight runs are abandoned and what finished commits.
+    pub stop: Option<Arc<AtomicBool>>,
     /// Chunk order.
     pub dispatch: Dispatch,
     /// Copy attempts per staged file.
@@ -65,6 +80,9 @@ impl Default for RunOptions {
         Self {
             threads: None,
             attempt: 0,
+            prior: None,
+            deadline: None,
+            stop: None,
             dispatch: Dispatch::Canary,
             stage_attempts: 4,
             stage_backoff: Duration::from_millis(500),
@@ -74,11 +92,35 @@ impl Default for RunOptions {
     }
 }
 
-/// What a run did. On rank 0 the counts and parts are campaign-wide; on other ranks, the rank's own.
+/// Why an attempt stopped dispatch before every run went out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// The walltime deadline came within `drain_margin_s` (rank 0).
+    Walltime,
+    /// The stop flag was set (SIGTERM or SIGINT).
+    Signal,
+}
+
+impl Stop {
+    /// The name in `--json` output and `_MANIFEST.json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Stop::Walltime => "walltime",
+            Stop::Signal => "signal",
+        }
+    }
+}
+
+/// What a run did. On rank 0 the counts and parts are the attempt's, from every rank, and
+/// `committed_runs` covers every attempt; on other ranks, everything is the rank's own.
 #[derive(Clone, Debug)]
 pub struct RunReport {
     /// The process exit code (the same on every rank).
     pub exit: ExitCode,
+    /// The attempt.
+    pub attempt: u16,
+    /// Why dispatch stopped early, if it did.
+    pub stopped: Option<Stop>,
     /// This rank.
     pub rank: u32,
     /// Ranks in the job.
@@ -101,7 +143,7 @@ pub struct RunReport {
     pub failed: Vec<(PartReport, String)>,
     /// The first write error.
     pub io_error: Option<String>,
-    /// Runs in committed parts.
+    /// Runs in committed parts (on rank 0, of every attempt).
     pub committed_runs: RangeSet,
     /// Why the crash policy stopped the campaign.
     pub abort: Option<AbortMsg>,
@@ -120,28 +162,30 @@ pub fn run_local(campaign: &Campaign, opts: &RunOptions) -> RunReport {
     run_rank(&Single, campaign, opts)
 }
 
-/// The init phase on every rank (IB-05): rank 0 reads `path` and preflights it, broadcasts the
-/// campaign's files, every rank loads them, and rank 0 checks every rank's `ReadyAck`. Returns the
-/// campaign and the attempt, or the refusal every rank exits with.
+/// The init phase on every rank (IB-05): rank 0 reads `path`, preflights it and plans the attempt
+/// ([`prepare`]: a fresh campaign, or `--resume`), broadcasts the campaign's files and the attempt,
+/// every rank loads them, and rank 0 checks every rank's `ReadyAck`. Returns the campaign and the
+/// plan (on rank N only its attempt), or the refusal every rank exits with.
 pub fn start<T: Transport>(
     t: &T,
     path: &Path,
     library: Library,
-    attempt: u16,
+    mode: Mode,
     threads: Option<usize>,
-) -> Result<(Campaign, u16), Refusal> {
+) -> Result<(Campaign, Prior), Refusal> {
     let rank = t.rank();
-    let (loaded, attempt) = if rank == 0 {
-        let read =
-            Sources::read(path).and_then(|s| Campaign::from_sources(&s, library).map(|c| (s, c)));
-        let (sources, campaign) = match read {
+    let (loaded, prior) = if rank == 0 {
+        let read = Sources::read(path)
+            .and_then(|s| Campaign::from_sources(&s, library).map(|c| (s, c)))
+            .map_err(|e| Refusal {
+                exit: e.exit_code().code(),
+                kind: e.kind().to_owned(),
+                error: e.to_string(),
+            })
+            .and_then(|(s, c)| prepare(&c, mode).map(|p| (s, c, p)));
+        let (sources, campaign, prior) = match read {
             Ok(x) => x,
-            Err(e) => {
-                let r = Refusal {
-                    exit: e.exit_code().code(),
-                    kind: e.kind().to_owned(),
-                    error: e.to_string(),
-                };
+            Err(r) => {
                 t.broadcast(encode(&Init::Refused(r.clone())));
                 return Err(r);
             }
@@ -164,18 +208,24 @@ pub fn start<T: Transport>(
             .collect();
         t.broadcast(encode(&Init::Go {
             protocol: PROTOCOL,
-            attempt,
+            attempt: prior.attempt,
             base: sources.base.to_string_lossy().into_owned(),
             blobs: headers,
         }));
         for (_, b) in &blobs {
             t.broadcast((*b).clone());
         }
-        (Ok(campaign), attempt)
+        (Ok(campaign), prior)
     } else {
         match receive_campaign(t, library) {
             Received::Refused(r) => return Err(r),
-            Received::Loaded(loaded, attempt) => (*loaded, attempt),
+            Received::Loaded(loaded, attempt) => (
+                *loaded,
+                Prior {
+                    attempt,
+                    ..Prior::default()
+                },
+            ),
         }
     };
 
@@ -200,7 +250,7 @@ pub fn start<T: Transport>(
     };
     match (verdict, loaded) {
         (Some(r), _) => Err(r),
-        (None, Ok(c)) => Ok((c, attempt)),
+        (None, Ok(c)) => Ok((c, prior)),
         (None, Err(r)) => Err(r),
     }
 }
@@ -395,6 +445,8 @@ struct Shared {
     cancel: AtomicBool,
     /// `IO.Mux` cannot write (or a worker died): stop.
     failed: AtomicBool,
+    /// The stop flag was set: abandon in-flight runs.
+    abandon: AtomicBool,
     since: Mutex<Tally>,
     total: Mutex<Tally>,
     messages: Mutex<Vec<String>>,
@@ -408,7 +460,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Shared {
     fn stopped(&self) -> bool {
-        self.cancel.load(Ordering::SeqCst) || self.failed.load(Ordering::SeqCst)
+        self.cancel.load(Ordering::SeqCst)
+            || self.failed.load(Ordering::SeqCst)
+            || self.abandon.load(Ordering::SeqCst)
     }
 
     fn next_run(&self) -> Option<(u32, u64)> {
@@ -537,18 +591,28 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
     }
     let quota = Quota::new(campaign.config.crash_policy.dump_quota_per_param_set);
     let progress: Mutex<Vec<PartReport>> = Mutex::new(Vec::new());
-    let mut rank0 = (rank == 0).then(|| Rank0 {
-        t,
-        disp: Dispatcher::new(
-            n,
+    let prior = opts.prior.clone().unwrap_or_default();
+    let mut rank0 = (rank == 0).then(|| {
+        let mut disp = Dispatcher::over(
+            &prior.committed.missing(n),
             campaign.config.execution.chunk_size,
             opts.dispatch,
             campaign.config.crash_policy,
             size,
-        ),
-        reports: vec![None; size as usize],
-        abort_sent: false,
+        );
+        disp.restore(&prior.tally, &prior.committed);
+        if prior.override_crash_policy {
+            disp.disable_policy();
+        }
+        Rank0 {
+            t,
+            disp,
+            reports: vec![None; size as usize],
+            abort_sent: false,
+        }
     });
+    let drain_margin = Duration::from_secs_f64(campaign.config.checkpoint.drain_margin_s);
+    let mut stopped: Option<Stop> = None;
     let mut link = Link::default();
     let mut chunk_ids = Vec::new();
     let mut heartbeat_warned = false;
@@ -619,7 +683,11 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
                             attempt,
                             chunk_id,
                         };
-                        let rec = worker.run(&rows[run_id as usize], at, quota);
+                        let Some(rec) =
+                            worker.run_unless(&rows[run_id as usize], at, quota, &shared.abandon)
+                        else {
+                            break;
+                        };
                         let kept = rec.dump.is_some();
                         lock(&shared.since).record(&rec.summary, kept);
                         lock(&shared.total).record(&rec.summary, kept);
@@ -653,6 +721,26 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
         let mut next_beat = Instant::now();
         let poll = Duration::from_millis(1);
         loop {
+            // SIGTERM: abandon in-flight runs, say done; on rank 0 also stop dispatch.
+            if !shared.abandon.load(Ordering::SeqCst)
+                && opts.stop.as_ref().is_some_and(|f| f.load(Ordering::SeqCst))
+            {
+                shared.abandon.store(true, Ordering::SeqCst);
+                shared.ready.notify_all();
+                stopped.get_or_insert(Stop::Signal);
+                if let Some(r0) = rank0.as_mut() {
+                    r0.disp.drain();
+                }
+            }
+            // Walltime: stop dispatch; the ranks finish what they hold.
+            if let (Some(r0), Some(deadline)) = (rank0.as_mut(), opts.deadline)
+                && !r0.disp.draining()
+                && SystemTime::now() + drain_margin >= deadline
+            {
+                r0.disp.drain();
+                stopped.get_or_insert(Stop::Walltime);
+            }
+
             // Messages.
             if let Some(r0) = rank0.as_mut() {
                 while let Some((from, _, bytes)) = t.try_recv_tag(Tag::RequestWork) {
@@ -723,7 +811,8 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
             }
 
             // Ask for work one chunk ahead, or say this rank is done.
-            let failed = shared.failed.load(Ordering::SeqCst);
+            let failed =
+                shared.failed.load(Ordering::SeqCst) || shared.abandon.load(Ordering::SeqCst);
             let pending = lock(&shared.queue).pending();
             if link.finished.is_none() && !link.outstanding && (failed || pending <= threads as u64)
             {
@@ -834,7 +923,7 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
         t.send(0, Tag::Report, encode(&node));
         let exit = decode::<Final>(&t.broadcast(Vec::new()))
             .map_or(ExitCode::Internal, |f| ExitCode::from_code(f.exit));
-        return report_from(
+        let mut report = report_from(
             exit,
             rank,
             size,
@@ -844,13 +933,16 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
             manifest_path,
             status_path.clone(),
         );
+        report.attempt = opts.attempt;
+        report.stopped = stopped;
+        return report;
     };
 
     r0.reports[0] = Some(node);
     let nodes: Vec<NodeReport> = r0.reports.into_iter().flatten().collect();
     let abort = r0.disp.abort().cloned();
     let mut totals = Tally::default();
-    let mut committed_runs = RangeSet::new();
+    let mut committed_runs = prior.committed.clone();
     for nr in &nodes {
         totals.add(&nr.tally);
         for p in &nr.committed {
@@ -875,6 +967,12 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
         ExitCode::Partial => "partial",
         _ => "io_failed",
     };
+    let attempt = Attempt {
+        attempt: opts.attempt,
+        status,
+        stopped,
+        override_crash_policy: prior.override_crash_policy,
+    };
     let mut report = report_from(
         exit,
         rank,
@@ -888,11 +986,11 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
     if !report.manifest_path.as_os_str().is_empty() {
         let manifest = campaign_manifest(
             campaign,
-            opts.attempt,
+            &attempt,
+            &prior,
             &nodes,
             &totals,
             &committed_runs,
-            status,
             abort.as_ref(),
             r0.disp.assigned(),
         );
@@ -920,6 +1018,8 @@ pub fn run_rank<T: Transport>(t: &T, campaign: &Campaign, opts: &RunOptions) -> 
     );
     t.broadcast(encode(&Final { exit: exit.code() }));
     report.exit = exit;
+    report.attempt = opts.attempt;
+    report.stopped = stopped;
     report.tally = totals;
     report.committed_runs = committed_runs;
     report.nodes = nodes;
@@ -941,6 +1041,8 @@ fn report_from(
     let mut committed_runs = RangeSet::new();
     let mut report = RunReport {
         exit,
+        attempt: 0,
+        stopped: None,
         rank,
         ranks,
         runs: 0,
@@ -988,25 +1090,39 @@ fn hex(h: u64) -> String {
     format!("{h:016x}")
 }
 
-/// `_MANIFEST.json` (IB-07): an index of the attempt's parts, by rank, with the crash histogram
-/// and the abort reason. The summaries footers stay the source of truth.
+/// This attempt's line in `_MANIFEST.json`.
+struct Attempt {
+    attempt: u16,
+    status: &'static str,
+    stopped: Option<Stop>,
+    override_crash_policy: bool,
+}
+
+/// `_MANIFEST.json` (IB-07): an index of every attempt's parts, by rank, with the campaign's crash
+/// histogram (earlier attempts' counts restored from their footers) and the abort reason. The
+/// summaries footers stay the source of truth.
 #[allow(clippy::too_many_arguments)]
 fn campaign_manifest(
     campaign: &Campaign,
-    attempt: u16,
+    attempt: &Attempt,
+    prior: &Prior,
     nodes: &[NodeReport],
-    totals: &Tally,
+    attempt_totals: &Tally,
     committed: &RangeSet,
-    status: &str,
     abort: Option<&AbortMsg>,
     assigned: &BTreeMap<u32, u32>,
 ) -> serde_json::Value {
     let n = campaign.manifest.rows.len() as u64;
+    let mut totals = prior.tally.clone();
+    totals.add(attempt_totals);
     let mut dumps: Vec<u64> = nodes
         .iter()
         .flat_map(|nr| nr.dump_run_ids.iter().copied())
+        .chain(prior.dump_run_ids.iter().copied())
         .collect();
     dumps.sort_unstable();
+    dumps.dedup();
+    let abort = abort.map(|a| json!({"reason": a.reason.name(), "detail": a.detail}));
     let ranks: Vec<_> = nodes
         .iter()
         .map(|nr| {
@@ -1032,6 +1148,16 @@ fn campaign_manifest(
             })
         })
         .collect();
+    let mut attempts = prior.attempts.clone();
+    attempts.push(json!({
+        "attempt": attempt.attempt,
+        "status": attempt.status,
+        "runs": attempt_totals.runs,
+        "stopped": attempt.stopped.map(Stop::name),
+        "override_crash_policy": attempt.override_crash_policy,
+        "abort": abort,
+        "ranks": ranks,
+    }));
     json!({
         "format": "saber-campaign-manifest",
         "campaign_id": campaign.config.campaign.id,
@@ -1040,17 +1166,17 @@ fn campaign_manifest(
         "req_set_hash": campaign.requirements.as_ref().map(|r| hex(r.hash())),
         "manifest_hash": hex(campaign.manifest.hash),
         "runs": n,
-        "status": status,
-        "abort": abort.map(|a| json!({"reason": a.reason.name(), "detail": a.detail})),
+        "status": attempt.status,
+        "abort": abort,
         "committed": committed,
         "missing": committed.missing(n),
         "crashes": totals.crashes(),
         "crash_dumps": totals.dumps(),
         "setup_errors": totals.setup_errors,
-        "status_counts": status_counts(totals),
+        "status_counts": status_counts(&totals),
         "crashes_by_param_set": totals.crashes_by_param_set,
         "crash_dump_run_ids": dumps,
-        "attempts": [{"attempt": attempt, "ranks": ranks}],
+        "attempts": attempts,
     })
 }
 

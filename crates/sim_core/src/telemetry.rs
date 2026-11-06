@@ -155,7 +155,7 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// One logged event (Tier 2): a [`crate::SimEvent`] with its tick, time and the body's position.
+/// One logged event (Tier 2): a [`crate::SimEvent`] with its tick, time and position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoggedEvent {
     /// The tick it was emitted in.
@@ -166,7 +166,10 @@ pub struct LoggedEvent {
     pub name: &'static str,
     /// The body it happened to.
     pub sim_id: Option<SimId>,
-    /// That body's position at the end of the tick, world frame, m.
+    /// The other entity, for a contact.
+    pub other: Option<SimId>,
+    /// Where it happened, world frame, m: the event's own position when it has one, else the
+    /// body's position at the end of the tick.
     pub pos: Option<[f64; 3]>,
     /// The value that goes with it.
     pub value: f64,
@@ -272,18 +275,21 @@ pub(crate) fn log_tick(world: &mut World) {
                 log.events_dropped += 1;
                 continue;
             }
-            let pos = e.sim_id.and_then(|id| {
-                frame?
-                    .bodies
-                    .iter()
-                    .find(|b| b.sim_id == id.0)
-                    .map(|b| b.pos)
+            let pos = e.pos.map(|p| p.to_array()).or_else(|| {
+                e.sim_id.and_then(|id| {
+                    frame?
+                        .bodies
+                        .iter()
+                        .find(|b| b.sim_id == id.0)
+                        .map(|b| b.pos)
+                })
             });
             log.events.push(LoggedEvent {
                 tick: clock.tick,
                 t_s: clock.time(),
                 name: e.name,
                 sim_id: e.sim_id,
+                other: e.other,
                 pos,
                 value: e.value,
             });

@@ -9,11 +9,14 @@
 //! way is down and what altitude is: `z` in ENU, `−z` in NED (origins at mean sea level), the WGS 84
 //! geodetic height in ECEF. Flat gravity needs a local frame and J2 gravity needs ECEF. Without an
 //! [`EarthRotation`] every frame, ECEF included, is treated as inertial; with one the kernel adds the
-//! Coriolis and centrifugal accelerations (build step 5a).
+//! Coriolis and centrifugal accelerations (build step 5a). [`Wind::Dryden`] adds turbulence
+//! ([`dryden`], build step 5c), advanced once per tick in `SimSet::Environment` from the run's
+//! `environment/dryden` random stream.
 //!
 //! Do not combine this plugin with `SimAppBuilder::set_environment`: the plugin replaces the
 //! environment at every Tick 0.
 
+pub mod dryden;
 pub mod ussa1976;
 pub mod wgs84;
 
@@ -21,12 +24,17 @@ use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
 use glam::DVec3;
 use sim_core::{
-    EnvSample, Environment, PointMass3, RigidBody6, SetupError, SimAppBuilder, SimEnvironment,
-    SimEvent, SimEvents, SimId, SimPlugin, SimSet, StopRequests, WorldFrame,
+    EnvSample, Environment, PointMass3, RigidBody6, RngStream, RngStreams, SetupError,
+    SimAppBuilder, SimClock, SimEnvironment, SimEvent, SimEvents, SimId, SimPlugin, SimSet,
+    StopRequests, StreamHandle, WorldFrame,
 };
 use sim_schema::Frame;
 
+use dryden::{DrydenSpec, DrydenTurbulence};
 use ussa1976::Ussa1976;
+
+/// The random stream Dryden turbulence draws from.
+pub const DRYDEN_STREAM: &str = "environment/dryden";
 
 /// Standard gravity `g₀`, m/s².
 pub const STANDARD_GRAVITY: f64 = 9.806_65;
@@ -65,7 +73,7 @@ pub enum Atmosphere {
     Ussa1976,
 }
 
-/// The wind model (turbulence arrives with step 5c).
+/// The wind model.
 #[derive(Component, Reflect, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component)]
 pub enum Wind {
@@ -76,6 +84,76 @@ pub enum Wind {
         /// Air velocity in the world frame, m/s.
         velocity: DVec3,
     },
+    /// Dryden turbulence on a mean wind ([`dryden`], build step 5c), in a local ENU or NED frame.
+    /// The gust is the same everywhere at a given time (a frozen field traversed at `airspeed`),
+    /// along axes fixed in the world: `u` horizontal along `heading`, `v` horizontal to its right
+    /// and `w` down. Gust values are generated on the tick grid and interpolated linearly within
+    /// a tick.
+    Dryden {
+        /// Mean air velocity in the world frame, m/s.
+        mean: DVec3,
+        /// Speed `V` at which the field is traversed, m/s: the aircraft's airspeed.
+        airspeed: f64,
+        /// Direction of `u`, rad clockwise from north.
+        heading: f64,
+        /// RMS intensities `(σ_u, σ_v, σ_w)`, m/s.
+        intensity: DVec3,
+        /// Scale lengths `(L_u, L_v, L_w)`, m, in MIL-F-8785C's sense ([`dryden`]).
+        scale: DVec3,
+    },
+}
+
+/// Whether the world frame turns with the Earth (build step 5a). Without this component the frame
+/// does not rotate, in ECEF too, so scenarios written before rotation existed run as they did.
+#[derive(Component, Reflect, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component)]
+pub enum EarthRotation {
+    /// The frame is inertial.
+    None,
+    /// The ECEF frame turns about its +z axis at the WGS 84 rate [`wgs84::OMEGA_E`]. The centrifugal
+    /// acceleration is then added by the kernel, so J2 gravity plus rotation gives WGS 84's normal
+    /// gravity less its small J4 term.
+    Ecef,
+    /// A local ENU or NED frame fixed to the Earth with its origin at geodetic latitude
+    /// `latitude_deg`: it turns at the WGS 84 rate about the Earth's axis, `(0, cos φ, sin φ)` in
+    /// ENU and `(cos φ, 0, −sin φ)` in NED. Flat gravity is the local plumb line, which already
+    /// holds the centrifugal acceleration at the origin; the kernel adds the Coriolis term and the
+    /// centrifugal term of the offset from the origin.
+    Local {
+        /// Geodetic latitude of the frame's origin, degrees (north positive).
+        latitude_deg: f64,
+    },
+}
+
+impl EarthRotation {
+    /// The frame's angular velocity in world-frame components, rad/s, or why the rotation does not
+    /// fit the frame.
+    pub fn rate(self, frame: Frame) -> Result<DVec3, String> {
+        match (self, frame) {
+            (EarthRotation::None, _) => Ok(DVec3::ZERO),
+            (EarthRotation::Ecef, Frame::Ecef) => Ok(DVec3::Z * wgs84::OMEGA_E),
+            (EarthRotation::Ecef, _) => {
+                Err("EarthRotation::Ecef needs the ECEF frame; a local frame uses Local".to_owned())
+            }
+            (EarthRotation::Local { latitude_deg }, Frame::Enu | Frame::Ned) => {
+                if !(latitude_deg.is_finite() && latitude_deg.abs() <= 90.0) {
+                    return Err(format!(
+                        "EarthRotation latitude {latitude_deg}° must be within ±90°"
+                    ));
+                }
+                let (s, c) = latitude_deg.to_radians().sin_cos();
+                Ok(wgs84::OMEGA_E
+                    * if frame == Frame::Enu {
+                        DVec3::new(0.0, c, s)
+                    } else {
+                        DVec3::new(c, 0.0, -s)
+                    })
+            }
+            (EarthRotation::Local { .. }, Frame::Ecef) => Err(
+                "EarthRotation::Local needs a local frame (ENU or NED); ECEF uses Ecef".to_owned(),
+            ),
+        }
+    }
 }
 
 /// Whether the world frame turns with the Earth (build step 5a). Without this component the frame
@@ -179,7 +257,33 @@ pub struct StandardEnvironment {
     gravity: GravityField,
     air: Air,
     wind: DVec3,
+    turbulence: Option<Turbulence>,
     rotation: DVec3,
+}
+
+/// Dryden gusts on the tick grid: `now` at `t0`, `next` one tick later, world frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Turbulence {
+    spec: DrydenSpec,
+    /// World-frame directions of `u`, `v` and `w`.
+    axes: [DVec3; 3],
+    generator: Option<DrydenTurbulence>,
+    now: DVec3,
+    next: DVec3,
+    t0: f64,
+    dt: f64,
+}
+
+impl Turbulence {
+    fn world_gust(&self) -> DVec3 {
+        let g = self.generator.map_or([0.0; 3], |g| g.gust());
+        self.axes[0] * g[0] + self.axes[1] * g[1] + self.axes[2] * g[2]
+    }
+
+    fn at(&self, t: f64) -> DVec3 {
+        let s = ((t - self.t0) / self.dt).clamp(0.0, 1.0);
+        self.now + (self.next - self.now) * s
+    }
 }
 
 impl StandardEnvironment {
@@ -239,6 +343,7 @@ impl StandardEnvironment {
             }
             Atmosphere::Ussa1976 => Air::Standard(Ussa1976::new()),
         };
+        let mut turbulence = None;
         let wind = match wind {
             Wind::Calm => DVec3::ZERO,
             Wind::Constant { velocity } => {
@@ -247,14 +352,101 @@ impl StandardEnvironment {
                 }
                 velocity
             }
+            Wind::Dryden {
+                mean,
+                airspeed,
+                heading,
+                intensity,
+                scale,
+            } => {
+                if !mean.is_finite() {
+                    return Err("the mean wind velocity must be finite".to_owned());
+                }
+                if !heading.is_finite() {
+                    return Err(format!("Dryden heading {heading} must be finite"));
+                }
+                let spec = DrydenSpec {
+                    airspeed,
+                    intensity: intensity.to_array(),
+                    scale: scale.to_array(),
+                };
+                spec.validate()?;
+                let (s, c) = heading.sin_cos();
+                // North, east, down: u along the heading, v to its right, w down.
+                let ned = [DVec3::new(c, s, 0.0), DVec3::new(-s, c, 0.0), DVec3::Z];
+                let axes = match frame {
+                    Frame::Ned => ned,
+                    // NED components (n, e, d) are ENU (e, n, −d).
+                    Frame::Enu => ned.map(|a| DVec3::new(a.y, a.x, -a.z)),
+                    Frame::Ecef => {
+                        return Err(
+                            "Dryden turbulence needs a local frame (ENU or NED), not ECEF"
+                                .to_owned(),
+                        );
+                    }
+                };
+                turbulence = Some(Turbulence {
+                    spec,
+                    axes,
+                    generator: None,
+                    now: DVec3::ZERO,
+                    next: DVec3::ZERO,
+                    t0: 0.0,
+                    dt: 1.0,
+                });
+                mean
+            }
         };
         Ok(Self {
             frame,
             gravity,
             air,
             wind,
+            turbulence,
             rotation: DVec3::ZERO,
         })
+    }
+
+    /// Whether the wind has turbulence.
+    pub fn has_turbulence(&self) -> bool {
+        self.turbulence.is_some()
+    }
+
+    /// Start the turbulence at time `t0` on a tick of `dt` seconds: draw its stationary state.
+    /// Does nothing without turbulence.
+    pub fn start_turbulence(
+        &mut self,
+        t0: f64,
+        dt: f64,
+        rng: &mut RngStream,
+    ) -> Result<(), String> {
+        let Some(t) = &mut self.turbulence else {
+            return Ok(());
+        };
+        let mut generator = DrydenTurbulence::new(&t.spec, dt)?;
+        generator.start(rng);
+        t.generator = Some(generator);
+        t.now = t.world_gust();
+        t.next = t.now;
+        t.t0 = t0;
+        t.dt = dt;
+        Ok(())
+    }
+
+    /// Advance the turbulence across the tick that starts at `t`: the gust at `t` becomes the one
+    /// drawn for it last tick, and the gust at `t + dt` is drawn. Does nothing without started
+    /// turbulence.
+    pub fn advance_turbulence(&mut self, t: f64, rng: &mut RngStream) {
+        let Some(tb) = &mut self.turbulence else {
+            return;
+        };
+        let Some(generator) = &mut tb.generator else {
+            return;
+        };
+        generator.step(rng);
+        tb.now = tb.next;
+        tb.next = tb.world_gust();
+        tb.t0 = t;
     }
 
     /// The same environment in a frame that turns with the Earth (see [`EarthRotation`]).
@@ -265,7 +457,7 @@ impl StandardEnvironment {
 }
 
 impl Environment for StandardEnvironment {
-    fn sample(&self, position: DVec3, _t: f64) -> EnvSample {
+    fn sample(&self, position: DVec3, t_s: f64) -> EnvSample {
         let gravity = match self.gravity {
             GravityField::None => DVec3::ZERO,
             GravityField::Uniform { g } => g,
@@ -284,9 +476,13 @@ impl Environment for StandardEnvironment {
                 (s.density, s.pressure, s.temperature, s.speed_of_sound)
             }
         };
+        let wind = match &self.turbulence {
+            Some(t) => self.wind + t.at(t_s),
+            None => self.wind,
+        };
         EnvSample {
             gravity,
-            wind: self.wind,
+            wind,
             air_density,
             pressure,
             temperature,
@@ -343,7 +539,9 @@ impl SimPlugin for EnvironmentPlugin {
             .register_type::<EarthRotation>()
             .register_type::<GroundImpactStop>()
             .declare_event(GROUND_IMPACT)
+            .add_systems(SimSet::Environment, turbulence_system)
             .add_systems(SimSet::Constraints, ground_impact_system);
+        app.world_mut().insert_resource(DrydenStream::default());
     }
 
     fn start(&self, world: &mut World) -> Result<(), SetupError> {
@@ -353,12 +551,26 @@ impl SimPlugin for EnvironmentPlugin {
         let wind = single::<Wind>(world, "Wind")?.unwrap_or(Wind::Calm);
         let rotation =
             single::<EarthRotation>(world, "EarthRotation")?.unwrap_or(EarthRotation::None);
-        let env = StandardEnvironment::new(frame, gravity, atmosphere, wind)
+        let mut env = StandardEnvironment::new(frame, gravity, atmosphere, wind)
             .and_then(|env| env.with_rotation(rotation))
             .map_err(|message| SetupError::Model {
                 model: "environment",
                 message,
             })?;
+        let stream = if env.has_turbulence() {
+            let clock = *world.resource::<SimClock>();
+            let mut streams = world.resource_mut::<RngStreams>();
+            let handle = streams.register(DRYDEN_STREAM);
+            env.start_turbulence(clock.time(), clock.dt, streams.get_mut(handle))
+                .map_err(|message| SetupError::Model {
+                    model: "environment",
+                    message,
+                })?;
+            Some(handle)
+        } else {
+            None
+        };
+        world.insert_resource(DrydenStream(stream));
         let mut watch = Vec::new();
         for (entity, id, stop) in world
             .query::<(Entity, Option<&SimId>, &GroundImpactStop)>()
@@ -377,6 +589,24 @@ impl SimPlugin for EnvironmentPlugin {
         world.insert_resource(SimEnvironment(Box::new(env)));
         Ok(())
     }
+}
+
+/// The random stream of this run's Dryden turbulence, if it has any.
+#[derive(Resource, Debug, Default)]
+struct DrydenStream(Option<StreamHandle>);
+
+/// `SimSet::Environment`: advance the turbulence across the coming tick.
+fn turbulence_system(world: &mut World) {
+    let Some(handle) = world.resource::<DrydenStream>().0 else {
+        return;
+    };
+    let t = world.resource::<SimClock>().time();
+    sim_core::with_resource(world, |world, streams: &mut RngStreams| {
+        let mut env = world.resource_mut::<SimEnvironment>();
+        if let Some(env) = env.downcast_mut::<StandardEnvironment>() {
+            env.advance_turbulence(t, streams.get_mut(handle));
+        }
+    });
 }
 
 /// The bodies [`GroundImpactStop`] watches this run, with their ground altitudes, listed at Tick 0.
@@ -404,11 +634,9 @@ fn ground_impact_system(world: &mut World) {
             let h = altitude(frame, position);
             if h <= ground {
                 hit = true;
-                world.resource_mut::<SimEvents>().emit(SimEvent {
-                    name: GROUND_IMPACT,
-                    sim_id,
-                    value: h,
-                });
+                world
+                    .resource_mut::<SimEvents>()
+                    .emit(SimEvent::new(GROUND_IMPACT, sim_id, h));
             }
         }
         if hit {
