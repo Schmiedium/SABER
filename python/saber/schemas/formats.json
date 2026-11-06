@@ -1,9 +1,12 @@
 {
   "footer_keys": {
     "crash_counts": "saber.crash_counts",
+    "dump_counts": "saber.dump_counts",
     "header": "saber.header",
+    "manifest_hash": "saber.manifest_hash",
     "run_ids": "saber.run_ids",
-    "sampler": "saber.sampler"
+    "sampler": "saber.sampler",
+    "status_counts": "saber.status_counts"
   },
   "magic": "SABER",
   "schema_versions": {

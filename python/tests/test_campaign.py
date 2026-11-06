@@ -7,8 +7,11 @@ mirrors cannot drift. `SABER_UPDATE_GOLDENS=1` rewrites it.
 
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 

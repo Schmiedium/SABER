@@ -7,6 +7,9 @@
 //! prints.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use sim_hpc::protocol::Refusal;
@@ -18,6 +21,8 @@ struct Args {
     campaign: PathBuf,
     local: bool,
     validate_only: bool,
+    mode: Mode,
+    deadline: Option<SystemTime>,
     threads: Option<usize>,
     json: bool,
 }
@@ -31,9 +36,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
         campaign: PathBuf::new(),
         local: false,
         validate_only: false,
+        mode: Mode::Fresh,
+        deadline: None,
         threads: None,
         json: false,
     };
+    let (mut resume, mut override_policy) = (false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -49,8 +57,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     .ok_or("--threads needs a positive number")?;
                 out.threads = Some(n);
             }
-            "--resume" | "--override-crash-policy" => {
-                return Err(format!("{a} arrives with build step 4b"));
+            "--resume" => resume = true,
+            "--override-crash-policy" => override_policy = true,
+            "--deadline" => {
+                let t = it
+                    .next()
+                    .and_then(|s| unix_time(s))
+                    .ok_or("--deadline needs Unix seconds")?;
+                out.deadline = Some(t);
             }
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unexpected argument {other:?}")),
@@ -104,6 +118,14 @@ fn main() -> std::process::ExitCode {
             eprintln!("sim_hpc: warning: {w}");
         }
     }
+    let prior = match prepare(&campaign, args.mode) {
+        Ok(p) => p,
+        Err(r) => {
+            refused(&args, &r);
+            return exit(ExitCode::from_code(r.exit));
+        }
+    };
+    let n = campaign.manifest.rows.len() as u64;
     if args.validate_only {
         if args.json {
             println!(
@@ -120,14 +142,21 @@ fn main() -> std::process::ExitCode {
                     "param_keys": campaign.manifest.param_keys,
                     "summary_columns": campaign.summary_columns,
                     "warnings": campaign.warnings,
+                    "attempt": prior.attempt,
+                    "committed_runs": prior.committed.len(),
+                    "missing_runs": n - prior.committed.len(),
                 })
             );
-        } else {
+        } else if prior.attempt > 0 {
             println!(
-                "campaign {}: valid, {} runs",
+                "campaign {}: valid, {} runs; attempt {} would run the {} not yet committed",
                 campaign.config.campaign.id,
-                campaign.manifest.rows.len()
+                n,
+                prior.attempt,
+                n - prior.committed.len()
             );
+        } else {
+            println!("campaign {}: valid, {n} runs", campaign.config.campaign.id);
         }
         return exit(ExitCode::Ok);
     }
@@ -207,6 +236,9 @@ fn print_report(args: &Args, campaign: &Campaign, r: &RunReport) {
                 "setup_errors": r.setup_errors,
                 "parts": r.committed.len(),
                 "failed_parts": r.failed.len(),
+                "committed_runs": r.committed_runs.len(),
+                "missing_runs": n - r.committed_runs.len(),
+                "stopped": r.stopped.map(|s| s.name()),
                 "io_error": r.io_error,
                 "abort": r.abort.as_ref().map(|a| json!({"reason": a.reason.name(), "detail": a.detail})),
                 "error": r.abort.as_ref().map(|a| format!("aborted by the crash policy ({}): {}", a.reason.name(), a.detail)),

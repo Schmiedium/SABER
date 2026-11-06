@@ -43,7 +43,10 @@ import enum
 import json
 import math
 import os
+import shlex
 import shutil
+import subprocess
+import time
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -410,12 +413,37 @@ class Preflight:
     param_keys: list[str]
     summary_columns: list[str]
     warnings: list[str]
+    attempt: int = 0
+    """The attempt a run would be: 0 for a fresh campaign, the next one with `resume`."""
+    committed_runs: int = 0
+    """Runs earlier attempts committed."""
+    missing_runs: int | None = None
+    """Runs the attempt would run (`runs - committed_runs`)."""
 
 
-def preflight(campaign_toml: PathArg, *, sim_hpc: PathArg | None = None, timeout: float | None = None) -> Preflight:
-    """Validate a campaign with `sim_hpc --validate-only --json`; raises `CampaignError` if it is refused."""
+def _resume_flags(resume: bool, override_crash_policy: bool) -> list[str]:
+    if override_crash_policy and not resume:
+        raise ValueError("override_crash_policy needs resume=True")
+    return (["--resume"] if resume else []) + (["--override-crash-policy"] if override_crash_policy else [])
+
+
+def preflight(
+    campaign_toml: PathArg,
+    *,
+    resume: bool = False,
+    override_crash_policy: bool = False,
+    sim_hpc: PathArg | None = None,
+    timeout: float | None = None,
+) -> Preflight:
+    """Validate a campaign with `sim_hpc --validate-only --json`; raises `CampaignError` if it is refused.
+
+    With `resume`, it also reads what earlier attempts committed and refuses as `--resume` would
+    (another campaign's or build's parts, or a campaign the crash policy stopped, unless
+    `override_crash_policy`); without, it refuses an output directory that already holds a campaign.
+    """
     exe = _tools.find("sim_hpc", sim_hpc)
-    c = _tools.run_json([exe, "--campaign", os.fspath(campaign_toml), "--validate-only", "--json"], timeout)
+    argv = [exe, "--campaign", os.fspath(campaign_toml), "--validate-only", "--json"]
+    c = _tools.run_json(argv + _resume_flags(resume, override_crash_policy), timeout)
     if c.exit_code != 0 or not (c.json or {}).get("ok"):
         raise _error_from(c)
     j = c.json
@@ -430,6 +458,9 @@ def preflight(campaign_toml: PathArg, *, sim_hpc: PathArg | None = None, timeout
         param_keys=list(j.get("param_keys", [])),
         summary_columns=list(j.get("summary_columns", [])),
         warnings=list(j.get("warnings", [])),
+        attempt=int(j.get("attempt", 0)),
+        committed_runs=int(j.get("committed_runs", 0)),
+        missing_runs=int(j["missing_runs"]) if j.get("missing_runs") is not None else None,
     )
 
 
@@ -515,17 +546,27 @@ def run_local(
     campaign_toml: PathArg,
     *,
     threads: int | None = None,
+    resume: bool = False,
+    override_crash_policy: bool = False,
+    deadline: float | datetime | None = None,
     sim_hpc: PathArg | None = None,
     timeout: float | None = None,
 ) -> LocalRun:
     """Run a campaign on this machine with `sim_hpc --local --json` and wait for it.
 
-    Returns whatever happened; `LocalRun.check()` raises unless every run committed.
+    `resume` runs a new attempt over the runs earlier attempts did not commit (`--resume`;
+    `override_crash_policy` also continues a campaign the crash policy stopped). `deadline` (Unix
+    seconds or a datetime) stops dispatch `checkpoint.drain_margin_s` before it, as a walltime
+    would. Returns whatever happened; `LocalRun.check()` raises unless every run committed.
     """
     exe = _tools.find("sim_hpc", sim_hpc)
     argv = [exe, "--campaign", os.fspath(campaign_toml), "--local", "--json"]
     if threads is not None:
         argv += ["--threads", str(int(threads))]
+    argv += _resume_flags(resume, override_crash_policy)
+    if deadline is not None:
+        t = deadline.timestamp() if isinstance(deadline, datetime) else float(deadline)
+        argv += ["--deadline", repr(t)]
     c = _tools.run_json(argv, timeout)
     report = c.json or {}
     manifest = shared_out = None

@@ -1389,6 +1389,16 @@ for now; kept current per commit with 4a) holds `campaign_id`, `build_id`, `scen
 crash, dump and setup-error counts, and per attempt and rank the committed parts (files, run ranges, crash
 counts, rows per table) and the failed ones.
 
+**As built (step 4b).** The summaries footer adds `saber.status_counts` (`{"SimStatus name": n}`),
+`saber.dump_counts` (`{"param_set_id": kept dumps}`) and `saber.manifest_hash` (16 hex digits), so resume restores
+the campaign's counts from footers alone (`sim_schema::io::read_parquet_footer` reads a footer without its rows).
+`_MANIFEST.json` is written at the end of each attempt (not per commit; a killed job's attempt is rebuilt from its
+footers by the next `--resume`). Its top level covers the whole campaign (committed and missing ranges, crash and
+status counts, kept dumps of every attempt); `attempts` lists every attempt with `status`, `runs`, `stopped`,
+`override_crash_policy`, `abort` and its ranks' parts. A part whose summaries never committed may leave its other
+files under their final names; readers take a part only with its summaries file (`saber.campaign.LocalRun.files`
+lists parts from `_MANIFEST.json`).
+
 **Commit rule.** A part is committed when its summaries file appears under its final name. IO.Stager
 copies events, snapshots, impacts and crashes as `.tmp` and renames them first, then copies, fsyncs and renames
 the summaries file last. A run is done if and only if its `run_id` is in a committed summaries footer.
@@ -1701,7 +1711,8 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | D16 | Contact scope | No built-in contact material library, and no penetration or deformable-terrain models, for now (Alex, 2026-11-02; was O3). Implicit integrators are not needed either, given the adaptive explicit methods (was O4). | `ContactMaterial` values are entered per body in the scenario (IB-19); terrain is rigid, contact is surface-only; `physics-engine-tradeoffs.md` §12. |
 | D17 | 3D models | Entities can be linked to 3D models in glTF 2.0 / GLB, Bevy's native format. Defaults live in the code base and users can bring their own. OBJ import with conversion to glTF and GLB is a nice-to-have stretch goal. Other engineering model formats are out of scope; conversion happens elsewhere (Alex, 2026-11-02). Campaigns keep a copy of the workspace and library-root models they use, up to 2 GB per campaign (was O5). Spinning rotors and moving control surfaces come later; v1 models are rigid (was O7). Extra library folders (`model_roots`) stay as an option; Import still copies into the workspace by default (was O6). | `sim_assets` crate (§1, §3, §4, §5.10) with the built-in library in `crates/sim_assets/builtin/`; `Studio.Assets` (§5.5); `visual:` section with its own `visual_hash` (IB-01); IB-20; derived collision shapes (IB-19); IB-13 row; G18; roadmap P2v and P6b; `sim_studio_ux.md` §7.11; `sequence-diagrams.md` §2.1–2.3. |
 | D18 | Project name | The project is SABER (was SABERS), and identifiers follow: Python package `saber`, `saber-cli`, `~/.saber/`, `saber://` deep links, `saber.workspace.ron`, `FileHeader.saber_version` (Alex, 2026-11-02). | Renamed across all design docs; the code uses the new names from the first commit. |
-| D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy stays open as O8. |
+| D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy was O8, decided as D20. |
+| D20 | `Timeout` and the crash policy | A run that ends `Timeout` counts toward the campaign's crash-storm rule, and is `Inconclusive`, not a failure, in `saber.verify`'s statistics (Alex, 2026-11-03; was O8). | `sim_hpc::protocol::counts_toward_storm` (§5.6, step 4a); seq §8.2 and §11; `saber.verify` (step 4c). |
 
 ### Still open
 

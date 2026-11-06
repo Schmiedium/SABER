@@ -12,6 +12,7 @@ skip, unless `SABER_REQUIRE_BINARIES=1` (set in CI's end-to-end job), where they
 """
 
 import os
+import time
 from pathlib import Path
 
 import numpy as np

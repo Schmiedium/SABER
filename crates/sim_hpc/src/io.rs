@@ -100,6 +100,9 @@ struct OpenPart {
     buf_snapshots: Vec<SnapshotRow>,
     run_ids: RangeSet,
     crash_counts: BTreeMap<u32, u32>,
+    status_counts: BTreeMap<String, u64>,
+    dump_counts: BTreeMap<u32, u32>,
+    manifest_hash: u64,
     rows: PartRows,
     opened: Instant,
 }
@@ -163,6 +166,9 @@ impl OpenPart {
             buf_snapshots: Vec::new(),
             run_ids: RangeSet::new(),
             crash_counts: BTreeMap::new(),
+            status_counts: BTreeMap::new(),
+            dump_counts: BTreeMap::new(),
+            manifest_hash: campaign.manifest.hash,
             rows: PartRows::default(),
             opened: Instant::now(),
         })
@@ -177,9 +183,17 @@ impl OpenPart {
                 .entry(rec.summary.param_set_id)
                 .or_insert(0) += 1;
         }
+        *self
+            .status_counts
+            .entry(format!("{:?}", rec.summary.status))
+            .or_insert(0) += 1;
         if let Some(dump) = &rec.dump {
             self.crashes.append(dump)?;
             self.rows.crash_dumps += 1;
+            *self
+                .dump_counts
+                .entry(rec.summary.param_set_id)
+                .or_insert(0) += 1;
         }
         self.rows.summaries += 1;
         self.rows.events += rec.events.len() as u64;
@@ -218,13 +232,23 @@ impl OpenPart {
             .map(|(k, v)| (k.to_string(), *v))
             .collect();
         let counts = serde_json::to_string(&counts).expect("counts serialise");
+        let statuses = serde_json::to_string(&self.status_counts).expect("counts serialise");
+        let dumps: BTreeMap<String, u32> = self
+            .dump_counts
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+        let dumps = serde_json::to_string(&dumps).expect("counts serialise");
         finish_file(self.events.finish(&[])?)?;
         finish_file(self.snapshots.finish(&[])?)?;
         finish_file(self.crashes.finish()?)?;
-        finish_file(
-            self.summaries
-                .finish(&[(RUN_IDS_KEY, run_ids), (CRASH_COUNTS_KEY, counts)])?,
-        )?;
+        finish_file(self.summaries.finish(&[
+            (RUN_IDS_KEY, run_ids),
+            (CRASH_COUNTS_KEY, counts),
+            (STATUS_COUNTS_KEY, statuses),
+            (DUMP_COUNTS_KEY, dumps),
+            (MANIFEST_HASH_KEY, format!("{:016x}", self.manifest_hash)),
+        ])?)?;
         let mut files = Vec::new();
         let mut names = Vec::new();
         for suffix in SUFFIXES {
