@@ -4,7 +4,9 @@
 //! parent retired, fragment motion against closed forms (vacuum parabolas for both methods, drag
 //! with and without wind, a rotating frame against an authored body), impacts found along the
 //! tick's path (a thin plate both tick ends miss, a moving target, the ground) at the
-//! interpolated time, lifetimes, and the setup and configuration errors.
+//! interpolated time, lifetimes, and the setup and configuration errors. Step 5e-2: the per-parent
+//! clouds and per-target tallies against sums computed here from the fragments and impacts, the
+//! clouds in the recorder and the Tier 3 snapshots, and the run's fragment output.
 
 mod kernel_common;
 
@@ -15,10 +17,11 @@ use sim_core::dynamics::Dynamics;
 use sim_core::integrator::IntegratorKind;
 use sim_core::{
     CONTACT_END, CollisionShape, ContactMaterial, Contacts, CrashKind, EnvSample, Environment,
-    FRAGMENT_BASE, FRAGMENTATION, FRAGMENTS_DROPPED, FragmentConfig, FragmentDrag, FragmentParent,
-    FragmentPool, FragmentState, FragmentWriter, Fragmentable, FragmentationModel, MassProps, Pose,
-    ResolveReport, RigidBody6, RngStream, RunSeed, SetupError, ShapeDesc, ShapePart, SimAppBuilder,
-    SimConfig, SimId, SimStatus, SimWorld, TelemetryLog, UniformEnvironment,
+    FRAGMENT_BASE, FRAGMENTATION, FRAGMENTS_DROPPED, FlightRecorder, FragmentCloud, FragmentConfig,
+    FragmentDrag, FragmentParent, FragmentPool, FragmentState, FragmentTotals, FragmentWriter,
+    Fragmentable, FragmentationModel, ImpactTally, MassProps, Pose, ResolveReport, RigidBody6,
+    RngStream, RunSeed, SetupError, ShapeDesc, ShapePart, SimAppBuilder, SimConfig, SimId,
+    SimStatus, SimWorld, TelemetryConfig, TelemetryLog, UniformEnvironment,
 };
 
 const MODEL: &str = "test/script";
@@ -859,4 +862,371 @@ fn setup_and_config_errors() {
     .unwrap();
     let w = &sim.world().resource::<ResolveReport>().warnings;
     assert!(w.iter().any(|w| w.contains("expect 5 fragments")), "{w:?}");
+}
+
+/// What a [`FragmentCloud`] should hold, computed here from the pool's fragments in the plain
+/// one-pass way (`E[p pᵀ] − p̄ p̄ᵀ`), for one parent.
+fn expected_cloud(pool: &FragmentPool, parent: SimId) -> (u32, f64, DVec3, DVec3, [f64; 6], f64) {
+    let (mut n, mut m, mut mp, mut mv, mut ke) = (0, 0.0, DVec3::ZERO, DVec3::ZERO, 0.0);
+    let mut pp = [0.0; 6];
+    for f in pool.fragments() {
+        if f.parent != parent || f.state != FragmentState::Alive {
+            continue;
+        }
+        n += 1;
+        m += f.mass;
+        mp += f.mass * f.position;
+        mv += f.mass * f.velocity;
+        ke += 0.5 * f.mass * f.velocity.length_squared();
+        let p = f.position;
+        for (acc, v) in pp.iter_mut().zip([
+            p.x * p.x,
+            p.y * p.y,
+            p.z * p.z,
+            p.x * p.y,
+            p.x * p.z,
+            p.y * p.z,
+        ]) {
+            *acc += f.mass * v;
+        }
+    }
+    let (c, v) = (mp / m, mv / m);
+    let cov = [
+        pp[0] / m - c.x * c.x,
+        pp[1] / m - c.y * c.y,
+        pp[2] / m - c.z * c.z,
+        pp[3] / m - c.x * c.y,
+        pp[4] / m - c.x * c.z,
+        pp[5] / m - c.y * c.z,
+    ];
+    (n, m, c, v, cov, ke)
+}
+
+fn cloud_of(sim: &SimWorld, id: u32) -> FragmentCloud {
+    *sim.world()
+        .get::<FragmentCloud>(sim.body(SimId(id)).unwrap())
+        .unwrap()
+}
+
+/// A parent throws three fragments of 0.2, 0.3 and 0.5 kg over flat ground in vacuum. Before the
+/// breakup its cloud follows it; after, the component, the pool's copy and the recorder's frame
+/// agree with sums over the flying fragments computed here, the centroid with the closed form
+/// (each fragment's parabola, RK4 being exact for it), and the counts with the impacts; the range
+/// is the largest distance from the breakup point of a tick-end position or impact point; once
+/// all three have landed the sums are 0 and the means keep their last values.
+#[test]
+fn clouds_sum_up_the_flying_fragments() {
+    let dt = 0.01;
+    let (p0, v0) = (DVec3::new(0.0, 0.0, 60.0), DVec3::new(10.0, 0.0, 0.0));
+    let frags = [
+        (0.2, DVec3::new(1.0, 0.0, 0.0), DVec3::new(20.0, 0.0, 10.0)),
+        (0.3, DVec3::new(0.0, 2.0, 0.0), DVec3::new(-5.0, 5.0, 0.0)),
+        (0.5, DVec3::new(0.0, 0.0, -1.0), DVec3::new(0.0, 0.0, -30.0)),
+    ];
+    let mut sim = started(
+        builder(rk4(dt, 600), UniformEnvironment::flat_gravity(gravity())),
+        |sim| {
+            sim.spawn(
+                SimId(GROUND),
+                CollisionShape::single(ShapeDesc::HalfSpace { normal: DVec3::Z }),
+            );
+            sim.spawn(
+                SimId(1),
+                parent(
+                    p0,
+                    v0,
+                    1.0,
+                    Script {
+                        at: 0.0,
+                        fragments: frags.to_vec(),
+                        burst: (0, 0.0),
+                    },
+                ),
+            );
+        },
+    )
+    .unwrap();
+    // Tick 0: the parent itself.
+    let c = cloud_of(&sim, 1);
+    assert_eq!((c.fragments, c.alive, c.mass), (0, 0, 0.0));
+    assert_eq!((c.centroid, c.velocity), (p0, v0));
+    assert_eq!(
+        sim.world()
+            .resource::<FlightRecorder>()
+            .latest()
+            .unwrap()
+            .fragments,
+        [c.snapshot(SimId(1))]
+    );
+
+    let g = gravity();
+    let pb = p0 + v0 * dt + 0.5 * g * dt * dt;
+    let mut range = 0.0_f64;
+    let mut last = None;
+    for tick in 1..=600u64 {
+        if sim.step().is_some() {
+            break;
+        }
+        let pool = pool(&sim);
+        let c = cloud_of(&sim, 1);
+        assert_eq!(pool.clouds().next().unwrap(), (SimId(1), &c));
+        assert_eq!(
+            sim.world()
+                .resource::<FlightRecorder>()
+                .latest()
+                .unwrap()
+                .fragments,
+            [c.snapshot(SimId(1))]
+        );
+        assert_eq!(c.fragments, 3);
+        let impacted = pool.impacts().len() as u32;
+        assert_eq!((c.impacted, c.alive), (impacted, 3 - impacted));
+        for f in pool.fragments().filter(|f| f.state == FragmentState::Alive) {
+            range = range.max((f.position - pb).length());
+        }
+        for i in pool.impacts() {
+            range = range.max((i.point - pb).length());
+        }
+        assert!((c.max_range - range).abs() < 1e-12, "tick {tick}");
+        if c.alive == 0 {
+            assert_eq!((c.mass, c.kinetic_energy), (0.0, 0.0));
+            assert_eq!(Some((c.centroid, c.velocity, c.covariance)), last);
+            continue;
+        }
+        let (n, m, centroid, velocity, cov, ke) = expected_cloud(pool, SimId(1));
+        assert_eq!(n, c.alive);
+        assert!((c.mass - m).abs() < 1e-15);
+        assert!((c.centroid - centroid).length() < 1e-9, "tick {tick}");
+        assert!((c.velocity - velocity).length() < 1e-9);
+        assert!((c.kinetic_energy - ke).abs() < 1e-9 * ke);
+        let got = c.covariance;
+        for (a, b) in [got.xx, got.yy, got.zz, got.xy, got.xz, got.yz]
+            .into_iter()
+            .zip(cov)
+        {
+            assert!((a - b).abs() < 1e-7, "tick {tick}: {got:?} {cov:?}");
+        }
+        if c.alive == 3 {
+            // Closed form: the mass-weighted mean of the three parabolas.
+            let tau = (tick - 1) as f64 * dt;
+            let want = frags
+                .iter()
+                .map(|(m, off, v)| *m * (pb + *off + *v * tau + 0.5 * g * tau * tau))
+                .sum::<DVec3>();
+            assert!((c.centroid - want).length() < 1e-9, "tick {tick}");
+        }
+        last = Some((c.centroid, c.velocity, c.covariance));
+    }
+    let c = cloud_of(&sim, 1);
+    assert_eq!((c.alive, c.impacted, c.expired), (0, 3, 0));
+    assert!(last.is_some());
+}
+
+/// A 2000-fragment burst between the ground, a static wall and three moving boxes: every target's
+/// tally (component and pool) is the count, mass and largest `½ m |v_rel|²` of the impacts on it,
+/// targets nobody hit stay at zero, and the run's totals and impacts match the pool.
+#[test]
+fn impact_tallies_count_hits_per_target() {
+    let mut sim = started(
+        builder(rk4(0.01, 300), UniformEnvironment::flat_gravity(gravity())),
+        |sim| {
+            sim.spawn(
+                SimId(GROUND),
+                CollisionShape::single(ShapeDesc::HalfSpace { normal: DVec3::Z }),
+            );
+            sim.spawn(
+                SimId(1001),
+                CollisionShape {
+                    parts: vec![ShapePart::at(
+                        ShapeDesc::Cuboid {
+                            half_extents: DVec3::new(2.0, 30.0, 30.0),
+                        },
+                        Pose::at(DVec3::new(40.0, 0.0, 10.0)),
+                    )],
+                },
+            );
+            // Far away: never hit.
+            sim.spawn(
+                SimId(1002),
+                CollisionShape {
+                    parts: vec![ShapePart::at(
+                        ShapeDesc::Ball { radius: 1.0 },
+                        Pose::at(DVec3::new(0.0, 0.0, 5000.0)),
+                    )],
+                },
+            );
+            for (id, y) in [(2, -15.0), (3, 0.0), (4, 15.0)] {
+                sim.spawn(
+                    SimId(id),
+                    (
+                        rigid(
+                            DVec3::new(-15.0, y, 20.0),
+                            DVec3::new(0.0, 0.0, 5.0),
+                            DQuat::from_rotation_z(0.3),
+                            DVec3::new(0.0, 0.0, 1.0),
+                        ),
+                        MassProps::principal(50.0, 1.0, 1.0, 1.0),
+                        CollisionShape::single(ShapeDesc::Cuboid {
+                            half_extents: DVec3::new(3.0, 3.0, 3.0),
+                        }),
+                    ),
+                );
+            }
+            sim.spawn(
+                SimId(10),
+                parent(
+                    DVec3::new(0.0, 0.0, 20.0),
+                    DVec3::new(5.0, 0.0, 0.0),
+                    2.0,
+                    burst(0.05, 2000, 60.0),
+                ),
+            );
+        },
+    )
+    .unwrap();
+    assert_eq!(sim.run(), SimStatus::Completed);
+    let pool = pool(&sim);
+    let impacts = pool.impacts();
+    let mut hit = std::collections::BTreeSet::new();
+    for id in [GROUND, 1001, 1002, 2, 3, 4] {
+        let on: Vec<_> = impacts.iter().filter(|i| i.target == SimId(id)).collect();
+        let want = ImpactTally {
+            count: on.len() as u32,
+            mass: on.iter().map(|i| i.mass).sum(),
+            max_ke: on
+                .iter()
+                .map(|i| 0.5 * i.mass * i.relative_velocity.length_squared())
+                .fold(0.0, f64::max),
+        };
+        let entity = sim
+            .world()
+            .iter_entities()
+            .find(|e| e.get::<SimId>() == Some(&SimId(id)))
+            .unwrap()
+            .id();
+        let got = *sim.world().get::<ImpactTally>(entity).unwrap();
+        assert_eq!(got.count, want.count, "{id}");
+        assert!((got.mass - want.mass).abs() < 1e-12, "{id}");
+        assert_eq!(got.max_ke, want.max_ke, "{id}");
+        assert_eq!(pool.tally(SimId(id)), Some(&got));
+        if got.count > 0 {
+            hit.insert(id);
+        }
+    }
+    assert!(hit.contains(&GROUND) && hit.contains(&1001), "{hit:?}");
+    assert!(hit.len() >= 4, "{hit:?}");
+    assert!(!hit.contains(&1002));
+    // The parent has no CollisionShape: no tally.
+    assert!(pool.tally(SimId(10)).is_none());
+    assert!(
+        sim.world()
+            .get::<ImpactTally>(sim.body(SimId(10)).unwrap())
+            .is_none()
+    );
+
+    let out = sim.output(false);
+    let c = cloud_of(&sim, 10);
+    assert_eq!(
+        out.fragments,
+        Some(FragmentTotals {
+            written: 2000,
+            dropped: 0,
+            impacted: u64::from(c.impacted),
+            expired: 0,
+        })
+    );
+    assert_eq!(out.impacts.as_slice(), impacts);
+    assert_eq!(c.impacted as usize, impacts.len());
+}
+
+/// Tier 3: with snapshots on, the parent's rows carry its cloud as the recorder held it at that
+/// tick and every other body's row carries none; a run without a `Fragmentable` body adds no
+/// cloud, no components and no fragment output.
+#[test]
+fn snapshots_carry_the_cloud_on_the_parent_row() {
+    let mut b = builder(rk4(0.01, 100), UniformEnvironment::flat_gravity(gravity()));
+    let telemetry = TelemetryConfig {
+        snapshot_every: 10,
+        ..TelemetryConfig::default()
+    };
+    let mut sim = b.build().unwrap();
+    sim.set_telemetry(telemetry);
+    sim.spawn(
+        SimId(GROUND),
+        CollisionShape::single(ShapeDesc::HalfSpace { normal: DVec3::Z }),
+    );
+    sim.spawn(
+        SimId(2),
+        (
+            rigid(
+                DVec3::new(50.0, 0.0, 30.0),
+                DVec3::ZERO,
+                DQuat::IDENTITY,
+                DVec3::ZERO,
+            ),
+            MassProps::principal(1.0, 1.0, 1.0, 1.0),
+        ),
+    );
+    sim.spawn(
+        SimId(1),
+        parent(
+            DVec3::new(0.0, 0.0, 30.0),
+            DVec3::ZERO,
+            1.0,
+            burst(0.2, 50, 20.0),
+        ),
+    );
+    sim.start(RunSeed::new(0, 3)).unwrap();
+    let mut clouds = Vec::new();
+    loop {
+        let done = sim.step().is_some();
+        if sim.tick().is_multiple_of(10) {
+            clouds.push((sim.tick(), cloud_of(&sim, 1).snapshot(SimId(1))));
+        }
+        if done {
+            break;
+        }
+    }
+    let out = sim.output(false);
+    assert_eq!(out.fragments.unwrap().written, 50);
+    for s in &out.snapshots {
+        match s.body.sim_id {
+            1 => {
+                let want = clouds.iter().find(|(t, _)| *t == s.tick).map(|(_, c)| *c);
+                if s.tick > 0 {
+                    assert_eq!(s.fragments, want, "tick {}", s.tick);
+                } else {
+                    assert_eq!(s.fragments.unwrap().fragments, 0);
+                }
+            }
+            _ => assert_eq!(s.fragments, None),
+        }
+    }
+    assert!(
+        out.snapshots
+            .iter()
+            .any(|s| s.fragments.is_some_and(|c| c.alive == 50))
+    );
+
+    // No Fragmentable body: nothing added.
+    b = builder(rk4(0.01, 10), UniformEnvironment::flat_gravity(gravity()));
+    let mut sim = b.build().unwrap();
+    sim.spawn(
+        SimId(GROUND),
+        CollisionShape::single(ShapeDesc::HalfSpace { normal: DVec3::Z }),
+    );
+    sim.start(RunSeed::new(0, 3)).unwrap();
+    sim.run();
+    let out = sim.output(true);
+    assert_eq!(out.fragments, None);
+    assert!(out.impacts.is_empty());
+    assert!(out.frames.iter().all(|f| f.fragments.is_empty()));
+    assert!(pool(&sim).tally(SimId(GROUND)).is_none());
+    assert_eq!(
+        sim.world()
+            .iter_entities()
+            .filter(|e| e.contains::<ImpactTally>() || e.contains::<FragmentCloud>())
+            .count(),
+        0
+    );
 }

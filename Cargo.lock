@@ -1509,6 +1509,7 @@ dependencies = [
  "bevy_ecs",
  "bincode",
  "blake3",
+ "glam",
  "mpi",
  "serde",
  "serde_json",

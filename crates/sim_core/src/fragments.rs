@@ -29,6 +29,12 @@
 //!   interpolated inside the tick. Fragments never hit each other.
 //! - **Lifetime.** With `config.fragments.lifetime` set, a fragment that hit nothing for that long
 //!   expires.
+//! - **Aggregates (step 5e-2).** Individual fragments are never logged. At Tick 0 every
+//!   `Fragmentable` body gets a [`FragmentCloud`] and, in a run with one, every entity with a
+//!   `SimId` and a `CollisionShape` gets an [`ImpactTally`]; both are updated at the end of every
+//!   tick, so requirements read them as signals (`entity(P).FragmentCloud.alive`,
+//!   `impacts(T).count`), the flight recorder keeps the clouds in every frame and the Tier 3
+//!   snapshots carry them on the parent's rows. The impacts themselves become `impacts.parquet`.
 //!
 //! A non-finite fragment, or a model writing a non-finite or massless fragment, ends the run
 //! `CrashedNaN` naming the fragment or the parent.
@@ -37,7 +43,7 @@ use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
 use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
-use sim_schema::{CrashKind, CrashReason, IntegratorKind};
+use sim_schema::{CrashKind, CrashReason, FragmentCloudSnapshot, IntegratorKind};
 
 use crate::app::{SetupError, SimConfig};
 use crate::body::{BodyState, BodyTable, Dof, FRAGMENT_BASE, PointMass3, RigidBody6, SimId};
@@ -45,7 +51,7 @@ use crate::clock::SimClock;
 use crate::dynamics::Dynamics;
 use crate::environment::{Environment, SimEnvironment};
 use crate::events::{SimEvent, SimEvents};
-use crate::geometry::Placement;
+use crate::geometry::{CollisionShape, Placement};
 use crate::parametric::ResolveReport;
 use crate::rng::{RngStream, RngStreams, StreamHandle};
 use crate::watchdog::RunStatus;
@@ -158,6 +164,95 @@ impl FragmentDrag {
     }
 }
 
+/// A mass-weighted position covariance, m².
+#[derive(Reflect, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Covariance {
+    /// `E[(x − x̄)²]`.
+    pub xx: f64,
+    /// `E[(y − ȳ)²]`.
+    pub yy: f64,
+    /// `E[(z − z̄)²]`.
+    pub zz: f64,
+    /// `E[(x − x̄)(y − ȳ)]`.
+    pub xy: f64,
+    /// `E[(x − x̄)(z − z̄)]`.
+    pub xz: f64,
+    /// `E[(y − ȳ)(z − z̄)]`.
+    pub yz: f64,
+}
+
+/// One `Fragmentable` body's fragments, summed up (IB-16 Tier 1 and 3 aggregates). The kernel adds
+/// it to every `Fragmentable` body at Tick 0 and updates it at the end of every tick (after
+/// impacts, expiry and breakups), so a requirement reads it as `entity(P).FragmentCloud.<field>`.
+///
+/// Sums (`mass`, `kinetic_energy`) are over the fragments still flying and are 0 when none is. The
+/// means (`centroid`, `velocity`) and `covariance` are mass-weighted over the flying fragments;
+/// before the breakup they follow the parent (its position and velocity, zero covariance), and once
+/// no fragment is flying they keep their last values.
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq)]
+#[reflect(Component)]
+pub struct FragmentCloud {
+    /// Fragments written at the breakup (0 before it).
+    pub fragments: u32,
+    /// Fragments the pool had no room for.
+    pub dropped: u32,
+    /// Fragments flying.
+    pub alive: u32,
+    /// Fragments that hit something.
+    pub impacted: u32,
+    /// Fragments whose lifetime ran out.
+    pub expired: u32,
+    /// Mass of the flying fragments, kg.
+    pub mass: f64,
+    /// Mass-weighted mean position, world frame, m.
+    pub centroid: DVec3,
+    /// Mass-weighted mean velocity, world frame, m/s.
+    pub velocity: DVec3,
+    /// Mass-weighted position covariance, m².
+    pub covariance: Covariance,
+    /// Largest distance of a fragment from the breakup point so far (flying fragments at tick
+    /// ends, impact points, and where fragments expired), m.
+    pub max_range: f64,
+    /// Kinetic energy of the flying fragments, world frame, J.
+    pub kinetic_energy: f64,
+}
+
+impl FragmentCloud {
+    /// As the flight recorder keeps it.
+    pub fn snapshot(&self, parent: SimId) -> FragmentCloudSnapshot {
+        let c = &self.covariance;
+        FragmentCloudSnapshot {
+            parent_sim_id: parent.0,
+            fragments: self.fragments,
+            dropped: self.dropped,
+            alive: self.alive,
+            impacted: self.impacted,
+            expired: self.expired,
+            mass: self.mass,
+            centroid: self.centroid.to_array(),
+            velocity: self.velocity.to_array(),
+            covariance: [c.xx, c.yy, c.zz, c.xy, c.xz, c.yz],
+            max_range: self.max_range,
+            kinetic_energy: self.kinetic_energy,
+        }
+    }
+}
+
+/// Fragment impacts on one body or static collider (IB-16 per-target aggregates). In a run with a
+/// `Fragmentable` body the kernel adds it at Tick 0 to every entity with a `SimId` and a
+/// `CollisionShape`; a requirement reads it as `impacts(T).count` (short for
+/// `entity(T).ImpactTally.count`), `.mass` or `.max_ke`.
+#[derive(Component, Reflect, Clone, Copy, Debug, Default, PartialEq)]
+#[reflect(Component)]
+pub struct ImpactTally {
+    /// Fragments that hit it.
+    pub count: u32,
+    /// Their total mass, kg.
+    pub mass: f64,
+    /// The largest kinetic energy of one impact relative to the surface hit, `½ m |v_rel|²`, J.
+    pub max_ke: f64,
+}
+
 /// A parent as its model sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FragmentParent {
@@ -243,6 +338,26 @@ pub struct FragmentImpact {
     pub relative_velocity: DVec3,
     /// The fragment's mass, kg.
     pub mass: f64,
+}
+
+/// A run's fragment counts (the `fragments_*` summary columns, IB-16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FragmentTotals {
+    /// Fragments written into the pool.
+    pub written: u64,
+    /// Fragments dropped for lack of room.
+    pub dropped: u64,
+    /// Fragments that hit something.
+    pub impacted: u64,
+    /// Fragments whose lifetime ran out.
+    pub expired: u64,
+}
+
+impl FragmentTotals {
+    /// In the order of `SummaryRow::FRAGMENT_COLUMNS`.
+    pub fn to_array(self) -> [u64; 4] {
+        [self.written, self.dropped, self.impacted, self.expired]
+    }
 }
 
 /// What became of one parent.
@@ -361,6 +476,7 @@ impl FragmentWriter<'_> {
 
 struct Parent {
     sim_id: SimId,
+    entity: Entity,
     /// Body slot.
     slot: usize,
     mass: f64,
@@ -368,6 +484,50 @@ struct Parent {
     drag: Option<FragmentDrag>,
     rng: StreamHandle,
     summary: ParentSummary,
+    /// Where it broke up, world frame, m.
+    origin: DVec3,
+    cloud: FragmentCloud,
+}
+
+/// A body or static collider fragments can hit.
+struct Target {
+    sim_id: SimId,
+    entity: Entity,
+    tally: ImpactTally,
+}
+
+/// One parent's sums over its flying fragments in a tick.
+#[derive(Clone, Copy, Default)]
+struct Sums {
+    mass: f64,
+    moment: DVec3,
+    momentum: DVec3,
+    energy: f64,
+    range: f64,
+    cov: [f64; 6],
+}
+
+/// Give every `Fragmentable` body a [`FragmentCloud`] and, when there is one, every entity with a
+/// `SimId` and a `CollisionShape` an [`ImpactTally`] (Tick 0, right after the scenario is spawned
+/// and resolved, before any plugin starts, so a requirement set resolves signals on them).
+pub(crate) fn attach_outputs(world: &mut World) {
+    let parents: Vec<Entity> = world
+        .query_filtered::<Entity, With<Fragmentable>>()
+        .iter(world)
+        .collect();
+    if parents.is_empty() {
+        return;
+    }
+    for e in parents {
+        world.entity_mut(e).insert(FragmentCloud::default());
+    }
+    let targets: Vec<Entity> = world
+        .query_filtered::<Entity, (With<SimId>, With<CollisionShape>)>()
+        .iter(world)
+        .collect();
+    for e in targets {
+        world.entity_mut(e).insert(ImpactTally::default());
+    }
 }
 
 /// Every fragment of the run, the registered models and the impacts so far.
@@ -377,6 +537,11 @@ pub struct FragmentPool {
     parents: Vec<Parent>,
     slots: Slots,
     impacts: Vec<FragmentImpact>,
+    /// Every entity with a `SimId` and a `CollisionShape`, in `SimId` order.
+    targets: Vec<Target>,
+    targets_changed: bool,
+    /// Per-parent sums, reused every tick.
+    sums: Vec<Sums>,
     /// Body poses at the start and end of the current tick, by body slot, and the end velocities
     /// (linear, and angular in the world frame).
     start_poses: Vec<Placement>,
@@ -452,6 +617,47 @@ impl FragmentPool {
         self.parents.iter().map(|p| p.summary)
     }
 
+    /// Every `Fragmentable` body's [`FragmentCloud`], in `SimId` order.
+    pub fn clouds(&self) -> impl Iterator<Item = (SimId, &FragmentCloud)> + '_ {
+        self.parents.iter().map(|p| (p.sim_id, &p.cloud))
+    }
+
+    /// The [`ImpactTally`] of a body or static collider, in a run with a `Fragmentable` body.
+    pub fn tally(&self, target: SimId) -> Option<&ImpactTally> {
+        self.targets
+            .binary_search_by_key(&target, |t| t.sim_id)
+            .ok()
+            .map(|i| &self.targets[i].tally)
+    }
+
+    /// Fragments that hit something so far.
+    pub fn impacted(&self) -> u64 {
+        self.parents
+            .iter()
+            .map(|p| u64::from(p.cloud.impacted))
+            .sum()
+    }
+
+    /// The parents' clouds as the flight recorder keeps them, appended to `out` in `SimId` order.
+    pub(crate) fn snapshot_into(&self, out: &mut Vec<FragmentCloudSnapshot>) {
+        out.extend(self.parents.iter().map(|p| p.cloud.snapshot(p.sim_id)));
+    }
+
+    /// Number of `Fragmentable` bodies in this run.
+    pub fn parent_count(&self) -> usize {
+        self.parents.len()
+    }
+
+    /// The run's fragment counts, in a run with a `Fragmentable` body.
+    pub fn totals(&self) -> Option<FragmentTotals> {
+        (!self.parents.is_empty()).then(|| FragmentTotals {
+            written: self.slots.claimed as u64,
+            dropped: self.dropped,
+            impacted: self.impacted(),
+            expired: self.expired,
+        })
+    }
+
     /// Feed the claimed slots to the state hash: for each, in slot order, its `SimId` (u32), its
     /// state (one byte: 1 alive, 2 impacted, 3 expired), then position and velocity (f64 bits).
     /// Nothing before the first breakup.
@@ -483,6 +689,8 @@ impl FragmentPool {
         };
         self.parents.clear();
         self.impacts.clear();
+        self.targets.clear();
+        self.targets_changed = false;
         self.expired = 0;
         self.dropped = 0;
         self.method = config.integrator.fragments;
@@ -538,11 +746,14 @@ impl FragmentPool {
                 .register(&format!("fragmentation/{}", id.0));
             self.parents.push(Parent {
                 sim_id: id,
+                entity,
                 slot,
                 mass,
                 model,
                 drag,
                 rng,
+                origin: DVec3::ZERO,
+                cloud: FragmentCloud::default(),
                 summary: ParentSummary {
                     sim_id: id,
                     fragmented_at: None,
@@ -589,9 +800,28 @@ impl FragmentPool {
                 model.setup(world, &ids)?;
             }
         }
+        self.sums.clear();
+        self.sums.resize(self.parents.len(), Sums::default());
         if !self.parents.is_empty() {
             let bodies = world.resource::<Dynamics>().bodies();
             read_poses(world, bodies, &mut self.start_poses, &mut self.end_rates);
+            for p in &mut self.parents {
+                p.cloud.centroid = self.start_poses[p.slot].position;
+                p.cloud.velocity = self.end_rates[p.slot].0;
+            }
+            let mut targets: Vec<Target> = world
+                .query_filtered::<(Entity, &SimId), With<CollisionShape>>()
+                .iter(world)
+                .map(|(entity, id)| Target {
+                    sim_id: *id,
+                    entity,
+                    tally: ImpactTally::default(),
+                })
+                .collect();
+            targets.sort_by_key(|t| t.sim_id);
+            self.targets = targets;
+            self.targets_changed = true;
+            self.write_outputs(world);
         }
         Ok(())
     }
@@ -664,7 +894,8 @@ impl FragmentPool {
             let bodies = world.resource::<Dynamics>().bodies();
             read_poses(world, bodies, &mut self.end_poses, &mut self.end_rates);
         }
-        if self.slots.alive > 0 {
+        let flying = self.slots.alive > 0;
+        if flying {
             self.find_impacts(world, tick, t0, t1);
             if let Some(life) = self.lifetime {
                 let s = &mut self.slots;
@@ -675,12 +906,110 @@ impl FragmentPool {
                         s.state[k] = FragmentState::Expired;
                         s.alive -= 1;
                         self.expired += 1;
+                        let p = &mut self.parents[s.parent[k] as usize];
+                        p.cloud.expired += 1;
+                        p.cloud.max_range =
+                            p.cloud.max_range.max((s.position[k] - p.origin).length());
                     }
                 }
             }
         }
-        self.breakups(world, tick, t1);
+        let broke = self.breakups(world, tick, t1);
+        self.update_clouds(flying || broke);
+        self.write_outputs(world);
         self.start_poses.copy_from_slice(&self.end_poses);
+    }
+
+    /// The parents' clouds after this tick's impacts, expiry and breakups. `moved`: some fragment
+    /// flew or was written this tick (else only the parents that have not broken up move).
+    fn update_clouds(&mut self, moved: bool) {
+        for p in &mut self.parents {
+            if p.summary.fragmented_at.is_none() {
+                p.cloud.centroid = self.end_poses[p.slot].position;
+                p.cloud.velocity = self.end_rates[p.slot].0;
+            }
+        }
+        if !moved {
+            return;
+        }
+        let s = &self.slots;
+        self.sums.fill(Sums::default());
+        for k in 0..s.claimed {
+            if s.state[k] != FragmentState::Alive {
+                continue;
+            }
+            let i = s.parent[k] as usize;
+            let (m, p, v) = (s.mass[k], s.position[k], s.velocity[k]);
+            let a = &mut self.sums[i];
+            a.mass += m;
+            a.moment += m * p;
+            a.momentum += m * v;
+            a.energy += 0.5 * m * v.length_squared();
+            a.range = a.range.max((p - self.parents[i].origin).length());
+        }
+        for (a, p) in self.sums.iter_mut().zip(&self.parents) {
+            if a.mass > 0.0 {
+                a.moment /= a.mass;
+                a.momentum /= a.mass;
+            } else {
+                a.moment = p.cloud.centroid;
+                a.momentum = p.cloud.velocity;
+            }
+        }
+        // Second pass about the mean, so a cloud far from the origin keeps its spread.
+        for k in 0..s.claimed {
+            if s.state[k] != FragmentState::Alive {
+                continue;
+            }
+            let a = &mut self.sums[s.parent[k] as usize];
+            let (m, d) = (s.mass[k], s.position[k] - a.moment);
+            a.cov[0] += m * d.x * d.x;
+            a.cov[1] += m * d.y * d.y;
+            a.cov[2] += m * d.z * d.z;
+            a.cov[3] += m * d.x * d.y;
+            a.cov[4] += m * d.x * d.z;
+            a.cov[5] += m * d.y * d.z;
+        }
+        for (a, p) in self.sums.iter().zip(&mut self.parents) {
+            if p.summary.fragmented_at.is_none() {
+                continue;
+            }
+            let c = &mut p.cloud;
+            c.alive = c.fragments - c.impacted - c.expired;
+            c.mass = a.mass;
+            c.kinetic_energy = a.energy;
+            c.max_range = c.max_range.max(a.range);
+            if a.mass > 0.0 {
+                c.centroid = a.moment;
+                c.velocity = a.momentum;
+                let w = 1.0 / a.mass;
+                c.covariance = Covariance {
+                    xx: a.cov[0] * w,
+                    yy: a.cov[1] * w,
+                    zz: a.cov[2] * w,
+                    xy: a.cov[3] * w,
+                    xz: a.cov[4] * w,
+                    yz: a.cov[5] * w,
+                };
+            }
+        }
+    }
+
+    /// Copy the clouds and the changed tallies into their components.
+    fn write_outputs(&mut self, world: &mut World) {
+        for p in &self.parents {
+            if let Some(mut c) = world.get_mut::<FragmentCloud>(p.entity) {
+                *c = p.cloud;
+            }
+        }
+        if self.targets_changed {
+            for t in &self.targets {
+                if let Some(mut c) = world.get_mut::<ImpactTally>(t.entity) {
+                    *c = t.tally;
+                }
+            }
+            self.targets_changed = false;
+        }
     }
 
     fn find_impacts(&mut self, world: &World, tick: u64, t0: f64, t1: f64) {
@@ -707,23 +1036,39 @@ impl FragmentPool {
             };
             s.state[k] = FragmentState::Impacted;
             s.alive -= 1;
+            let point = p0.lerp(p1, f);
+            let relative_velocity = velocity - surface;
+            let parent = &mut self.parents[s.parent[k] as usize];
+            parent.cloud.impacted += 1;
+            parent.cloud.max_range = parent.cloud.max_range.max((point - parent.origin).length());
+            if let Ok(i) = self.targets.binary_search_by_key(&hit.sim_id, |t| t.sim_id) {
+                let t = &mut self.targets[i].tally;
+                t.count += 1;
+                t.mass += s.mass[k];
+                t.max_ke = t
+                    .max_ke
+                    .max(0.5 * s.mass[k] * relative_velocity.length_squared());
+                self.targets_changed = true;
+            }
             if self.impacts.len() < self.impacts.capacity() {
                 self.impacts.push(FragmentImpact {
                     time: t0 + f * (t1 - t0),
                     tick,
                     fragment: SimId(FRAGMENT_BASE + k as u32),
-                    parent: self.parents[s.parent[k] as usize].sim_id,
+                    parent: parent.sim_id,
                     target: hit.sim_id,
-                    point: p0.lerp(p1, f),
+                    point,
                     point_body,
-                    relative_velocity: velocity - surface,
+                    relative_velocity,
                     mass: s.mass[k],
                 });
             }
         }
     }
 
-    fn breakups(&mut self, world: &mut World, tick: u64, t: f64) {
+    /// Offer every parent that has not broken up to its model. Returns whether one broke up.
+    fn breakups(&mut self, world: &mut World, tick: u64, t: f64) -> bool {
+        let mut broke = false;
         for i in 0..self.parents.len() {
             let p = &self.parents[i];
             if p.summary.fragmented_at.is_some() {
@@ -772,6 +1117,10 @@ impl FragmentPool {
                 mass,
                 kinetic_energy: energy,
             };
+            p.origin = parent.state.position;
+            p.cloud.fragments = written;
+            p.cloud.dropped = dropped;
+            broke = true;
             self.dropped += u64::from(dropped);
             let slot = p.slot;
             {
@@ -803,6 +1152,7 @@ impl FragmentPool {
             }
             world.resource_mut::<Dynamics>().retire(slot);
         }
+        broke
     }
 }
 

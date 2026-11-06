@@ -13,6 +13,10 @@
 //! query service's `DoGet`). A stream whose writer never finished (a killed job's `.partial`) has
 //! no trailer; [`CrashReader::open`] then scans the records from the start and stops at the first
 //! incomplete one, so every whole dump stays readable.
+//!
+//! Schema 2.0 added `TickFrame::fragments` (IB-16). A 1.x stream still reads: its dumps decode with
+//! the 1.x frame layout and come back with no fragments (the upgrader for one previous major,
+//! subsystems §10.4).
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -21,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use super::TableError;
 use crate::{
     CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump, CrashKind, CrashReason, FileHeader,
-    SimStatus, TickFrame,
+    HeaderError, Semver, SimStatus, TickFrame,
 };
 
 const RECORD: u8 = b'D';
@@ -68,7 +72,7 @@ struct WireRef<'a> {
 }
 
 #[derive(Deserialize)]
-struct Wire {
+struct Wire<F> {
     header: String,
     run_id: u64,
     param_set_id: u32,
@@ -77,7 +81,28 @@ struct Wire {
     status: SimStatus,
     reason: CrashReason,
     panic: Option<String>,
-    frames: Vec<TickFrame>,
+    frames: Vec<F>,
+}
+
+/// A frame as schema 1.x wrote it: no fragment aggregates.
+#[derive(Deserialize)]
+struct TickFrameV1 {
+    tick: u64,
+    t_s: f64,
+    total_energy: f64,
+    bodies: Vec<crate::BodySnapshot>,
+}
+
+impl From<TickFrameV1> for TickFrame {
+    fn from(f: TickFrameV1) -> Self {
+        TickFrame {
+            tick: f.tick,
+            t_s: f.t_s,
+            total_energy: f.total_energy,
+            bodies: f.bodies,
+            fragments: Vec::new(),
+        }
+    }
 }
 
 fn config() -> bincode::config::Configuration {
@@ -115,12 +140,34 @@ pub fn encode_dump(dump: &CrashDump) -> Result<Vec<u8>, TableError> {
 
 /// Decode a compressed payload written by [`encode_dump`].
 pub fn decode_dump(payload: &[u8]) -> Result<CrashDump, TableError> {
+    decode_dump_major(payload, CRASHES_SCHEMA_VERSION.major)
+}
+
+/// Decode a payload from a stream of schema major `major`: this build's, or the one before it
+/// (whose frames come back with no fragments).
+pub fn decode_dump_major(payload: &[u8], major: u64) -> Result<CrashDump, TableError> {
     let raw = zstd::stream::decode_all(payload)?;
-    let (w, used): (Wire, usize) =
-        bincode::serde::decode_from_slice(&raw, config()).map_err(corrupt)?;
-    if used != raw.len() {
-        return Err(corrupt("trailing bytes after a crash dump"));
-    }
+    let w: Wire<TickFrame> = if major == CRASHES_SCHEMA_VERSION.major {
+        decode_wire(&raw)?
+    } else if major + 1 == CRASHES_SCHEMA_VERSION.major {
+        let w: Wire<TickFrameV1> = decode_wire(&raw)?;
+        Wire {
+            header: w.header,
+            run_id: w.run_id,
+            param_set_id: w.param_set_id,
+            replicate_seed: w.replicate_seed,
+            params: w.params,
+            status: w.status,
+            reason: w.reason,
+            panic: w.panic,
+            frames: w.frames.into_iter().map(TickFrame::from).collect(),
+        }
+    } else {
+        return Err(TableError::Header(HeaderError::Unsupported {
+            found: Semver::new(major, 0, 0),
+            supported: CRASHES_SCHEMA_VERSION,
+        }));
+    };
     Ok(CrashDump {
         header: parse_header(w.header.as_bytes())?,
         run_id: w.run_id,
@@ -132,6 +179,15 @@ pub fn decode_dump(payload: &[u8]) -> Result<CrashDump, TableError> {
         panic: w.panic,
         frames: w.frames,
     })
+}
+
+fn decode_wire<F: serde::de::DeserializeOwned>(raw: &[u8]) -> Result<Wire<F>, TableError> {
+    let (w, used): (Wire<F>, usize) =
+        bincode::serde::decode_from_slice(raw, config()).map_err(corrupt)?;
+    if used != raw.len() {
+        return Err(corrupt("trailing bytes after a crash dump"));
+    }
+    Ok(w)
 }
 
 /// Appends dumps to a crash stream; [`CrashWriter::finish`] writes the index.
@@ -207,13 +263,14 @@ impl<W: Write> CrashWriter<W> {
 pub struct CrashReader<R: Read + Seek> {
     input: R,
     header: FileHeader,
+    major: u64,
     index: Vec<CrashIndexEntry>,
     finished: bool,
 }
 
 impl<R: Read + Seek> CrashReader<R> {
-    /// Open a stream: check the header, then read the index from the trailer or, for an
-    /// unfinished stream, by scanning the records.
+    /// Open a stream: check the header (this build's schema major or the one before it), then
+    /// read the index from the trailer or, for an unfinished stream, by scanning the records.
     pub fn open(mut input: R) -> Result<Self, TableError> {
         let size = input.seek(SeekFrom::End(0))?;
         input.seek(SeekFrom::Start(0))?;
@@ -224,13 +281,20 @@ impl<R: Read + Seek> CrashReader<R> {
         let mut json = vec![0; hlen as usize];
         input.read_exact(&mut json)?;
         let header = parse_header(&json)?;
-        header
-            .check(CRASHES_FORMAT, CRASHES_SCHEMA_VERSION)
-            .map_err(TableError::Header)?;
+        let major = match header.check(CRASHES_FORMAT, CRASHES_SCHEMA_VERSION) {
+            Ok(()) => CRASHES_SCHEMA_VERSION.major,
+            Err(HeaderError::Unsupported { found, .. })
+                if found.major + 1 == CRASHES_SCHEMA_VERSION.major =>
+            {
+                found.major
+            }
+            Err(e) => return Err(TableError::Header(e)),
+        };
         let first = 4 + hlen;
         let mut reader = Self {
             input,
             header,
+            major,
             index: Vec::new(),
             finished: false,
         };
@@ -304,7 +368,7 @@ impl<R: Read + Seek> CrashReader<R> {
             }
             let mut payload = vec![0; len as usize];
             self.input.read_exact(&mut payload)?;
-            let d = decode_dump(&payload)?;
+            let d = decode_dump_major(&payload, self.major)?;
             index.push(CrashIndexEntry {
                 run_id: d.run_id,
                 param_set_id: d.param_set_id,
@@ -346,7 +410,7 @@ impl<R: Read + Seek> CrashReader<R> {
         }
         let mut payload = vec![0; len as usize];
         self.input.read_exact(&mut payload)?;
-        let dump = decode_dump(&payload)?;
+        let dump = decode_dump_major(&payload, self.major)?;
         if dump.run_id != entry.run_id {
             return Err(corrupt(format!(
                 "index says run {} at offset {}, the dump is run {}",

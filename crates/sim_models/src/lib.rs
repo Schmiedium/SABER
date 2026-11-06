@@ -12,13 +12,15 @@
 //! backlash), the `SensorPlugin` (IMU, GNSS, barometer with noise, bias walk and latency), the
 //! `RotorcraftPlugin` (lumped rotors with motor lag, mixer) and the `ControlPlugin` (the
 //! `Controller` trait and PID loops). Step 5d-3 adds the range finder to the `SensorPlugin`, measuring
-//! against the contact geometry (`docs/build-plan.md`).
+//! against the contact geometry. Step 5e-2 adds the importers (`import`, IB-13), starting with the
+//! fragment drag table (`docs/build-plan.md`).
 
 pub mod actuators;
 pub mod ballistics;
 pub mod control;
 pub mod environment;
 pub mod fixedwing;
+pub mod import;
 pub mod rotorcraft;
 pub mod sensors;
 pub mod tables;

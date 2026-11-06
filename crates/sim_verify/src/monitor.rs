@@ -12,7 +12,9 @@
 //! when no later tick can change its verdict (a `Never` that saw its condition, an `Eventually`
 //! past its deadline, an `Envelope` past its window, a `Custom` check that says so); one that
 //! settles as a failure with `early_stop_on_fail` asks the run to stop (`EARLY_FAIL`). A
-//! non-finite sample or a dropped event makes what reads it `Inconclusive`. Ticks never allocate.
+//! non-finite sample or a dropped event makes what reads it `Inconclusive`, and so does a run that
+//! dropped fragments for lack of pool room for every metric and requirement that reads a fragment
+//! signal (`FragmentCloud`, `ImpactTally`, `impacts(..)`; IB-16). Ticks never allocate.
 //!
 //! After the run, [`run_verdicts`] (or [`VerifyState::finalize`]) turns the state into the
 //! run's [`RunVerdictRow`] by the rules in [`crate::verdict`].
@@ -21,14 +23,15 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use sim_core::{
-    CheckCatalog, CheckState, CustomCheck, FieldPath, FieldReadError, RunStatus, SetupError,
-    SimAppBuilder, SimClock, SimEvents, SimId, SimPlugin, SimSet, SimStatus, SimTypeRegistry,
-    StopRequests,
+    CheckCatalog, CheckState, CustomCheck, FieldPath, FieldReadError, FragmentPool, RunStatus,
+    SetupError, SimAppBuilder, SimClock, SimEvents, SimId, SimPlugin, SimSet, SimStatus,
+    SimTypeRegistry, StopRequests,
 };
 use sim_schema::Verdict;
 
 use crate::spec::{
     Condition, Op, Reducer, ReqError, RequirementKind, RequirementSet, parse_signal,
+    reads_fragments,
 };
 use crate::verdict::{EARLY_FAIL, Gate, RunVerdictRow, gate, threshold_decided, threshold_verdict};
 
@@ -76,6 +79,8 @@ enum Source {
 struct Probe {
     entity: Entity,
     path: FieldPath,
+    /// It reads a fragment signal (IB-16).
+    fragments: bool,
 }
 
 #[derive(Debug)]
@@ -242,7 +247,7 @@ impl Compiler<'_> {
         let (sim_id, path) = parse_signal(signal).map_err(unresolved)?;
         let path = {
             let registry = self.world.resource::<SimTypeRegistry>().0.read();
-            FieldPath::parse(&registry, path).map_err(unresolved)?
+            FieldPath::parse(&registry, &path).map_err(unresolved)?
         };
         let entity = self
             .entities
@@ -261,7 +266,11 @@ impl Compiler<'_> {
             Err(e) => return Err(unresolved(e.to_string())),
         }
         self.signals.push(signal.to_owned());
-        self.probes.push(Probe { entity, path });
+        self.probes.push(Probe {
+            entity,
+            path,
+            fragments: reads_fragments(signal),
+        });
         Ok(self.probes.len() - 1)
     }
 
@@ -503,10 +512,28 @@ impl VerifyState {
     ) -> RunVerdictRow {
         let g = gate(status);
         let early = status == SimStatus::Terminated && stop_reason == Some(EARLY_FAIL);
-        let metrics: Vec<f64> = self.metrics.iter().map(MetricState::value).collect();
+        let mut metrics: Vec<f64> = self.metrics.iter().map(MetricState::value).collect();
+        // Fragments the pool had no room for: what reads fragments cannot be judged (IB-16).
+        let dropped = world
+            .get_resource::<FragmentPool>()
+            .is_some_and(|p| p.dropped() > 0);
+        let probes = &self.probes;
+        let reads = |s: &Source| dropped && matches!(s, Source::Probe(i) if probes[*i].fragments);
+        let metric_states = &self.metrics;
+        for (m, v) in metric_states.iter().zip(&mut metrics) {
+            if reads(&m.source) {
+                *v = f64::NAN;
+            }
+        }
         let mut verdicts = Vec::with_capacity(self.requirements.len());
         for r in self.requirements.iter_mut().filter(|r| r.per_run) {
-            let v = if g != Gate::Evaluate {
+            let lacks_fragments = match &r.monitor {
+                Monitor::Threshold { metric, .. } => reads(&metric_states[*metric].source),
+                Monitor::Envelope { probe, .. } => reads(&Source::Probe(*probe)),
+                Monitor::Never(c) | Monitor::Eventually { cond: c, .. } => reads(&c.source),
+                Monitor::Custom(_) => false,
+            };
+            let v = if g != Gate::Evaluate || lacks_fragments {
                 Verdict::Inconclusive
             } else if let Monitor::Threshold { metric, op, value } = r.monitor {
                 threshold_verdict(

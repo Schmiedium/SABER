@@ -1,7 +1,8 @@
-//! Zero allocations after Tick 0 with fragments (IB-16, verification §7.7, build step 5e-1): a
-//! scripted 30 000-fragment breakup of a 6DOF parent in air with a Mach-dependent drag table, the
-//! fragments flying, hitting the ground, a static box and moving bodies, and expiring, under both
-//! fragment methods and again after a World reset.
+//! Zero allocations after Tick 0 with fragments (IB-16, verification §7.7, build steps 5e-1 and
+//! 5e-2): a scripted 30 000-fragment breakup of a 6DOF parent in air with a Mach-dependent drag
+//! table, the fragments flying, hitting the ground, a static box and moving bodies, and expiring,
+//! with the per-parent cloud, the per-target tallies, the recorder and Tier 3 snapshots kept every
+//! tick, under both fragment methods and again after a World reset.
 
 mod kernel_common;
 
@@ -12,7 +13,7 @@ use sim_core::integrator::IntegratorKind;
 use sim_core::{
     CollisionShape, ContactMaterial, FragmentDrag, FragmentParent, FragmentPool, FragmentWriter,
     Fragmentable, FragmentationModel, MassProps, Pose, RngStream, RunSeed, SetupError, ShapeDesc,
-    ShapePart, SimAppBuilder, SimId, SimWorld, UniformEnvironment,
+    ShapePart, SimAppBuilder, SimId, SimWorld, TelemetryConfig, UniformEnvironment,
 };
 
 #[global_allocator]
@@ -131,6 +132,11 @@ fn a_30k_fragment_breakup_never_allocates() {
         );
         b.add_fragmentation_model(Burst);
         let mut sim = b.build().unwrap();
+        sim.set_telemetry(TelemetryConfig {
+            snapshot_every: 10,
+            max_snapshots: 10,
+            ..TelemetryConfig::default()
+        });
         for seed in [1, 2] {
             scene(&mut sim);
             sim.start(RunSeed::new(0, seed)).unwrap();
@@ -153,6 +159,15 @@ fn a_30k_fragment_breakup_never_allocates() {
                 pool.impacts().len() as u64 + pool.expired() + pool.alive() as u64,
                 u64::from(N)
             );
+            let (_, cloud) = pool.clouds().next().unwrap();
+            assert_eq!(cloud.impacted as usize, pool.impacts().len());
+            assert_eq!(cloud.alive as usize, pool.alive());
+            let tallied: u32 = [1000, 1001, 1, 2, 3]
+                .into_iter()
+                .filter_map(|id| pool.tally(SimId(id)))
+                .map(|t| t.count)
+                .sum();
+            assert_eq!(tallied, cloud.impacted);
             sim.reset();
         }
     }

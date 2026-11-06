@@ -20,8 +20,8 @@ use sim_schema::io::{
 };
 use sim_schema::{
     BodySnapshot, CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CampaignVerdictRow, CrashDump, CrashKind,
-    CrashReason, EventRow, FileHeader, HeaderError, ImpactRow, IntegratorKind, ManifestRow,
-    SimStatus, SnapshotRow, SummaryRow, TickFrame, Verdict,
+    CrashReason, EventRow, FileHeader, FragmentCloudSnapshot, HeaderError, ImpactRow,
+    IntegratorKind, ManifestRow, SimStatus, SnapshotRow, SummaryRow, TickFrame, Verdict,
 };
 
 fn root() -> PathBuf {
@@ -49,6 +49,13 @@ fn fixed_header(format: &str) -> FileHeader {
     h.scene_hash = Some(0x0123_4567_89ab_cdef);
     h.req_set_hash = Some(42);
     h.created_utc = Some("2026-11-02T00:00:00Z".into());
+    h
+}
+
+/// [`fixed_header`] for a crash stream of this build's schema.
+fn crash_header() -> FileHeader {
+    let mut h = fixed_header(CRASHES_FORMAT);
+    h.schema_version = CRASHES_SCHEMA_VERSION.to_string();
     h
 }
 
@@ -98,6 +105,7 @@ fn summaries() -> Vec<SummaryRow> {
         params: vec![800.0, 45.0],
         metrics: vec![8150.5],
         verdicts: vec![Verdict::Pass, Verdict::Pass],
+        fragments: vec![],
     };
     vec![
         base.clone(),
@@ -265,6 +273,37 @@ fn verdicts() -> Vec<CampaignVerdictRow> {
     ]
 }
 
+/// The dumps of the golden 1.0 stream `crashes_v1.zst` (frames without fragments).
+fn dumps_v1() -> Vec<CrashDump> {
+    dumps()
+        .into_iter()
+        .map(|mut d| {
+            d.header = fixed_header(CRASHES_FORMAT);
+            for f in &mut d.frames {
+                f.fragments.clear();
+            }
+            d
+        })
+        .collect()
+}
+
+fn cloud(tick: u64) -> FragmentCloudSnapshot {
+    FragmentCloudSnapshot {
+        parent_sim_id: 4,
+        fragments: 120,
+        dropped: 3,
+        alive: 100 - tick as u32,
+        impacted: 15 + tick as u32,
+        expired: 5,
+        mass: 1.5,
+        centroid: [10.0, -2.0, 30.0 - tick as f64],
+        velocity: [100.0, 0.5, -9.8],
+        covariance: [4.0, 1.0, 2.25, 0.1, -0.2, 0.3],
+        max_range: 41.0,
+        kinetic_energy: 7.5e3,
+    }
+}
+
 fn dumps() -> Vec<CrashDump> {
     let frame = |tick: u64, z: f64| TickFrame {
         tick,
@@ -283,10 +322,11 @@ fn dumps() -> Vec<CrashDump> {
                 0
             },
         }],
+        fragments: if tick == 3 { vec![] } else { vec![cloud(tick)] },
     };
     vec![
         CrashDump {
-            header: fixed_header(CRASHES_FORMAT),
+            header: crash_header(),
             run_id: 2,
             param_set_id: 2,
             replicate_seed: 13,
@@ -302,7 +342,7 @@ fn dumps() -> Vec<CrashDump> {
             frames: vec![frame(16, 1.0), frame(17, f64::NAN)],
         },
         CrashDump {
-            header: fixed_header(CRASHES_FORMAT),
+            header: crash_header(),
             run_id: 7,
             param_set_id: 3,
             replicate_seed: 99,
@@ -356,6 +396,37 @@ fn every_table_round_trips() {
     round_trip("impacts", &impacts(), &[]);
     round_trip("manifest", &manifest(), &manifest_dynamic());
     round_trip("verdicts", &verdicts(), &[]);
+    // A fragmenting campaign's summaries (IB-16).
+    let mut dynamic = summary_dynamic();
+    dynamic.extend(SummaryRow::FRAGMENT_COLUMNS.map(str::to_owned));
+    let rows: Vec<SummaryRow> = summaries()
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| SummaryRow {
+            fragments: vec![30_000, i as u64, 12_000 + i as u64, 17_000],
+            ..r
+        })
+        .collect();
+    round_trip("summaries-fragments", &rows, &dynamic);
+    // The family comes last.
+    let mut early = vec!["fragments_dropped".to_owned()];
+    early.extend(summary_dynamic());
+    assert!(Table::Summaries.arrow_schema(&early).is_err());
+    // A snapshot file with the fragment channels.
+    let channels: Vec<String> = FragmentCloudSnapshot::CHANNELS.map(str::to_owned).into();
+    let snaps: Vec<SnapshotRow> = snapshots()
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| SnapshotRow {
+            channels: if i == 0 {
+                cloud(1).channels().to_vec()
+            } else {
+                vec![f64::NAN; 20]
+            },
+            ..r
+        })
+        .collect();
+    round_trip("snapshots-fragments", &snaps, &channels);
     // No rows, no dynamic columns: still a valid file.
     round_trip::<SummaryRow>("empty", &[], &[]);
 }
@@ -511,7 +582,7 @@ fn half_null_vectors_are_refused() {
 /// A stream of these dumps; unfinished, it is what a killed writer leaves (no index footer).
 fn crash_stream(dumps: &[CrashDump], finish: bool) -> Vec<u8> {
     let mut v = Vec::new();
-    let mut w = CrashWriter::new(&mut v, &fixed_header(CRASHES_FORMAT)).unwrap();
+    let mut w = CrashWriter::new(&mut v, &crash_header()).unwrap();
     for d in dumps {
         w.append(d).unwrap();
     }
@@ -528,7 +599,7 @@ fn crash_stream_seeks_to_one_dump() {
     let bytes = crash_stream(&dumps, true);
     let mut r = CrashReader::open(std::io::Cursor::new(bytes)).unwrap();
     assert!(r.finished());
-    assert_eq!(r.header(), &fixed_header(CRASHES_FORMAT));
+    assert_eq!(r.header(), &crash_header());
     let index = r.index().to_vec();
     assert_eq!(index.len(), 2);
     assert_eq!(index[1].run_id, 7);
@@ -564,14 +635,25 @@ fn crash_stream_refuses_wrong_header_and_damage() {
         "{err}"
     );
 
-    let mut h = fixed_header(CRASHES_FORMAT);
-    h.schema_version = "2.0.0".into();
-    let json = serde_json::to_vec(&h).unwrap();
-    let mut bytes = (json.len() as u32).to_le_bytes().to_vec();
-    bytes.extend(json);
-    let err = CrashReader::open(std::io::Cursor::new(bytes))
+    // The next major, and two majors back (no upgrader), are refused.
+    for version in ["3.0.0", "0.9.0"] {
+        let mut h = fixed_header(CRASHES_FORMAT);
+        h.schema_version = version.into();
+        let json = serde_json::to_vec(&h).unwrap();
+        let mut bytes = (json.len() as u32).to_le_bytes().to_vec();
+        bytes.extend(json);
+        let err = CrashReader::open(std::io::Cursor::new(bytes))
+            .err()
+            .expect("unsupported major refused");
+        assert!(
+            matches!(err, TableError::Header(HeaderError::Unsupported { .. })),
+            "{version}: {err}"
+        );
+    }
+    // A writer takes only this build's major.
+    let err = CrashWriter::new(Vec::new(), &fixed_header(CRASHES_FORMAT))
         .err()
-        .expect("major 2 refused");
+        .expect("a 1.0 writer refused");
     assert!(
         matches!(err, TableError::Header(HeaderError::Unsupported { .. })),
         "{err}"
@@ -585,7 +667,50 @@ fn crash_stream_refuses_wrong_header_and_damage() {
         .err()
         .expect("damaged trailer refused");
     assert!(matches!(err, TableError::Corrupt(_)), "{err}");
-    assert_eq!(CRASHES_SCHEMA_VERSION.major, 1);
+    assert_eq!(CRASHES_SCHEMA_VERSION.major, 2);
+}
+
+/// A 1.0 crash stream written before the fragment aggregates (the golden `crashes_v1.zst`, step 3a)
+/// still reads through the upgrader, finished or not, and its frames have no fragments.
+#[test]
+fn a_1_0_crash_stream_reads_through_the_upgrader() {
+    let bytes = std::fs::read(golden_dir().join("crashes_v1.zst")).unwrap();
+    let want = dumps_v1();
+    let mut r = CrashReader::open(std::io::Cursor::new(bytes.clone())).unwrap();
+    assert!(r.finished());
+    assert_eq!(r.header(), &fixed_header(CRASHES_FORMAT));
+    for (e, want) in r.index().to_vec().iter().zip(&want) {
+        same(&r.read(e).unwrap(), want);
+    }
+    // Without its index (a killed writer): the scan decodes with the 1.x layout too.
+    let at = u64::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 8].try_into().unwrap());
+    let r = CrashReader::open(std::io::Cursor::new(bytes[..at as usize].to_vec())).unwrap();
+    assert!(!r.finished());
+    assert_eq!(r.index().len(), want.len());
+    // A 2.0 payload is not read as 1.0.
+    let v2 = sim_schema::io::crashes::encode_dump(&dumps()[0]).unwrap();
+    assert!(sim_schema::io::crashes::decode_dump_major(&v2, 1).is_err());
+}
+
+#[test]
+fn fragment_channels_follow_their_names() {
+    let c = cloud(2);
+    let ch = c.channels();
+    let at = |name: &str| {
+        ch[FragmentCloudSnapshot::CHANNELS
+            .iter()
+            .position(|n| *n == name)
+            .unwrap()]
+    };
+    assert_eq!(at("ch_frag_alive"), 98.0);
+    assert_eq!(at("ch_frag_centroid_z"), 28.0);
+    assert_eq!(at("ch_frag_cov_xz"), -0.2);
+    assert_eq!(at("ch_frag_kinetic_energy"), 7.5e3);
+    assert!(
+        FragmentCloudSnapshot::CHANNELS
+            .iter()
+            .all(|n| n.starts_with("ch_frag_"))
+    );
 }
 
 /// The golden files: written once by this test with `SABER_UPDATE_GOLDENS=1`, then read on every
@@ -641,6 +766,7 @@ fn golden_files_read_back() {
             &[],
         );
         std::fs::write(dir.join("crashes.zst"), crash_stream(&dumps(), true)).unwrap();
+        // `crashes_v1.zst` stays as step 3a wrote it: the upgrader's fixture.
     }
 
     fn check<R: TableRow + std::fmt::Debug>(file: &str, want: &[R], dynamic: &[String]) {

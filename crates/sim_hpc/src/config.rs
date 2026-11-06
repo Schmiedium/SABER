@@ -162,6 +162,10 @@ pub struct Output {
     /// Rank 0 writes `campaign_status.json` to `shared_out` this often, s (IB-15).
     #[serde(default = "default_heartbeat")]
     pub heartbeat_s: f64,
+    /// Write `*_impacts.parquet` (IB-16): one row per fragment impact. Defaults to on when the
+    /// scenario has a `Fragmentable` body; `false` saves the space in exploratory sweeps.
+    #[serde(default)]
+    pub fragment_impacts: Option<bool>,
 }
 
 fn default_scratch() -> String {

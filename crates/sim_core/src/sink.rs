@@ -8,6 +8,7 @@
 use sim_schema::{CrashReason, IntegratorKind, SimStatus, TickFrame};
 
 use crate::app::RunSeed;
+use crate::fragments::{FragmentImpact, FragmentTotals};
 use crate::integrator::IntegratorStats;
 use crate::telemetry::{LoggedEvent, RunningStats, SnapshotSample};
 
@@ -42,6 +43,10 @@ pub struct RunOutput {
     pub snapshots: Vec<SnapshotSample>,
     /// Flight-recorder frames, oldest first, when the caller asked for them (crash capture).
     pub frames: Vec<TickFrame>,
+    /// Fragment counts, in a run with a `Fragmentable` body (IB-16).
+    pub fragments: Option<FragmentTotals>,
+    /// Fragment impacts in the order found (tick, then slot): the run's `impacts.parquet` rows.
+    pub impacts: Vec<FragmentImpact>,
 }
 
 /// Why a sink could not take a run.

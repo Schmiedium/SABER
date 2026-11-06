@@ -26,7 +26,9 @@ def test_summaries_carry_identity_status_and_dynamic_families():
     names = [c["name"] for c in spec["columns"]]
     assert names[:3] == ["run_id", "param_set_id", "replicate_seed"]
     assert "status" in names and "crash_reason" in names
-    assert [d["prefix"] for d in spec["dynamic"]] == ["param_", "metric_", "req_"]
+    assert [d["prefix"] for d in spec["dynamic"]] == ["param_", "metric_", "req_", "fragments_"]
+    assert spec["schema_version"] == "1.1.0"
+    assert spec["dynamic"][3]["type"] == "uint64"
     nullable = {c["name"] for c in spec["columns"] if c["nullable"]}
     assert nullable == {"stop_reason", "err_est_max", "err_est_mean", "crash_tick", "crash_reason"}
 
@@ -64,8 +66,16 @@ def test_headers_are_checked_like_rust():
 
 def test_dynamic_columns_need_a_known_family_in_order():
     got = schema.split_dynamic("summaries", ["param_v0", "param_elev", "metric_apogee", "req_R-1"])
-    assert got == {"param_": ["param_v0", "param_elev"], "metric_": ["metric_apogee"], "req_": ["req_R-1"]}
-    for bad in (["metric_a", "param_b"], ["speed"], ["param_"]):
+    assert got == {
+        "param_": ["param_v0", "param_elev"],
+        "metric_": ["metric_apogee"],
+        "req_": ["req_R-1"],
+        "fragments_": [],
+    }
+    # A fragmenting campaign's counts come last (IB-16).
+    got = schema.split_dynamic("summaries", ["param_v0", "req_R-1", "fragments_written", "fragments_dropped"])
+    assert got["fragments_"] == ["fragments_written", "fragments_dropped"]
+    for bad in (["metric_a", "param_b"], ["speed"], ["param_"], ["fragments_dropped", "req_R-1"]):
         with pytest.raises(SchemaError):
             schema.split_dynamic("summaries", bad)
     with pytest.raises(SchemaError):

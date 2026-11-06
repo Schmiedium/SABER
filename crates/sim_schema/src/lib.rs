@@ -246,6 +246,99 @@ pub struct BodySnapshot {
     pub flags: u8,
 }
 
+/// One fragmenting body's fragments, summed up (IB-16): what the flight recorder and the Tier 3
+/// snapshots keep instead of individual fragments.
+///
+/// Sums (`mass`, `kinetic_energy`) are over the fragments still flying and are 0 when none is.
+/// The means (`centroid`, `velocity`) and `covariance` are mass-weighted over the flying fragments;
+/// before the breakup they are the parent's own position, velocity and zero, and once no fragment
+/// is flying they keep their last values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FragmentCloudSnapshot {
+    /// The parent's `SimId`.
+    pub parent_sim_id: u32,
+    /// Fragments written at the breakup (0 before it).
+    pub fragments: u32,
+    /// Fragments the pool had no room for.
+    pub dropped: u32,
+    /// Fragments flying.
+    pub alive: u32,
+    /// Fragments that hit something.
+    pub impacted: u32,
+    /// Fragments whose lifetime ran out.
+    pub expired: u32,
+    /// Mass of the flying fragments, kg.
+    pub mass: f64,
+    /// Mass-weighted mean position, world frame, m.
+    pub centroid: [f64; 3],
+    /// Mass-weighted mean velocity, world frame, m/s.
+    pub velocity: [f64; 3],
+    /// Mass-weighted position covariance `[xx, yy, zz, xy, xz, yz]`, m².
+    pub covariance: [f64; 6],
+    /// Largest distance of a fragment from the breakup point so far (flying fragments at tick
+    /// ends and impact points), m.
+    pub max_range: f64,
+    /// Kinetic energy of the flying fragments, world frame, J.
+    pub kinetic_energy: f64,
+}
+
+impl FragmentCloudSnapshot {
+    /// The Tier 3 snapshot columns (`ch_frag_*`, IB-07) in the order of
+    /// [`FragmentCloudSnapshot::channels`]. A fragmenting campaign's snapshots carry them on the
+    /// parent's rows and `NaN` on every other body's.
+    pub const CHANNELS: [&'static str; 20] = [
+        "ch_frag_fragments",
+        "ch_frag_dropped",
+        "ch_frag_alive",
+        "ch_frag_impacted",
+        "ch_frag_expired",
+        "ch_frag_mass",
+        "ch_frag_centroid_x",
+        "ch_frag_centroid_y",
+        "ch_frag_centroid_z",
+        "ch_frag_vel_x",
+        "ch_frag_vel_y",
+        "ch_frag_vel_z",
+        "ch_frag_cov_xx",
+        "ch_frag_cov_yy",
+        "ch_frag_cov_zz",
+        "ch_frag_cov_xy",
+        "ch_frag_cov_xz",
+        "ch_frag_cov_yz",
+        "ch_frag_max_range",
+        "ch_frag_kinetic_energy",
+    ];
+
+    /// The values of [`FragmentCloudSnapshot::CHANNELS`].
+    pub fn channels(&self) -> [f64; 20] {
+        let [cx, cy, cz] = self.centroid;
+        let [vx, vy, vz] = self.velocity;
+        let [xx, yy, zz, xy, xz, yz] = self.covariance;
+        [
+            f64::from(self.fragments),
+            f64::from(self.dropped),
+            f64::from(self.alive),
+            f64::from(self.impacted),
+            f64::from(self.expired),
+            self.mass,
+            cx,
+            cy,
+            cz,
+            vx,
+            vy,
+            vz,
+            xx,
+            yy,
+            zz,
+            xy,
+            xz,
+            yz,
+            self.max_range,
+            self.kinetic_energy,
+        ]
+    }
+}
+
 /// One recorded tick: the state after the tick, as the flight recorder keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TickFrame {
@@ -257,6 +350,9 @@ pub struct TickFrame {
     pub total_energy: f64,
     /// Authored bodies in `SimId` order.
     pub bodies: Vec<BodySnapshot>,
+    /// The fragmenting bodies' fragment aggregates, parents in `SimId` order (IB-16; empty in a
+    /// run without a `Fragmentable` body). Crash streams carry them from schema 2.0.
+    pub fragments: Vec<FragmentCloudSnapshot>,
 }
 
 #[cfg(test)]

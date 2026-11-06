@@ -378,6 +378,10 @@ impl TableRow for SummaryRow {
         for i in 0..fam[2].len() {
             cols.push(enums(rows, |r| r.verdicts[i]));
         }
+        check_len(rows, &fam[3], |r| r.fragments.len())?;
+        for i in 0..fam[3].len() {
+            cols.push(prim::<UInt64Type, _>(rows, |r| r.fragments[i]));
+        }
         finish(Self::TABLE, dynamic, cols)
     }
 
@@ -417,6 +421,10 @@ impl TableRow for SummaryRow {
             .iter()
             .map(|n| c.enums(n))
             .collect::<Result<Vec<Vec<_>>, _>>()?;
+        let fragment_cols = fam[3]
+            .iter()
+            .map(|n| c.req::<UInt64Type>(n))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut stop_reason = stop_reason.into_iter();
         let mut campaign_id = campaign_id.into_iter();
         let mut params = params.into_iter();
@@ -453,6 +461,7 @@ impl TableRow for SummaryRow {
                 params: params.next().unwrap_or_default(),
                 metrics: metrics.next().unwrap_or_default(),
                 verdicts: verdict_cols.iter().map(|v| v[i]).collect(),
+                fragments: fragment_cols.iter().map(|v| v[i]).collect(),
             })
             .collect())
     }

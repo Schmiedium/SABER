@@ -256,11 +256,16 @@ pub fn plan(campaign: &Campaign, override_crash_policy: bool) -> Result<Prior, R
         restore_counts(&mut prior.tally, &footer, &run_ids).map_err(bad)?;
         prior.committed.extend(&run_ids);
         let stem = format!("node_{rank}_a{attempt}_p{part}_");
-        let mut files: Vec<String> = ["events.parquet", "snapshots.parquet", "crashes.zst"]
-            .iter()
-            .map(|t| format!("{stem}{t}"))
-            .filter(|f| names.binary_search(f).is_ok())
-            .collect();
+        let mut files: Vec<String> = [
+            "events.parquet",
+            "snapshots.parquet",
+            "crashes.zst",
+            "impacts.parquet",
+        ]
+        .iter()
+        .map(|t| format!("{stem}{t}"))
+        .filter(|f| names.binary_search(f).is_ok())
+        .collect();
         files.push(name.clone());
         prior.parts.push(PriorPart {
             attempt,

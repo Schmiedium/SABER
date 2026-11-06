@@ -55,7 +55,8 @@ def test_toml_round_trips_every_key():
         requirements="requirements/DRN-HOVER-001.req.ron",
         manifest="sweep_manifest.parquet",
         expected_build_id="a1b2c3d",
-        output=Output(shared_out="campaigns/drn-hover-a/out", scratch_dir="${TMPDIR}/saber", heartbeat_s=2.5),
+        output=Output(shared_out="campaigns/drn-hover-a/out", scratch_dir="${TMPDIR}/saber", heartbeat_s=2.5,
+                      fragment_impacts=False),
         execution=Execution(chunk_size=64, flight_recorder_ticks=256, threads=8,
                             snapshot_policy=SnapshotPolicy(base_every=10, adaptive=True, max_per_run=50)),
         crash_policy=CrashPolicy(dump_quota_per_param_set=1, abort_crash_fraction=1.0, canary_chunks=0),
@@ -68,6 +69,9 @@ def test_toml_round_trips_every_key():
     assert data["execution"]["snapshot_policy"] == {"base_every": 10, "adaptive": True, "max_per_run": 50}
     assert data["checkpoint"]["drain_margin_s"] == 1e-5
     assert data["output"]["heartbeat_s"] == 2.5
+    assert data["output"]["fragment_impacts"] is False
+    # Unset, the key is left out and sim_hpc decides from the scenario.
+    assert "fragment_impacts" not in tomllib.loads(defaults().to_toml())["output"]
     # An integer heartbeat reads back as a float, as sim_hpc reads it.
     assert CampaignConfig.from_toml(text.replace("heartbeat_s = 2.5", "heartbeat_s = 30")).output.heartbeat_s == 30.0
 
