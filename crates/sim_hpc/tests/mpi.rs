@@ -1,7 +1,6 @@
-//! Steps 4a and 4b under real MPI (feature `mpi`; CI's MPI job): `sim_hpc` launched with `mpiexec`
-//! on 1, 2 and 4 ranks of one machine gives the same summary rows as `--local` (verification R5), a
-//! crash storm exits 6 on every rank, rank 0's refusal ends the job with its exit code, and a job
-//! that lost parts is finished by `--resume` on another rank count (R6).
+//! Step 4a under real MPI (feature `mpi`; CI's MPI job): `sim_hpc` launched with `mpiexec` on 1, 2
+//! and 4 ranks of one machine gives the same summary rows as `--local` (verification R5), a crash
+//! storm exits 6 on every rank, and rank 0's refusal ends the job with its exit code.
 //!
 //! `MPIEXEC` names the launcher (default `mpiexec`) and `MPIEXEC_FLAGS` its extra flags (default
 //! `--oversubscribe`, OpenMPI's way to run more ranks than cores).
@@ -132,52 +131,4 @@ fn rank_0s_refusal_ends_the_job_with_its_exit_code() {
     let v = report(&o);
     assert_eq!(o.status.code(), Some(2), "{v}");
     assert_eq!(v["kind"], "SceneMismatch");
-}
-
-#[test]
-fn mpiexec_resumes_on_another_rank_count() {
-    let vz = [20.0, 45.0, 70.0, 95.0];
-    let reference = {
-        let s = Setup::new("mpi-resume-ref", SCENE, &vz, 5, "");
-        assert_eq!(run_local(&s.campaign(), &opts(1)).exit, ExitCode::Ok);
-        summaries(&s.out())
-    };
-    let s = Setup::new(
-        "mpi-resume",
-        SCENE,
-        &vz,
-        5,
-        "[checkpoint]\ncheckpoint_interval_s = 0\n",
-    );
-    let toml = s.campaign_toml.to_str().unwrap();
-    let o = mpiexec(2, &["--campaign", toml, "--threads", "2", "--json"]);
-    assert_eq!(o.status.code(), Some(0), "{}", report(&o));
-    // Four parts never committed, and the index is gone: the job died.
-    let parts = files(&s.out(), "_summaries.parquet");
-    for p in &parts[..4] {
-        std::fs::remove_file(p).unwrap();
-    }
-    std::fs::remove_file(s.out().join("_MANIFEST.json")).unwrap();
-    let left = summaries(&s.out()).len() as u64;
-
-    let o = mpiexec(
-        3,
-        &["--campaign", toml, "--threads", "2", "--json", "--resume"],
-    );
-    let v = report(&o);
-    assert_eq!(o.status.code(), Some(0), "{v}");
-    assert_eq!(
-        (
-            v["attempt"].as_u64(),
-            v["ranks"].as_u64(),
-            v["runs"].as_u64()
-        ),
-        (Some(1), Some(3), Some(20 - left))
-    );
-    let rows = summaries(&s.out());
-    let ids: Vec<u64> = rows.iter().map(|r| r.run_id).collect();
-    assert_eq!(ids, (0..20).collect::<Vec<u64>>());
-    for (a, b) in rows.iter().zip(&reference) {
-        assert_eq!(deterministic(a), deterministic(b), "run {}", a.run_id);
-    }
 }

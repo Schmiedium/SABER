@@ -18,14 +18,13 @@ pub mod manifest;
 pub mod mpi;
 pub mod protocol;
 pub mod rank;
-pub mod resume;
 pub mod transport;
 pub mod worker;
 
 pub use campaign::{Campaign, Library, PreflightError, standard_library};
 pub use config::CampaignConfig;
 pub use dispatch::Dispatch;
-pub use rank::{RunOptions, RunReport, Stop, run_local, run_rank, start};
+pub use rank::{RunOptions, RunReport, run_local, run_rank, start};
 
 /// Process exit codes (IB-04). Python maps them to campaign status.
 #[repr(u8)]

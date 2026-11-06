@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use common::*;
 use sim_hpc::protocol::Refusal;
-use sim_hpc::resume::Mode;
 use sim_hpc::transport::{Envelope, Tag, Threads, Transport};
 use sim_hpc::{
     ExitCode, Library, RunOptions, RunReport, run_local, run_rank, standard_library, start,
@@ -28,26 +27,14 @@ fn run_ranks<T: Transport + Sync>(
     threads: usize,
     library: Library,
 ) -> Vec<Result<RunReport, Refusal>> {
-    run_ranks_as(ranks, s, threads, library, Mode::Fresh)
-}
-
-/// [`run_ranks`] with a resume mode.
-fn run_ranks_as<T: Transport + Sync>(
-    ranks: &[T],
-    s: &Setup,
-    threads: usize,
-    library: Library,
-    mode: Mode,
-) -> Vec<Result<RunReport, Refusal>> {
     std::thread::scope(|sc| {
         let handles: Vec<_> = ranks
             .iter()
             .map(|t| {
                 sc.spawn(move || {
-                    let (c, prior) = start(t, &s.campaign_toml, library, mode, Some(threads))?;
+                    let (c, attempt) = start(t, &s.campaign_toml, library, 0, Some(threads))?;
                     let o = RunOptions {
-                        attempt: prior.attempt,
-                        prior: Some(prior),
+                        attempt,
                         heartbeat: Some(Duration::from_millis(20)),
                         ..opts(threads)
                     };

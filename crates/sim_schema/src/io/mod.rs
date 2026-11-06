@@ -680,31 +680,13 @@ pub struct TableFile {
     pub metadata: Vec<(String, String)>,
 }
 
-/// A table's footer without its rows: what resume reads from every committed summaries file.
-#[derive(Clone, Debug)]
-pub struct TableFooter {
-    /// Its header.
-    pub header: FileHeader,
-    /// The dynamic column names, in file order.
-    pub dynamic: Vec<String>,
-    /// Rows in the file.
-    pub rows: u64,
-    /// Every footer entry other than the header (and Arrow's own schema).
-    pub metadata: Vec<(String, String)>,
+/// Read a SABER Parquet file held in memory (a manifest broadcast to every rank, IB-05).
+pub fn read_parquet_bytes(bytes: Vec<u8>, table: Table) -> Result<TableFile, TableError> {
+    read_parquet(bytes::Bytes::from(bytes), table)
 }
 
-impl TableFooter {
-    /// The value of a footer entry.
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.metadata
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-/// Read only the footer of a SABER Parquet file, checking the header and the columns.
-pub fn read_parquet_footer<R: ChunkReader + 'static>(
+/// Read a SABER Parquet file of a table, checking the header and the columns first.
+pub fn read_parquet<R: ChunkReader + 'static>(
     input: R,
     table: Table,
 ) -> Result<TableFooter, TableError> {
