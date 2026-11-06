@@ -35,6 +35,9 @@ rand_chacha = "=0.10.0"
 bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std", "bevy_reflect"] }
 bevy_reflect = { version = "=0.20.1", default-features = false, features = ["std", "glam"] }
 glam = { version = "0.33.12", features = ["serde"] }
+# Collision detection (D13). Only `sim_core::geometry` imports it (IB-19); pinned exactly because a new
+# version can move contact points, and it is part of `build_id`.
+parry3d-f64 = { version = "=0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }
 # Pure-Rust erf/erfc for the inverse-CDF samplers (Tick 0 uncertainties); pinned like the RNG.
 libm = "=0.2.16"
 # On-disk tables (sim_schema `io` feature, step 3a). Arrow and Parquet follow sim_query's DataFusion

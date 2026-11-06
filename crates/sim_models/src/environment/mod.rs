@@ -581,11 +581,9 @@ fn ground_impact_system(world: &mut World) {
             let h = altitude(frame, position);
             if h <= ground {
                 hit = true;
-                world.resource_mut::<SimEvents>().emit(SimEvent {
-                    name: GROUND_IMPACT,
-                    sim_id,
-                    value: h,
-                });
+                world
+                    .resource_mut::<SimEvents>()
+                    .emit(SimEvent::new(GROUND_IMPACT, sim_id, h));
             }
         }
         if hit {
