@@ -10,6 +10,10 @@ semi-implicit Euler uses state classes, and the interface as built (§10.7). Den
 contact step.
 v1.2 (2026-11-02, build step 1b): §4.3 records the kernel's rigid-body dynamics and force-model interface
 as built; §10.2 names the body behind a `SubstepLimit`; §10.3 gives the packed state layout.
+v1.3 (2026-11-03, build step 5d): §9.7a and §9.7b record geometry, compliant and impulsive contact as
+built; §10.4 records that impact location re-integrates the bodies instead of using dense output.
+v1.4 (2026-11-03, build step 5d-3): §9.7c records the kernel ray query, range sensors and the
+persistent-penetration watchdog as built.
 Companion to `subsystems-and-interfaces.md` (§5.1 `sim_core`, §5.2 `sim_models`, §6 tick pipeline,
 IB-16 fragmentation, G8) and `flight-dynamics-sources.md`.
 
@@ -742,12 +746,13 @@ flowchart LR
 - **Compliant contact.** Contact forces are part of the right-hand side, so they are evaluated at every
   stage of whatever method is selected. In adaptive mode the step shrinks during touchdown and grows again
   in free flight, which is exactly where the accuracy is needed.
-- **Impulsive contact.** Event location (§9.4) uses the method's **dense output** where it has one
-  (`DormandPrince54`, `DormandPrince853`, `BogackiShampine32`) to evaluate positions inside the step for
-  the time-of-impact search, then restarts the step at `t*`. For methods without dense output the kernel
-  uses cubic Hermite interpolation from the step's end points and derivatives. After an impulse the FSAL
-  stage is discarded (the derivative jumped). Dense output is built with contact in build step 5d; the
-  integrators of step 1a do not have it yet.
+- **Impulsive contact.** ~~Event location (§9.4) uses the method's dense output where it has one, or
+  cubic Hermite interpolation, to evaluate positions inside the step.~~ As built (step 5d-2, §9.7b): the
+  time-of-impact search re-integrates every body with the selected method from the start of the
+  interval to each probed time, and integration restarts at `t*` after the impulses, so every method keeps
+  its order on both sides of an impact and no dense output is needed. The adaptive controller's memory is
+  restored before each re-integration. The FSAL stage is discarded at the start of every integration
+  (it already was at every tick start).
 
 ### 10.5 Determinism and allocation
 

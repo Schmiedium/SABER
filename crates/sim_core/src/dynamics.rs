@@ -29,13 +29,14 @@ use std::ops::Range;
 
 use bevy_ecs::prelude::*;
 use glam::{DQuat, DVec3};
-use sim_schema::CrashReason;
+use sim_schema::{CrashKind, CrashReason};
 
 use crate::app::SetupError;
 use crate::body::{BodyState, BodyTable, Dof, PointMass3, RigidBody6, SimId};
 use crate::clock::SimClock;
 use crate::contact::{ContactConfig, ContactSolver};
 use crate::environment::{EnvSample, Environment, SimEnvironment};
+use crate::events::SimEvents;
 use crate::force::{ForceModel, Stage, Wrench};
 use crate::integrator::{
     Integrator, IntegratorConfig, IntegratorStats, OdeSystem, StateClass, StateLayout,
@@ -92,6 +93,26 @@ impl Dynamics {
     /// without gravity.
     pub fn tick_wrench(&self, i: usize) -> Wrench {
         self.tick_wrenches[i]
+    }
+
+    /// The first collider hit by a ray from `origin` along `direction` (normalised here) within
+    /// `max` metres, skipping `exclude`'s collider, with the bodies at their poses in `world` now:
+    /// the query behind range sensors. `None` before Tick 0, for a zero or non-finite direction, or
+    /// when nothing is hit.
+    pub fn ray_cast(
+        &self,
+        world: &World,
+        origin: DVec3,
+        direction: DVec3,
+        max: f64,
+        exclude: Option<SimId>,
+    ) -> Option<RayHit> {
+        let dir = direction.try_normalize()?;
+        if !(origin.is_finite() && max.is_finite() && max >= 0.0) {
+            return None;
+        }
+        self.contact
+            .ray_cast(world, &self.bodies, origin, dir, max, exclude)
     }
 
     /// Integrator telemetry for this run (the summary columns of physics §10.6).
@@ -228,6 +249,49 @@ fn vec3(y: &[f64]) -> DVec3 {
     DVec3::new(y[0], y[1], y[2])
 }
 
+/// A body's state from its slice of the packed state (attitude normalised, as the stages see it).
+fn body_state(dof: Dof, y: &[f64]) -> BodyState {
+    match dof {
+        Dof::Six => {
+            let raw = DQuat::from_xyzw(y[7], y[8], y[9], y[6]);
+            let len = raw.length();
+            BodyState {
+                position: vec3(&y[0..3]),
+                velocity: vec3(&y[3..6]),
+                attitude: if len > 0.0 && len.is_finite() {
+                    raw * (1.0 / len)
+                } else {
+                    raw
+                },
+                body_rates: vec3(&y[10..13]),
+            }
+        }
+        Dof::Three => BodyState {
+            position: vec3(&y[0..3]),
+            velocity: vec3(&y[3..6]),
+            ..BodyState::ZERO
+        },
+    }
+}
+
+/// Every body's state from the packed state.
+fn states_from_y(bodies: &BodyTable, y: &[f64], out: &mut [BodyState]) {
+    for (o, e) in out.iter_mut().zip(bodies.entries()) {
+        *o = body_state(e.dof, &y[e.offset..e.offset + e.dof.state_len()]);
+    }
+}
+
+/// Write the bodies' velocities and rates (after impulses) back into the packed state.
+fn write_velocities(bodies: &BodyTable, states: &[BodyState], y: &mut [f64]) {
+    for (s, e) in states.iter().zip(bodies.entries()) {
+        let y = &mut y[e.offset..e.offset + e.dof.state_len()];
+        y[3..6].copy_from_slice(&s.velocity.to_array());
+        if e.dof == Dof::Six {
+            y[10..13].copy_from_slice(&s.body_rates.to_array());
+        }
+    }
+}
+
 /// The World's bodies as an [`OdeSystem`] for one tick.
 struct BodyOde<'a> {
     bodies: &'a BodyTable,
@@ -251,28 +315,7 @@ impl OdeSystem for BodyOde<'_> {
 
     fn rhs(&mut self, t: f64, y: &[f64], dydt: &mut [f64]) {
         for (i, e) in self.bodies.entries().iter().enumerate() {
-            let y = &y[e.offset..e.offset + e.dof.state_len()];
-            let state = match e.dof {
-                Dof::Six => {
-                    let raw = DQuat::from_xyzw(y[7], y[8], y[9], y[6]);
-                    let len = raw.length();
-                    BodyState {
-                        position: vec3(&y[0..3]),
-                        velocity: vec3(&y[3..6]),
-                        attitude: if len > 0.0 && len.is_finite() {
-                            raw * (1.0 / len)
-                        } else {
-                            raw
-                        },
-                        body_rates: vec3(&y[10..13]),
-                    }
-                }
-                Dof::Three => BodyState {
-                    position: vec3(&y[0..3]),
-                    velocity: vec3(&y[3..6]),
-                    ..BodyState::ZERO
-                },
-            };
+            let state = body_state(e.dof, &y[e.offset..e.offset + e.dof.state_len()]);
             self.states[i] = state;
             self.env[i] = self.environment.sample(state.position, t);
             self.wrenches[i] = Wrench::ZERO;

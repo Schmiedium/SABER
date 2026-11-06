@@ -77,17 +77,21 @@ pub enum CrashKind {
     SubstepLimit = 4,
     /// The contact pair buffer overflowed (`CrashedSolver`, D13, IB-19).
     ContactCapacity = 5,
+    /// Two colliders overlapped deeper than `contact.max_penetration` for longer than
+    /// `contact.penetration_ticks` (`CrashedSolver`, IB-19).
+    Penetration = 6,
 }
 
 impl CrashKind {
     /// Every kind, in discriminant order.
-    pub const ALL: [CrashKind; 6] = [
+    pub const ALL: [CrashKind; 7] = [
         CrashKind::NonFinite,
         CrashKind::EnergyBound,
         CrashKind::Panic,
         CrashKind::StepSizeUnderflow,
         CrashKind::SubstepLimit,
         CrashKind::ContactCapacity,
+        CrashKind::Penetration,
     ];
 
     /// The run status a crash of this kind ends with.
@@ -96,9 +100,10 @@ impl CrashKind {
             CrashKind::NonFinite => SimStatus::CrashedNaN,
             CrashKind::EnergyBound => SimStatus::CrashedEnergy,
             CrashKind::Panic => SimStatus::Panicked,
-            CrashKind::StepSizeUnderflow | CrashKind::SubstepLimit | CrashKind::ContactCapacity => {
-                SimStatus::CrashedSolver
-            }
+            CrashKind::StepSizeUnderflow
+            | CrashKind::SubstepLimit
+            | CrashKind::ContactCapacity
+            | CrashKind::Penetration => SimStatus::CrashedSolver,
         }
     }
 }

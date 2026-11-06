@@ -5,7 +5,8 @@
     "Panic",
     "StepSizeUnderflow",
     "SubstepLimit",
-    "ContactCapacity"
+    "ContactCapacity",
+    "Penetration"
   ],
   "IntegratorKind": [
     "SemiImplicitEuler",

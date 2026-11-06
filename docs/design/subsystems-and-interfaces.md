@@ -539,7 +539,160 @@ The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lew
   another's draws. Every sensor field may be left out of a scenario file (a sample every tick, no latency,
   no noise).
 
-`Controller` boundary (in-process, deterministic):
+**As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
+`SetupError` names the body that breaks a rule:
+
+- `ProjectileAero { diameter, cd0, cd2, cla, cla2, cma, cma2, cmq, clp, cnpa, cmpa, cl0 }` on a `RigidBody6`
+  whose body `x` axis is the axis of symmetry, nose forward. Each coefficient is a `Coef`: `Constant(f64)` or
+  `Mach(AeroTable)` with one axis named `mach`, looked up at the Mach number of the air-relative velocity.
+  Every coefficient defaults to zero, so a scenario names only those it uses.
+- `PointMassAero { diameter, cd0 }` on a `PointMass3`: drag only (the 3DOF option of D2).
+
+With `v_b = q⁻¹(V − wind)`, `v = |v_b|`, `x̂` the body axis, `q_s = ½ρ·πd²/4`, `sin²δ = (v_y² + v_z²)/v²` and
+`(p, q, r)` the body rates relative to the world frame, the force and moment in body axes are:
+
+| Term | Body-axis form | Sign convention |
+|---|---|---|
+| Drag | `−q_s (C_D0 + C_D2 sin²δ) v v_b` | |
+| Lift | `q_s (C_Lα + C_Lα2 sin²δ) [v_b × (x̂ × v_b)]` | toward the nose for `C_Lα > 0` |
+| Magnus force | `q_s d p C_Npα (x̂ × v_b)` | |
+| Overturning moment | `q_s d v (C_Mα + C_Mα2 sin²δ) (v_b × x̂)` | `C_Mα > 0` is statically unstable, as in McCoy |
+| Pitch damping | `q_s d² v C_Mq (0, q, r)` | `C_Mq` stands for `C_Mq + C_Mα̇` |
+| Spin damping | `q_s d² v C_lp p x̂` | |
+| Magnus moment | `q_s d² p C_Mpα [x̂ × (v_b × x̂)]` | |
+| Roll drive (fin cant) | `q_s d v² C_l0 x̂` | |
+
+Linearised for small yaw, and dropping the Magnus force and products of small terms as McCoy does, these give
+his yaw equation `ξ'' + (H − iP)ξ' − (M + iPT)ξ = 0` per calibre with his `H`, `P`, `M` and `T` (verification
+§6.2). A body carries one of the two components; either on a body of the other kind
+or on an entity without a body, a non-finite coefficient, a non-positive diameter or a table that is invalid
+or not over `mach` is a `SetupError`. The force model copies each body's coefficients at Tick 0, after the
+Resolver, so a coefficient can be swept (`ProjectileAero.cla.0` targets a `Constant`). It skips a body with no
+air or no airspeed. The plugin inserts `AeroState { mach, dynamic_pressure, total_yaw, spin_rate,
+gyro_stability }` on each such body at Tick 0 and updates it in `SimSet::Telemetry` from a list built at Tick 0,
+so metrics can read it (`entity(1).AeroState.mach`). `gyro_stability` is McCoy's
+`S_g = I_x² p² / (2ρ I_y S d v² C_Mα)`. `AeroState` is run output: the plugin overwrites it at every Tick 0, so a
+scenario file need not carry it.
+
+`EnvironmentPlugin` also reads an optional `EarthRotation` (`None`, `Ecef`, or `Local { latitude_deg }` for an
+ENU or NED frame whose origin is at that geodetic latitude). The frame then turns at the WGS 84 rate
+`ω_E = 7.292115e-5 rad/s`: about `+z` in ECEF, `(0, cos φ, sin φ)` in ENU, `(cos φ, 0, −sin φ)` in NED. The
+kernel adds the Coriolis and centrifugal terms (§10.3). Without the component no frame rotates, ECEF
+included, so scenarios written before step 5a run unchanged. `Ecef` with J2 gravity gives WGS 84 normal
+gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
+origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
+origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
+
+**As built (step 5b).** `FixedWingPlugin` (`ModelId` namespace `fixedwing/`) acts on a `RigidBody6` whose body
+axes are forward, right, down. Its components, each checked at Tick 0 with a `SetupError` naming the body:
+
+- `FixedWingAero { area, span, chord, moment_reference, cx, cy, cz, lift, drag, roll, pitch, yaw }`. Each of the
+  eight coefficients is a list of `AeroTerm { value, factors }`, summed. A value is `Constant(f64)` or
+  `Table(AeroTable)` whose axes are named after inputs; a factor is `Input(i)`, `Sign(i)` (−1 below zero, else
+  +1, for data tabulated over `|β|`) or `Poly(i, [c₀, c₁, …])`. The 21 inputs (`AeroInput`) are α and β in
+  radians or degrees, `|β|`, Mach, altitude, airspeed, each control surface in radians or degrees, the
+  normalised rates `p̂ = pb/2V`, `q̂ = qc̄/2V`, `r̂ = rb/2V`, and throttle. So a table buildup (Stevens and
+  Lewis's F-16), stability derivatives (`C_mq · q̂`) or a mix are all data, not code.
+- `ControlSurfaces { elevator, aileron, rudder, flap, throttle }`, radians and 0–1, read once per tick (IB-08),
+  so a controller, an actuator model (5c), a scenario or a sweep can set them. The sign convention (positive
+  elevator trailing edge down, positive aileron rolls left, positive rudder yaws left) is the data's.
+- `Propulsion { engine, thrust_point }`: `Thrust(Vec<AeroTerm>)` in newtons, or `Turbofan { idle, military,
+  maximum, angular_momentum }`, Stevens and Lewis's F-16 engine: throttle gearing to a commanded power, a power
+  lag whose rate depends on the change asked for, thrust interpolated between the tables by power, and the
+  rotor's gyroscopic moment `−ω × h_e`.
+- `EngineState { power }`: the turbofan's lag, an integrated state the force model owns (IB-08), inserted at
+  Tick 0 at the commanded power unless the scenario gives one.
+- `AirData { airspeed, alpha, beta, mach, dynamic_pressure, load_factor, thrust }`: telemetry at the end of
+  every tick (`entity(1).AirData.alpha`).
+- `TrimCondition { airspeed, flight_path_angle, heading }`: the plugin trims the aircraft for steady straight
+  wings-level flight at Tick 0, in `after_setup`: Levenberg–Marquardt over throttle, elevator, aileron, rudder,
+  α and β on the World's full right-hand side (`sim_core::dynamics::derivatives`), to residuals below 1e-9.
+  The position stays as authored, so altitude and airspeed can be swept. A trim that fails, needs a throttle
+  outside 0–1, or runs in ECEF or a rotating frame is a `SetupError`.
+
+Force `F = q̄S[(C_X, C_Y, C_Z) + C_L (sin α, 0, −cos α) − C_D (cos α, 0, sin α)]` (lift and drag in stability
+axes) and moment `q̄S(b C_l, c̄ C_m, b C_n) + r_ref × F` about the centre of mass, where `r_ref` is the point the
+moment data refer to; then thrust along body `x` at `thrust_point`. `FixedWingAero` and `ProjectileAero` on one
+body is a `SetupError` (D9). Coefficients are copied at Tick 0 after the Resolver, so any term can be swept.
+The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lewis/f16/`) as a scenario file.
+
+**As built (step 5c, part 1).** Turbulence, servos and sensors.
+
+- `Wind::Dryden { mean, airspeed, heading, intensity, scale }` (local ENU or NED frames only): the MIL-F-8785C
+  spectra `Φ_u = σ_u² (2L_u/π) / (1 + (L_uΩ)²)` and `Φ_v = σ_v² (L_v/π)(1 + 3(L_vΩ)²) / (1 + (L_vΩ)²)²` (`w`
+  likewise), which are MIL-HDBK-1797's with its lateral and vertical lengths doubled. The field is frozen and
+  traversed at `airspeed`, the same everywhere at a given time, along world-fixed axes: `u` horizontal along
+  `heading`, `v` to its right, `w` down. Each component is the exact discretisation of its shaping filter
+  under continuous white noise, so its samples on the tick grid have exactly the Dryden autocorrelation for
+  any tick length; the state starts from the stationary distribution. The plugin draws five normals a tick
+  from the `environment/dryden` stream in `SimSet::Environment`, and the wind is interpolated linearly within
+  the tick, so every integrator stage sees a continuous wind. A trim at Tick 0 trims into the gust at `t = 0`.
+- `Actuators { channels }`: each `Actuator { output, command, hold_start, min, max, rate_limit, lag, backlash,
+  position }` drives an `f64` (or `f32`) field of a component on the same entity, named by its path
+  (`ControlSurfaces.elevator`, `Rotorcraft.rotors[2].command`). In `SimSet::Actuation` it clamps the
+  command, moves the lag toward it (`None`; `FirstOrder { time_constant }` with the rate limit solved in
+  closed form; `SecondOrder { natural_frequency, damping }` by the matrix exponential of the error dynamics,
+  with the rate limit capping the tick's change), applies backlash of total width `backlash`, clamps to the
+  limits, and writes the position at the end of the tick to the field and to `position`. Channels are set up
+  in `after_setup`, after every other plugin and any trim: they start at rest at the field's value, which
+  must lie within the limits, and `hold_start` commands that value, so servos hold a trimmed aircraft as it
+  was. Unknown or non-float fields, a second channel on one field, a channel driving `Actuators`, and bad
+  parameters are `SetupError`s. A scenario file need give only `output`; the rest default to no limits, no
+  rate limit, no lag and no backlash.
+- `Imu`, `Gnss` and `Barometer` components, each with `rate_divider`, `latency` (ticks), a `Noise { white,
+  bias, bias_walk, resolution }` per measured quantity (applied to each axis independently) and its outputs
+  plus `valid`. In `SimSet::Sensors` a sensor samples the state the tick starts from when the tick is a
+  multiple of its divider, and publishes the newest sample at least `latency` ticks old, so a controller in
+  the same tick sees it exactly `latency` ticks late. The `Imu` (on a `RigidBody6`, at the centre of mass,
+  body axes) reads the inertial rate and the specific force averaged over its sample period, with gravity and
+  a turning frame's terms removed; the `Gnss` reads world-frame position and velocity; the `Barometer` reads
+  the environment's static pressure and the 1976 standard's pressure altitude of what it measured. The bias
+  starts at `bias` and walks by `bias_walk·√T·η` per sample period `T`. Each sensor draws two normals per axis
+  per sample from its own stream `sensors/<kind>/<SimId>`, so adding or retuning one sensor never changes
+  another's draws. Every sensor field may be left out of a scenario file (a sample every tick, no latency,
+  no noise).
+- Step 5d-3 adds `RangeFinder { rate_divider, latency, mount, direction, max_range, noise, range, hit, valid }`
+  on any body, sampled the same way from its stream `sensors/range/<SimId>`. Its truth is the kernel's ray
+  query (`Dynamics::ray_cast`, IB-19) from the mount point along the beam (body axes on a `RigidBody6`, default
+  `+z`; world axes on a `PointMass3`), skipping the body's own collider. With nothing within `max_range` it
+  reads `max_range` with `hit` false; noise never makes a range negative. Only `max_range` must be given.
+
+**As built (step 5c, part 2).** Rotorcraft and control. Rotor data in the tests are synthetic (TD1).
+
+- `Rotorcraft { rotors, drag_area, rotor_drag }` on a `RigidBody6` (D2: lumped rotors, rigid arms). Each
+  `Rotor { position, axis, spin, thrust_coefficient, torque_coefficient, time_constant, min_speed, max_speed,
+  inertia, command, speed }` sits at `r` from the centre of mass (body axes), thrusts along the unit `axis`
+  (default `−z`, so tilted rotors are allowed) and turns `Ccw` (angular velocity along the axis) or `Cw`. The
+  speed `ω` is an integrated state of the force model `rotorcraft/rotors` (IB-08), so every integrator
+  crosses it: `ω̇ = (c − ω)/τ` toward the command clamped to `[min_speed, max_speed]`, written back to
+  `speed` at the end of each tick. With `v` the air-relative velocity in body axes, the model adds thrust
+  `k_T ω² a`, rotor drag `−k_d ω (v − (v·a) a)` at each hub, frame drag `−½ρ|v| (C_D A ⊙ v)`, and the
+  moments `r × f`, the reaction `−s (k_Q ω² + I ω̇) a` to the rotor's torque and spin-up, and the gyroscopic
+  `−Ω × Σ s I ω a`. `k_T` and `k_Q` are constants (no density or inflow correction). Ground effect, battery,
+  blade flapping and motor saturation telemetry are not built yet.
+- `MixerCommand { thrust, moment }` on the same entity: in `SimSet::Actuation`, before the actuators, each
+  rotor's command becomes `√clamp((B⁺ c)_i, min², max²)`, where `B` maps rotor `ω²` to collective thrust
+  along the rotors' mean axis and the three body moments, and `B⁺ = Bᵀ(BBᵀ)⁻¹` is its minimum-norm right
+  inverse (exact for four rotors, least squares for six or eight). The mixers are built in `after_setup`, so a
+  `MixerCommand` a controller inserts at `start` is mixed. A layout that cannot set thrust and all three
+  moments independently is a `SetupError` only when it has a `MixerCommand`; without one, rotor commands are
+  whatever a controller, an actuator channel or the scenario writes.
+- `PidControl { loops }`: each `PidLoop { measurement, setpoint, output, kp, ki, kd, derivative_filter,
+  feedforward, min, max, rate_divider, wrap_angle, integral, value }` reads a numeric field and writes an `f64`
+  or `f32` field on its own entity by path (`Imu.gyro.x` to `MixerCommand.moment.x`), every `rate_divider`
+  ticks in `SimSet::Control`, in list order. The setpoint is `Constant(v)` (read every step, so it can be
+  moved during a run), `Field(path)`, or `Loop(j)`, the output of an earlier loop in the same tick, which
+  cascades loops. The derivative acts on the measurement through a first-order filter, so setpoint steps
+  do not kick it; the integral stops while the output sits on a limit and the error would push it further
+  (conditional integration); `wrap_angle` takes the error and the measurement change the short way round.
+  `value` and `integral` are written back as telemetry. Unknown or unwritable paths, a loop driving a
+  `PidControl` field, two loops on one output, a `Loop(j)` that is not earlier, and bad numbers are
+  `SetupError`s. A scenario gives only `measurement` and what it uses.
+- `tests/scenarios/quadrotor.scn.ron` is a worked example: a quad X climbing from 2 m to 10 m on two cascaded
+  loops on the GNSS fix (altitude to climb rate, limited to 3 m/s, then climb rate to thrust with `m·g` as
+  feedforward) and three rate-damping loops on the IMU gyro, all through the mixer.
+
+`Controller` boundary (in-process, deterministic), as built:
 
 ```rust
 /// A native controller run inside the tick loop: a component on the entity it controls.
@@ -620,7 +773,7 @@ feeds the reducers and moves every open requirement:
 | `CrashDump` | header + run identity + `SimStatus` + `CrashReason` + chronological `Vec<TickFrame>` + optional panic message/backtrace. As built (step 3a): `CrashDump { header, run_id, param_set_id, replicate_seed, params: Vec<(String, f64)>, status, reason, panic, frames }` (the backtrace waits for 3b's `catch_unwind`); `io::CrashWriter` and `io::CrashReader` write and read the stream described in IB-07, format `crashes` `1.0.0`. bincode is pinned (`=2.0.1`) because its bytes are on disk. |
 | `build_id` | As built (step 3a): `sim_schema::build_id()` is `saber <version> git <sha> <rustc -V> target <triple> profile <profile>`, stamped by `build.rs` (`SABER_GIT_SHA` overrides the git lookup for builds outside a checkout). A library cannot see the final binary's Cargo features, so the id has none yet; `sim_hpc` can append its own with 3b. Bit-identical results are promised only within one `build_id` (D1). |
 | `TickFrame`, `BodySnapshot`, `CrashReason` | The flight-recorder frame (`tick`, `t_s`, `total_energy`, bodies in `SimId` order with `sim_id`, `pos`, `quat_wxyz`, `lin_vel`, `ang_vel` (body rates), `force_mag`, `flags`), the `FLAG_*` bits, and `CrashReason { kind, sim_id, tick, detail }`. Plain `f64` arrays, so the crate needs no maths library (step 1b). |
-| `SimStatus`, `CrashKind`, `IntegratorKind`, `EventType`, `Verdict` | `#[repr(u8)]` enums with stable discriminants, exported to Python. `CrashKind` is the `kind` of a `CrashReason { kind, sim_id, tick, detail }` and the summaries' `crash_reason u8`: `0 NonFinite`, `1 EnergyBound`, `2 Panic`, `3 StepSizeUnderflow`, `4 SubstepLimit`, `5 ContactCapacity`; each maps to one crashed `SimStatus`. `IntegratorKind` is the summaries' `integrator u8` (`0 SemiImplicitEuler` … `7 DormandPrince853`, `physics-engine-tradeoffs.md` §10.1). As built (step 3a): `Verdict` is `0 Pass`, `1 Fail`, `2 Inconclusive`, and the `DiskEnum` trait gives each enum's byte and back. There is no `EventType`: an event row carries the name its plugin declared (`ground_impact`, ...) as a string column, which Parquet dictionary-encodes, so a new model adds events without a schema change. |
+| `SimStatus`, `CrashKind`, `IntegratorKind`, `EventType`, `Verdict` | `#[repr(u8)]` enums with stable discriminants, exported to Python. `CrashKind` is the `kind` of a `CrashReason { kind, sim_id, tick, detail }` and the summaries' `crash_reason u8`: `0 NonFinite`, `1 EnergyBound`, `2 Panic`, `3 StepSizeUnderflow`, `4 SubstepLimit`, `5 ContactCapacity`, `6 Penetration` (step 5d-3); each maps to one crashed `SimStatus`. `IntegratorKind` is the summaries' `integrator u8` (`0 SemiImplicitEuler` … `7 DormandPrince853`, `physics-engine-tradeoffs.md` §10.1). As built (step 3a): `Verdict` is `0 Pass`, `1 Fail`, `2 Inconclusive`, and the `DiskEnum` trait gives each enum's byte and back. There is no `EventType`: an event row carries the name its plugin declared (`ground_impact`, ...) as a string column, which Parquet dictionary-encodes, so a new model adds events without a schema change. |
 | `export-schemas` bin | Writes `schemas/*.json` (JSON Schema + Arrow IPC schema) for Python. As built (step 3a): writes `python/saber/schemas/{summaries,events,snapshots,impacts,manifest,verdicts}.json` (columns with type, nullability and a short doc, dynamic families, sort key, format and version), `enums.json` (variant names in byte order) and `formats.json` (magic, footer keys, the schema version of every format, including `scenario`, `requirements` and `crashes`); `--check` only compares. Plain JSON instead of JSON Schema plus Arrow IPC: `saber.schema` builds the Arrow schema from it, and the files stay readable in review. |
 
 ### 5.5 `sim_studio` — GUI
@@ -1861,7 +2014,7 @@ flowchart LR
         r2[CrashedNaN / CrashedEnergy]
         r3[Panicked via catch_unwind]
         r4[Timeout tick budget]
-        r5["CrashedSolver: StepSizeUnderflow, ContactCapacity"]
+        r5["CrashedSolver: StepSizeUnderflow, ContactCapacity, Penetration"]
     end
 ```
 

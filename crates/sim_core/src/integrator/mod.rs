@@ -601,6 +601,18 @@ impl Integrator {
         self.h_next
     }
 
+    /// The adaptive controller's memory (next step, last error), so a stretch of a tick can be
+    /// integrated again along the same steps (impact location, physics §9.4).
+    pub(crate) fn controller(&self) -> (f64, f64) {
+        (self.h_next, self.err_old)
+    }
+
+    /// Restore the controller memory saved by [`Integrator::controller`].
+    pub(crate) fn set_controller(&mut self, (h_next, err_old): (f64, f64)) {
+        self.h_next = h_next;
+        self.err_old = err_old;
+    }
+
     /// Forget the step-size history and statistics, for World reuse between runs (G5).
     pub fn reset(&mut self) {
         self.stepper.invalidate();
