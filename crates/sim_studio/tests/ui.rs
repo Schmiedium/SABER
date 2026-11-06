@@ -13,10 +13,12 @@ use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
-use sim_studio::actions::{BuilderDoc, CurrentWorkspace, StudioCommand};
+use sim_studio::actions::{BuilderDoc, BuilderTab, CurrentWorkspace, ReqPanel, StudioCommand};
+use sim_studio::builder::ReqItem;
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
+use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::workspace::{Pack, Workspace};
 use sim_studio::{StudioCorePlugin, StudioUiPlugin};
@@ -352,4 +354,136 @@ fn the_bind_menu_sweeps_draws_and_unbinds_a_field() {
             .focus
             .is_none()
     );
+}
+
+/// The text input of the requirement editor's field `field` of `item`.
+fn req_input(app: &mut App, item: &ReqItem, field: &str) -> Entity {
+    let mut q = app.world_mut().query::<(&ReqFieldOf, &Children)>();
+    let (_, children) = q
+        .iter(app.world())
+        .find(|(f, _)| f.item == *item && f.field == field)
+        .unwrap_or_else(|| panic!("no requirement field {item:?} {field}"));
+    children[0]
+}
+
+fn submit(app: &mut App, input: Entity, value: &str) {
+    app.world_mut().trigger(KitSubmit {
+        entity: input,
+        value: value.into(),
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+}
+
+fn req_set(app: &App) -> sim_verify::RequirementSet {
+    app.world()
+        .resource::<ReqPanel>()
+        .doc
+        .as_ref()
+        .unwrap()
+        .set()
+        .clone()
+}
+
+/// The Requirements tab: the workspace's starter set opens with it; a requirement's value is
+/// edited in place and its kind switched with a choice; a metric reading a missing entity shows
+/// in Lint and Save is refused; Undo in this tab takes edits back; Save writes the file; the Scene
+/// tab brings the Inspector back.
+#[test]
+fn the_requirements_tab_edits_and_saves_a_set() {
+    let dir = scratch("reqs");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let file = ws.root.join("requirements/quad.req.ron");
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+    press(&mut app, "Requirements tab");
+    let tab = |app: &App| app.world().resource::<ReqPanel>().tab;
+    assert_eq!(tab(&app), BuilderTab::Requirements);
+    assert_eq!(
+        count::<InspectorField>(&mut app),
+        0,
+        "the Inspector made way"
+    );
+
+    let low = ReqItem::Requirement("R-hold-low".into());
+    press(&mut app, "Requirement R-hold-low: z_final_m ≤ -9.5");
+    let input = req_input(&mut app, &low, "value");
+    assert_eq!(input_text(&app, input), "-9.5");
+    submit(&mut app, input, "-9.25");
+    let kind = |app: &App| req_set(app).requirement("R-hold-low").unwrap().kind.clone();
+    assert!(matches!(
+        kind(&app),
+        sim_verify::RequirementKind::Threshold { value, .. } if value == -9.25
+    ));
+    assert_eq!(
+        req_input(&mut app, &low, "value"),
+        input,
+        "updated in place"
+    );
+
+    press(&mut app, "Kind: Envelope");
+    assert!(matches!(
+        kind(&app),
+        sim_verify::RequirementKind::Envelope { hi, .. } if hi == -9.25
+    ));
+    let lo = req_input(&mut app, &low, "lo");
+    assert_eq!(input_text(&app, lo), "-inf");
+    press(&mut app, "Undo");
+    assert!(matches!(
+        kind(&app),
+        sim_verify::RequirementKind::Threshold { .. }
+    ));
+
+    // A signal on an entity that is not in the scene: a lint error, and Save is refused.
+    let z = ReqItem::Metric("z_final_m".into());
+    press(
+        &mut app,
+        "Metric z_final_m: Final of entity(1).RigidBody6.position.z",
+    );
+    let signal = req_input(&mut app, &z, "signal");
+    submit(&mut app, signal, "entity(9).RigidBody6.position.z");
+    let error = {
+        let mut q = app.world_mut().query::<&AccessibleLabel>();
+        q.iter(app.world())
+            .map(|l| l.0.clone())
+            .find(|l| l.starts_with("✖ metric z_final_m"))
+    };
+    assert!(
+        error.is_some_and(|e| e.contains("SimId 9")),
+        "listed in Lint"
+    );
+    press(&mut app, "Save .req.ron");
+    assert!(
+        !std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("entity(9)"),
+        "refused"
+    );
+    press(&mut app, "Undo");
+
+    press(&mut app, "+ Requirement");
+    assert_eq!(
+        app.world()
+            .resource::<ReqPanel>()
+            .doc
+            .as_ref()
+            .unwrap()
+            .selected,
+        Some(ReqItem::Requirement("R-01".into()))
+    );
+    press(&mut app, "Save .req.ron");
+    let saved =
+        sim_verify::RequirementSet::from_ron(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved.hash(), req_set(&app).hash());
+    assert!(saved.requirement("R-01").is_some());
+
+    press(&mut app, "Scene tab");
+    assert_eq!(tab(&app), BuilderTab::Scene);
+    inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
 }

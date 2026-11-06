@@ -10,7 +10,9 @@ use sim_studio_ui::prelude::*;
 
 use super::builder::{Breadcrumb, RegionBody};
 use super::{action, child};
-use crate::actions::{BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, StudioCommand};
+use crate::actions::{
+    BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, ReqPanel, StudioCommand,
+};
 use crate::state::{AppState, Rail, RailContext};
 
 /// The shell's root node.
@@ -231,6 +233,7 @@ pub fn fill_regions(
     scenario: Res<CurrentScenario>,
     log: Res<ToastLog>,
     docs: Res<BuilderDoc>,
+    panel: Res<ReqPanel>,
 ) {
     for (dock_entity, PendingRegions(state)) in &pending {
         let mine: Vec<_> = regions
@@ -253,18 +256,7 @@ pub fn fill_regions(
             if *state == AppState::ScenarioBuilder
                 && let Some(doc) = &docs.0
             {
-                match kind {
-                    DockRegion::Left => {
-                        super::builder::outliner(&mut commands, body, doc);
-                        super::builder::parameters(&mut commands, body, doc);
-                    }
-                    DockRegion::Right => super::builder::inspector(&mut commands, body, doc),
-                    DockRegion::Center => super::builder::summary(&mut commands, body, doc),
-                    DockRegion::Bottom => {
-                        super::builder::lint(&mut commands, body, doc);
-                        console(&mut commands, body, &log);
-                    }
-                }
+                super::builder::fill(&mut commands, body, kind, doc, &panel, &log);
                 continue;
             }
             match kind {

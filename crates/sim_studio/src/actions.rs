@@ -13,7 +13,8 @@ use sim_studio_ui::dock::{DockLayout, DockLayoutChanged};
 use sim_studio_ui::theme::{StudioTheme, ThemeMode};
 use sim_studio_ui::toast::Toast;
 
-use crate::builder::{FieldRef, ScenarioDoc};
+use crate::builder::requirements::{pick, sets};
+use crate::builder::{FieldRef, ReqItem, RequirementDoc, ScenarioDoc};
 use crate::campaign::CampaignCard;
 use crate::clock;
 use crate::crash::OpenCrash;
@@ -94,6 +95,52 @@ pub enum StudioCommand {
     AddComponent(usize, String),
     /// Remove a component from an entity.
     RemoveComponent(usize, String),
+    /// Show the Builder's Scene or Requirements tab.
+    Tab(BuilderTab),
+    /// Open a requirement set (path relative to the workspace root).
+    OpenRequirements(String),
+    /// Create the requirement set of the open scenario (`requirements/<name>.req.ron`).
+    NewRequirements,
+    /// Select the set, a metric or a requirement in the Requirements tab.
+    SelectReq(ReqItem),
+    /// Set a field of the requirement set from text (the requirement editor).
+    SetReqField {
+        /// The set, metric or requirement.
+        item: ReqItem,
+        /// The field's name ([`crate::builder::ReqField::name`]).
+        field: String,
+        /// The new value as typed or chosen.
+        text: String,
+    },
+    /// Add a metric (`true`: one that reads an event).
+    AddMetric(bool),
+    /// Add a requirement.
+    AddRequirement,
+    /// Remove a metric or a requirement.
+    RemoveReq(ReqItem),
+    /// Write the requirement set file (`.req.ron`).
+    ExportRequirements,
+}
+
+/// The Builder's left-dock tabs (`sim_studio_ux.md` §7.2): the scene, or its requirements.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BuilderTab {
+    /// Outliner, Parameters and the Inspector.
+    #[default]
+    Scene,
+    /// The requirement set and its editor (§7.4).
+    Requirements,
+}
+
+/// The Requirements tab: which tab shows, the open requirement set, and the workspace's sets.
+#[derive(Resource, Debug, Default)]
+pub struct ReqPanel {
+    /// The tab the Builder shows.
+    pub tab: BuilderTab,
+    /// The open requirement set, checked against the open scenario.
+    pub doc: Option<RequirementDoc>,
+    /// The workspace's requirement sets (`requirements/*.req.ron`).
+    pub files: Vec<String>,
 }
 
 /// The Builder's document changed (an edit, undo, redo, export or selection): panels refresh.
@@ -232,6 +279,30 @@ fn opened(ws: Workspace, cx: &mut CommandCx, verb: &str) {
         },
         None => None,
     };
+    cx.req.tab = BuilderTab::Scene;
+    cx.req.files = sets(&ws.root);
+    cx.req.doc = cx
+        .doc
+        .0
+        .as_ref()
+        .and_then(|d| pick(&ws.root, &d.rel))
+        .and_then(|rel| match RequirementDoc::open(&ws.root, &rel) {
+            Ok((mut r, restored)) => {
+                if restored {
+                    cx.toasts.write(Toast::warning(format!(
+                        "Restored unsaved edits to {rel} from its autosave; Save writes them to the file"
+                    )));
+                }
+                r.set_scene(cx.doc.0.as_ref());
+                Some(r)
+            }
+            Err(e) => {
+                cx.toasts.write(Toast::warning(format!(
+                    "The requirement set does not load: {e}"
+                )));
+                None
+            }
+        });
     cx.workspace.0 = Some(ws);
     cx.next.set(AppState::ScenarioBuilder);
     cx.toasts
@@ -257,6 +328,7 @@ pub struct CommandCx<'w> {
     toasts: MessageWriter<'w, Toast>,
     explorer: MessageWriter<'w, ExplorerRequest>,
     doc: ResMut<'w, BuilderDoc>,
+    req: ResMut<'w, ReqPanel>,
     changed: MessageWriter<'w, DocChanged>,
 }
 
@@ -294,6 +366,15 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                         doc.rel
                     )));
                 }
+                if let Some(doc) = cx.req.doc.take()
+                    && doc.dirty()
+                {
+                    cx.toasts.write(Toast::info(format!(
+                        "Unsaved edits to {} stay in its autosave and come back when the workspace opens",
+                        doc.rel
+                    )));
+                }
+                cx.req.files.clear();
                 cx.scenario.0 = None;
                 cx.next.set(AppState::Launcher);
             }
@@ -363,6 +444,18 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                     save_workspace(ws, &mut cx.toasts);
                 }
             }
+            StudioCommand::Undo | StudioCommand::Redo if cx.req.tab == BuilderTab::Requirements => {
+                edit_requirements(command, &mut cx);
+            }
+            StudioCommand::Tab(_)
+            | StudioCommand::OpenRequirements(_)
+            | StudioCommand::NewRequirements
+            | StudioCommand::SelectReq(_)
+            | StudioCommand::SetReqField { .. }
+            | StudioCommand::AddMetric(_)
+            | StudioCommand::AddRequirement
+            | StudioCommand::RemoveReq(_)
+            | StudioCommand::ExportRequirements => edit_requirements(command, &mut cx),
             StudioCommand::Select(_)
             | StudioCommand::SetField { .. }
             | StudioCommand::Undo
@@ -464,6 +557,122 @@ fn edit(command: &StudioCommand, cx: &mut CommandCx) {
         },
         _ => return,
     }
+    if !matches!(command, StudioCommand::Select(_) | StudioCommand::Focus(_))
+        && let (Some(doc), Some(req)) = (&cx.doc.0, &mut cx.req.doc)
+    {
+        req.set_scene(Some(doc));
+    }
+    cx.changed.write(DocChanged);
+}
+
+/// The Requirements tab's commands; Undo and Redo while it shows.
+fn edit_requirements(command: &StudioCommand, cx: &mut CommandCx) {
+    let Some(ws) = &cx.workspace.0 else {
+        cx.toasts.write(Toast::warning("No workspace is open"));
+        return;
+    };
+    match command {
+        StudioCommand::Tab(tab) => cx.req.tab = *tab,
+        StudioCommand::OpenRequirements(rel) => match RequirementDoc::open(&ws.root, rel) {
+            Ok((mut doc, restored)) => {
+                if restored {
+                    cx.toasts.write(Toast::warning(format!(
+                        "Restored unsaved edits to {rel} from its autosave; Save writes them to the file"
+                    )));
+                }
+                doc.set_scene(cx.doc.0.as_ref());
+                if let Some(old) = cx.req.doc.replace(doc)
+                    && old.dirty()
+                {
+                    cx.toasts.write(Toast::info(format!(
+                        "Unsaved edits to {} stay in its autosave",
+                        old.rel
+                    )));
+                }
+                cx.req.tab = BuilderTab::Requirements;
+            }
+            Err(e) => {
+                cx.toasts.write(Toast::error(e));
+                return;
+            }
+        },
+        StudioCommand::NewRequirements => {
+            let Some(scene) = &cx.doc.0 else {
+                cx.toasts.write(Toast::warning(
+                    "Open a scenario first: a set is written for one",
+                ));
+                return;
+            };
+            match RequirementDoc::create(&ws.root, &scene.rel) {
+                Ok(mut doc) => {
+                    doc.set_scene(Some(scene));
+                    cx.toasts
+                        .write(Toast::success(format!("Created {}", doc.rel)));
+                    cx.req.doc = Some(doc);
+                    cx.req.files = sets(&ws.root);
+                    cx.req.tab = BuilderTab::Requirements;
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e));
+                    return;
+                }
+            }
+        }
+        _ => {
+            let Some(doc) = &mut cx.req.doc else {
+                cx.toasts
+                    .write(Toast::warning("No requirement set is open"));
+                return;
+            };
+            match command {
+                StudioCommand::SelectReq(item) => {
+                    doc.selected = Some(item.clone());
+                    cx.req.tab = BuilderTab::Requirements;
+                }
+                StudioCommand::SetReqField { item, field, text } => {
+                    match doc.set_field(item, field, text) {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(e) => {
+                            cx.toasts
+                                .write(Toast::error(format!("{} {field}: {e}", item.name())));
+                        }
+                    }
+                }
+                StudioCommand::AddMetric(event) => {
+                    if let Err(e) = doc.add_metric(*event) {
+                        cx.toasts.write(Toast::error(e));
+                    }
+                }
+                StudioCommand::AddRequirement => {
+                    if let Err(e) = doc.add_requirement() {
+                        cx.toasts.write(Toast::error(e));
+                    }
+                }
+                StudioCommand::RemoveReq(item) => report(doc.remove(item), cx),
+                StudioCommand::Undo => {
+                    if !doc.undo() {
+                        cx.toasts.write(Toast::info("Nothing to undo"));
+                    }
+                }
+                StudioCommand::Redo => {
+                    if !doc.redo() {
+                        cx.toasts.write(Toast::info("Nothing to redo"));
+                    }
+                }
+                StudioCommand::ExportRequirements => match doc.export() {
+                    Ok(path) => {
+                        cx.toasts
+                            .write(Toast::success(format!("Saved {}", path.display())));
+                    }
+                    Err(e) => {
+                        cx.toasts.write(Toast::error(format!("Save refused: {e}")));
+                    }
+                },
+                _ => return,
+            }
+        }
+    }
     cx.changed.write(DocChanged);
 }
 
@@ -498,9 +707,10 @@ fn parse_bounds(lo: &str, hi: &str) -> Result<Option<(f64, f64)>, String> {
 }
 
 /// Builder keys (§9.6), unless a text field has focus: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo,
-/// Ctrl+S or Ctrl+E export.
+/// Ctrl+S or Ctrl+E export the scenario, or save the requirement set in the Requirements tab.
 pub fn builder_keys(
     keys: Res<ButtonInput<KeyCode>>,
+    panel: Res<ReqPanel>,
     focus: Option<Res<InputFocus>>,
     editing: Query<(), With<EditableText>>,
     mut out: MessageWriter<StudioCommand>,
@@ -527,7 +737,11 @@ pub fn builder_keys(
         out.write(StudioCommand::Redo);
     }
     if keys.any_just_pressed([KeyCode::KeyS, KeyCode::KeyE]) {
-        out.write(StudioCommand::Export);
+        out.write(if panel.tab == BuilderTab::Requirements {
+            StudioCommand::ExportRequirements
+        } else {
+            StudioCommand::Export
+        });
     }
 }
 

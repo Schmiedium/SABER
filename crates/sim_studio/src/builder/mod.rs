@@ -10,18 +10,21 @@
 pub mod fields;
 pub mod lint;
 pub mod params;
+pub mod requirements;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::reflect::TypeRegistryArc;
 use sim_core::{
-    ParamBindings, Scenario, SceneEntity, SceneMeta, SimAppBuilder, SimConfig, SimId, Uncertainties,
+    ParamBindings, Scenario, SceneEntity, SceneMeta, SimAppBuilder, SimConfig, SimId, SimWorld,
+    Uncertainties,
 };
 
 pub use fields::{FieldKind, FieldView};
 pub use lint::{LintItem, LintLevel};
 pub use params::{ParamKind, ParamRow};
+pub use requirements::{ReqField, ReqItem, ReqRow, RequirementDoc};
 
 /// The sidecar every edit is saved to until the scenario is exported (§9.4).
 pub const AUTOSAVE_SUFFIX: &str = "~autosave";
@@ -125,6 +128,19 @@ pub fn library_registry() -> TypeRegistryArc {
     let mut builder = SimAppBuilder::new(SimConfig::new(1.0, 1));
     sim_models::add_library(&mut builder);
     builder.type_registry()
+}
+
+/// Build a scenario into a World with the standard model library and run Tick 0's setup
+/// (resolution, setup checks) without stepping, as a run starts.
+pub(crate) fn start_world(scenario: Arc<Scenario>) -> Result<SimWorld, String> {
+    let mut builder = SimAppBuilder::new(scenario.config().clone());
+    sim_models::add_library(&mut builder);
+    builder.set_config(scenario.config().clone());
+    let mut sim = builder.build().map_err(|e| e.to_string())?;
+    sim.set_scenario(scenario).map_err(|e| e.to_string())?;
+    sim.start(sim_core::RunSeed::default())
+        .map_err(|e| e.to_string())?;
+    Ok(sim)
 }
 
 /// The autosave sidecar of a scenario file.
@@ -485,14 +501,7 @@ impl ScenarioDoc {
     /// Build the scenario into a World and run Tick 0's setup (resolution, setup checks) without
     /// stepping: the setup error, or the warnings.
     pub(crate) fn tick0(&self, scenario: Scenario) -> Result<Vec<String>, String> {
-        let mut builder = SimAppBuilder::new(scenario.config().clone());
-        sim_models::add_library(&mut builder);
-        builder.set_config(scenario.config().clone());
-        let mut sim = builder.build().map_err(|e| e.to_string())?;
-        sim.set_scenario(Arc::new(scenario))
-            .map_err(|e| e.to_string())?;
-        sim.start(sim_core::RunSeed::default())
-            .map_err(|e| e.to_string())?;
+        let sim = start_world(Arc::new(scenario))?;
         Ok(sim
             .world()
             .get_resource::<sim_core::ResolveReport>()

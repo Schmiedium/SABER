@@ -29,7 +29,7 @@ use sim_studio_ui::{KitCorePlugin, KitPlugin};
 
 use actions::{
     BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, DocChanged, ExplorerRequest,
-    LauncherCampaigns, Recent, StudioCommand,
+    LauncherCampaigns, Recent, ReqPanel, StudioCommand,
 };
 use state::AppState;
 
@@ -53,6 +53,7 @@ impl Plugin for StudioCorePlugin {
             .add_message::<ExplorerRequest>()
             .add_message::<DocChanged>()
             .init_resource::<BuilderDoc>()
+            .init_resource::<ReqPanel>()
             .insert_resource(Recent::load(self.recent_path.clone()))
             .init_resource::<CurrentWorkspace>()
             .init_resource::<CurrentScenario>()

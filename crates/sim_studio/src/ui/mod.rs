@@ -4,6 +4,7 @@
 
 pub mod builder;
 pub mod launcher;
+pub mod requirements;
 pub mod shell;
 
 use bevy::prelude::*;
