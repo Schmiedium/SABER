@@ -2,6 +2,7 @@
 //! state is entered and despawned when it is left; everything it does goes through
 //! [`crate::actions::StudioCommand`].
 
+pub mod builder;
 pub mod launcher;
 pub mod shell;
 

@@ -1,7 +1,7 @@
 //! The screens themselves, headless (verification §8.3): the full UI stack without a window or a
 //! GPU, driven by activating buttons the way a click does. Checks that the Launcher and the shell
-//! spawn, that their buttons are wired to the commands they name, and that the shell fills its
-//! regions.
+//! spawn, that their buttons are wired to the commands they name, that the shell fills its
+//! regions, and that the Builder's panels edit, undo and export the scenario.
 
 use std::path::{Path, PathBuf};
 
@@ -9,16 +9,20 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{RenderCreation, WgpuSettings};
+use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
-use sim_studio::actions::CurrentWorkspace;
+use sim_studio::actions::{BuilderDoc, CurrentWorkspace, StudioCommand};
 use sim_studio::state::AppState;
+use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
+use sim_studio::workspace::{Pack, Workspace};
 use sim_studio::{StudioCorePlugin, StudioUiPlugin};
 use sim_studio_ui::KitPlugin;
 use sim_studio_ui::widgets::Fields;
+use sim_studio_ui::widgets::KitSubmit;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -144,4 +148,113 @@ fn the_launcher_starts_a_workspace_and_the_shell_opens() {
     // The new workspace is now the first recent one, and opening it from there works.
     press(&mut app, "Open workspace ui_ws");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
+}
+
+/// The value field editing `component` `path`, and its text input.
+fn inspector_field(app: &mut App, component: &str, path: &str) -> (Entity, Entity) {
+    let mut q = app
+        .world_mut()
+        .query::<(Entity, &InspectorField, &Children)>();
+    let (e, _, children) = q
+        .iter(app.world())
+        .find(|(_, f, _)| f.component == component && f.path == path)
+        .unwrap_or_else(|| panic!("no Inspector field {component} {path}"));
+    (e, children[0])
+}
+
+fn input_text(app: &App, input: Entity) -> String {
+    app.world()
+        .get::<EditableText>(input)
+        .unwrap()
+        .value()
+        .to_string()
+}
+
+fn mass(app: &App) -> f64 {
+    let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+    let slot = doc.slot_of(1).unwrap();
+    doc.components(slot)
+        .into_iter()
+        .find(|c| c.name == "MassProps")
+        .unwrap()
+        .fields[0]
+        .text
+        .parse()
+        .unwrap()
+}
+
+/// The Builder opens on the first entity; typing a value and pressing Enter edits the scenario
+/// (marked unsaved), Undo puts the old value back into the same field, Export writes the file,
+/// and the Outliner moves the Inspector to another entity.
+#[test]
+fn the_builder_edits_undoes_and_exports_a_scenario() {
+    let dir = scratch("builder");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+    let mut q = app.world_mut().query::<&InspectorOf>();
+    assert_eq!(
+        q.iter(app.world()).next(),
+        Some(&InspectorOf(Some(1))),
+        "slot 1 is #1"
+    );
+
+    let (_, input) = inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
+    assert_eq!(input_text(&app, input), "1.2");
+    app.world_mut().trigger(KitSubmit {
+        entity: input,
+        value: "1.5".into(),
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(mass(&app), 1.5);
+    let mut crumbs = app.world_mut().query_filtered::<&Text, With<Breadcrumb>>();
+    assert!(
+        crumbs.single(app.world()).unwrap().0.starts_with("● "),
+        "unsaved"
+    );
+    // The same field is still there (the Inspector is updated in place, not rebuilt).
+    assert_eq!(
+        inspector_field(&mut app, "sim_core::body::MassProps", ".mass").1,
+        input
+    );
+
+    press(&mut app, "Undo");
+    assert_eq!(mass(&app), 1.2);
+    assert_eq!(
+        input_text(&app, input),
+        "1.2",
+        "the field shows the undone value"
+    );
+    press(&mut app, "Redo");
+    assert_eq!(input_text(&app, input), "1.5");
+    press(&mut app, "Export .scn.ron");
+    let file = std::fs::read_to_string(ws.root.join("scenarios/quad.scn.ron")).unwrap();
+    assert!(file.contains("mass: 1.5"), "exported");
+    assert!(
+        !crumbs.single(app.world()).unwrap().0.starts_with("● "),
+        "saved"
+    );
+
+    // A refused value is reported and the field shows the scenario's value again.
+    app.world_mut().trigger(KitSubmit {
+        entity: input,
+        value: "heavy".into(),
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(mass(&app), 1.5);
+    assert_eq!(input_text(&app, input), "1.5");
+
+    press(&mut app, "Select #100 Gravity · Atmosphere · Wind");
+    let mut q = app.world_mut().query::<&InspectorOf>();
+    assert_eq!(q.iter(app.world()).next(), Some(&InspectorOf(Some(0))));
+    inspector_field(&mut app, "sim_models::environment::Gravity", ".g");
 }

@@ -26,9 +26,9 @@ pub mod prelude {
     pub use crate::theme::{StudioTheme, ThemeMode, Token, token};
     pub use crate::toast::{Toast, ToastLevel, ToastLog, toast_stack};
     pub use crate::widgets::{
-        FieldId, Fields, KitActivated, KitChanged, Status, button, column, heading, label, mark,
-        mono, muted, panel, plain_button, plain_row, primary_button, row, set_enabled, spacer,
-        status_text, text_field, title,
+        FieldId, Fields, KitActivated, KitChanged, KitSubmit, Status, button, column, heading,
+        label, mark, mono, muted, panel, plain_button, plain_row, primary_button, row, set_enabled,
+        spacer, status_text, text_field, title, value_field,
     };
     pub use bevy::feathers::theme::{
         ThemeBackgroundColor as Background, ThemeTextColor as TextToken,
@@ -70,6 +70,8 @@ impl Plugin for KitPlugin {
             .add_observer(dock::on_splitter_drag_start)
             .add_observer(dock::on_splitter_drag)
             .add_observer(dock::on_splitter_drag_end)
-            .add_observer(dock::on_splitter_click);
+            .add_observer(dock::on_splitter_click)
+            .add_observer(widgets::submit_on_enter)
+            .add_observer(widgets::submit_on_blur);
     }
 }

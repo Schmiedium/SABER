@@ -2,7 +2,9 @@
 //!
 //! Step S1 builds the frame the screens live in: the [`state::AppState`]s, workspaces
 //! (`saber.workspace.ron`, starter packs), the per-user recent list, the Launcher and the shell
-//! (title bar, activity rail, dock, status bar, notifications). The screens follow in S2–S6.
+//! (title bar, activity rail, dock, status bar, notifications). Step S2-1 adds the Scenario
+//! Builder's document ([`builder`]) with its Outliner, Inspector and Lint. The other screens follow
+//! in S2–S6.
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -10,6 +12,7 @@
 //! Design: `docs/design/sim_studio_ux.md`, subsystems §5.5.
 
 pub mod actions;
+pub mod builder;
 pub mod campaign;
 pub mod clock;
 pub mod crash;
@@ -25,8 +28,8 @@ use bevy::state::app::StatesPlugin;
 use sim_studio_ui::{KitCorePlugin, KitPlugin};
 
 use actions::{
-    CurrentCrash, CurrentScenario, CurrentWorkspace, ExplorerRequest, LauncherCampaigns, Recent,
-    StudioCommand,
+    BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, DocChanged, ExplorerRequest,
+    LauncherCampaigns, Recent, StudioCommand,
 };
 use state::AppState;
 
@@ -48,6 +51,8 @@ impl Plugin for StudioCorePlugin {
         app.init_state::<AppState>()
             .add_message::<StudioCommand>()
             .add_message::<ExplorerRequest>()
+            .add_message::<DocChanged>()
+            .init_resource::<BuilderDoc>()
             .insert_resource(Recent::load(self.recent_path.clone()))
             .init_resource::<CurrentWorkspace>()
             .init_resource::<CurrentScenario>()
@@ -83,8 +88,10 @@ impl Plugin for StudioUiPlugin {
                 Update,
                 (
                     actions::rail_keys.run_if(not(in_state(AppState::Launcher))),
+                    actions::builder_keys.run_if(in_state(AppState::ScenarioBuilder)),
                     ui::shell::fill_regions,
                     ui::shell::console_append,
+                    (ui::builder::refresh, ui::builder::breadcrumb).after(actions::apply_commands),
                 ),
             );
         for s in SHELL_STATES {
