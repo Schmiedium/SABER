@@ -121,6 +121,7 @@ does (R7), and `sim_verify`'s read-only `VerifyState::progress` for live require
 v0.34 (2026-11-04, build step S3-2) records the Preview Run's 3D viewport as built (§5.5): `RenderBridge` and
 `Studio.Viewport` as the `sim_studio::viewport` f64 logic and its draw systems, with the floating origin at the
 camera pivot (G7).
+v0.35 (2026-11-04, build step S3-3) records the kit's bundled symbol font (§5.5).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -769,6 +770,10 @@ Transition, Locked, Held); both live in one `ViewportState` resource. `StateHud`
 10 Hz while running. `GroundGridPlugin` is not the full-screen shader yet: the grid is drawn with gizmo lines (three
 decades about the pivot, in f64 then cast) on a plane mesh, and distance labels are pooled UI text placed by
 projecting f64 points (`ViewProjection`). No new kernel API was needed. Details in `sim_studio_ux.md` §7.10.4.
+
+**As built (step S3-3).** `Studio.UiKit` bundles a symbol font (DejaVu Sans 2.37's symbol and arrow blocks, in
+`crates/sim_studio_ui/assets/fonts/` with its license) and puts it behind every text's font, so the symbols Fira
+lacks draw instead of empty boxes. Details in `sim_studio_ux.md` §10.2.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 
