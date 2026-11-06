@@ -19,10 +19,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use sim_schema::io::{
-    CRASH_COUNTS_KEY, CrashWriter, DUMP_COUNTS_KEY, MANIFEST_HASH_KEY, RUN_IDS_KEY,
-    STATUS_COUNTS_KEY, Table, TableError, TableWriter,
-};
+use sim_schema::io::{CRASH_COUNTS_KEY, CrashWriter, RUN_IDS_KEY, Table, TableError, TableWriter};
 use sim_schema::{
     CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, EventRow, RangeSet, SnapshotRow, SummaryRow,
 };
