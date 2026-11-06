@@ -1,6 +1,6 @@
 # SABER build plan
 
-Status: v1.9 (2026-11-03; v1.1 marks steps 1a and 1b done, adds O8 and records D19; v1.2 marks step 1c done, moves `FileHeader` from 3a to 1c, and adds Earth rotation to 5a; v1.3 marks step 2 done, which also brought the kernel's in-memory event channel forward from the telemetry work; v1.4 marks step 3a done; v1.5 marks step 3b done, which also brought the kernel's Tier 2 and 3 run log forward; v1.6 marks step 3c done and adds a CI job where Python drives freshly built binaries; v1.7 marks step 4a done, built on the recommended answer to O8, and adds a CI job that runs `sim_hpc` under `mpiexec`; v1.8 marks step 4b done and closes O8 as D20; v1.9 marks step 4c done, built on the recommended answer to O9). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
+Status: v1.10 (2026-11-03; v1.1 marks steps 1a and 1b done, adds O8 and records D19; v1.2 marks step 1c done, moves `FileHeader` from 3a to 1c, and adds Earth rotation to 5a; v1.3 marks step 2 done, which also brought the kernel's in-memory event channel forward from the telemetry work; v1.4 marks step 3a done; v1.5 marks step 3b done, which also brought the kernel's Tier 2 and 3 run log forward; v1.6 marks step 3c done and adds a CI job where Python drives freshly built binaries; v1.7 marks step 4a done, built on the recommended answer to O8, and adds a CI job that runs `sim_hpc` under `mpiexec`; v1.8 marks step 4b done and closes O8 as D20; v1.9 marks step 4c done, built on the recommended answer to O9; v1.10 marks step 5a done for the M1 and M2 oracles, with M3 still waiting on T1, and narrows T2). Turns the roadmap in `design/subsystems-and-interfaces.md` §12 into build
 steps, one reviewable pull request each, in the order they are built. Each step names its scope, the
 design sections it implements, and the test that proves it done (its exit criterion, in the roadmap's
 style). Design changes ride in the same PR as the code (`CONTRIBUTING.md`).
@@ -68,7 +68,7 @@ flowchart LR
 | O1: fragmentation trigger, fragment mass and velocity distributions, lifetime when nothing is hit | Step 7 (5e builds the hook without them) | subsystems §11 |
 | O9: judge `Probability` requirements over all runs pooled, or per parameter set | Nothing: 4c pools by default and judges per set on request (`by_param_set=True`); only the default would change | subsystems §11 |
 | T1: which McCoy projectiles have complete data for M3 | The M3 part of 5a | verification §13 |
-| T2: exact `H`, `T` definitions and signs for the M2 linear-theory oracle | The M2 part of 5a | verification §13 |
+| T2: exact `H`, `T` definitions and signs for the M2 linear-theory oracle | Nothing for M2, whose oracle 5a derived from the plugin's own force laws; M3 still needs the transcribed tables' signs checked | verification §6.2, §13 |
 | T4: access to STANAG 4355 | An optional modified-point-mass reference in 5a | verification §13 |
 
 ## Done
@@ -86,3 +86,4 @@ flowchart LR
 | 4a MPI dispatch over a `Transport` (rsmpi behind the `mpi` feature), init broadcast with BLAKE3 checks and `build_id` gather, campaign-wide dump quota, crash-storm and setup-error aborts (exit 6), `campaign_status.json`, `saber.campaign.read_heartbeat`, MPI CI job | #10 |
 | 4b Resume from committed footers (attempts, campaign-wide counts restored, refusals), walltime drain, SIGTERM, fresh-output check, `saber.campaign` resume, PBS and Slurm job scripts with `auto_resume` resubmissions | #11 |
 | 4c `saber.analyze` (committed parts, coverage, uncertainty, unstable regions), `saber.verify` (`AllPass`, Clopper–Pearson `Probability`, `Quantile`, crash and timeout policy, envelope, per parameter set, recompute), `verdicts.parquet` with its `saber.verify` footer, `report.html` with the traceability matrix, `python -m saber.verify` | #12 |
+| 5a `AeroBallisticsPlugin` (McCoy 6DOF `ProjectileAero`, 3DOF `PointMassAero`, `C(Mach)` coefficients, `AeroState`), Earth rotation (`EarthRotation`, Coriolis and centrifugal terms in the kernel), McCoy M1 and M2 tests; M3 waits on T1 | #13 |
