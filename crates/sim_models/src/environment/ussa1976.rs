@@ -83,6 +83,27 @@ impl Ussa1976 {
         R0 * z / (R0 + z)
     }
 
+    /// Pressure altitude: the geopotential altitude, m, at which the standard has pressure `p`, Pa
+    /// (what a barometric altimeter set to 1013.25 hPa reads). Below 0.0037 Pa (86 km) the top
+    /// layer is extended; `p ≤ 0` gives `+∞`.
+    pub fn pressure_altitude(&self, p: f64) -> f64 {
+        if p <= 0.0 {
+            return f64::INFINITY;
+        }
+        let gmr = G0 * M0 / R_STAR;
+        let i = self
+            .base_pressure
+            .partition_point(|&b| b >= p)
+            .saturating_sub(1);
+        let (h_b, t_b, lapse) = LAYERS[i];
+        let ratio = p / self.base_pressure[i];
+        if lapse == 0.0 {
+            h_b - t_b / gmr * ratio.ln()
+        } else {
+            h_b + t_b / lapse * (ratio.powf(-lapse / gmr) - 1.0)
+        }
+    }
+
     /// The atmosphere at a geometric altitude above mean sea level, m.
     pub fn at(&self, z: f64) -> AtmosphereSample {
         let h = Self::geopotential(z);
