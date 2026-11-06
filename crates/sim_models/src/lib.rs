@@ -5,21 +5,29 @@
 //!
 //! Build step 1c adds the `EnvironmentPlugin` (flat and J2 gravity, USSA 1976 atmosphere,
 //! constant wind, ground-impact stop condition) and the shared coefficient table `AeroTable`.
-//! The domain plugins follow in steps 5a–5c (`docs/build-plan.md`).
+//! Step 5a adds Earth rotation to the environment (`EarthRotation`) and the `AeroBallisticsPlugin`
+//! (McCoy 6DOF projectile and 3DOF point mass). The other domain plugins follow in steps 5b–5c
+//! (`docs/build-plan.md`).
 
+pub mod ballistics;
 pub mod environment;
 pub mod tables;
 
 use sim_core::{Semver, SimAppBuilder};
 
+pub use ballistics::AeroBallisticsPlugin;
 pub use environment::EnvironmentPlugin;
 
 /// Version of the model library: the component types and semantics scenarios are written against
 /// (`model_library_version` in IB-01). Scenarios load when this version satisfies theirs by the
 /// caret rule; a new major ships migration functions in `sim_models::migrate`.
-pub const LIBRARY_VERSION: Semver = Semver::new(0, 1, 0);
+///
+/// 0.1.1 (step 5a) adds `EarthRotation`, `ProjectileAero`, `PointMassAero` and `AeroState`.
+pub const LIBRARY_VERSION: Semver = Semver::new(0, 1, 1);
 
 /// Add every model plugin of the library, in the fixed order both binaries use (G4).
 pub fn add_library(builder: &mut SimAppBuilder) -> &mut SimAppBuilder {
-    builder.add_plugin(EnvironmentPlugin)
+    builder
+        .add_plugin(EnvironmentPlugin)
+        .add_plugin(AeroBallisticsPlugin)
 }

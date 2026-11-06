@@ -6,13 +6,16 @@
 //!
 //! ```text
 //! p' = v
-//! v' = F/m + g(p, t)
-//! q' = ½ q ⊗ (0, ω)
+//! v' = F/m + g(p, t) − 2Ω × v − Ω × (Ω × p)
+//! q' = ½ q ⊗ (0, ω − q⁻¹ Ω q)
 //! ω' = I⁻¹ (M − ω × Iω)        (Euler's equations, gyroscopic term exact)
 //! ```
 //!
-//! with `F` (world frame) and `M` (body frame) summed over the force models in registration order.
-//! Quaternions are renormalised after every accepted step.
+//! with `F` (world frame) and `M` (body frame) summed over the force models in registration order,
+//! and `Ω` the world frame's rotation (`Environment::frame_rotation`, zero unless the frame turns
+//! with the Earth). `ω` (`body_rates`) is inertial, so a rotating frame changes only the
+//! translational terms and the attitude kinematics. Quaternions are renormalised after every
+//! accepted step.
 
 use bevy_ecs::prelude::*;
 use glam::{DQuat, DVec3};
@@ -181,6 +184,7 @@ struct BodyOde<'a> {
     wrenches: &'a mut [Wrench],
     tick_wrenches: &'a mut [Wrench],
     first_stage: bool,
+    frame_rotation: DVec3,
 }
 
 impl OdeSystem for BodyOde<'_> {
@@ -222,6 +226,7 @@ impl OdeSystem for BodyOde<'_> {
             states: self.states,
             env: self.env,
             bodies: self.bodies,
+            frame_rotation: self.frame_rotation,
         };
         for model in self.models {
             model.eval(&stage, self.wrenches);
@@ -235,13 +240,25 @@ impl OdeSystem for BodyOde<'_> {
             let range = e.offset..e.offset + e.dof.state_len();
             let (y, d) = (&y[range.clone()], &mut dydt[range]);
             let w = self.wrenches[i];
-            let accel = w.force * (1.0 / e.mass) + self.env[i].gravity;
+            let rotating = self.frame_rotation != DVec3::ZERO;
+            let mut accel = w.force * (1.0 / e.mass) + self.env[i].gravity;
+            if rotating {
+                let o = self.frame_rotation;
+                let s = &self.states[i];
+                accel += -2.0 * o.cross(s.velocity) - o.cross(o.cross(s.position));
+            }
             d[0..3].copy_from_slice(&y[3..6]);
             d[3..6].copy_from_slice(&accel.to_array());
             if e.dof == Dof::Six {
                 let (qw, qx, qy, qz) = (y[6], y[7], y[8], y[9]);
                 let omega = vec3(&y[10..13]);
-                let (wx, wy, wz) = (omega.x, omega.y, omega.z);
+                // Attitude moves with the rate relative to the world frame.
+                let rel = if rotating {
+                    omega - self.states[i].attitude.conjugate() * self.frame_rotation
+                } else {
+                    omega
+                };
+                let (wx, wy, wz) = (rel.x, rel.y, rel.z);
                 // q' = ½ q ⊗ (0, ω): scalar −q_v·ω, vector q_w ω + q_v × ω.
                 d[6] = -0.5 * (qx * wx + qy * wy + qz * wz);
                 d[7] = 0.5 * (qw * wx + (qy * wz - qz * wy));
@@ -293,15 +310,17 @@ pub(crate) fn integrate_system(world: &mut World) {
                 tick_wrenches,
                 ..
             } = d;
+            let environment = world.resource::<SimEnvironment>().0.as_ref();
             let mut ode = BodyOde {
                 bodies,
                 models,
-                environment: world.resource::<SimEnvironment>().0.as_ref(),
+                environment,
                 states,
                 env,
                 wrenches,
                 tick_wrenches,
                 first_stage: true,
+                frame_rotation: environment.frame_rotation(),
             };
             let integrator = integrator.as_mut().expect("Dynamics used before Tick 0");
             if ode.dim() == 0 {
@@ -332,7 +351,9 @@ pub(crate) fn integrate_system(world: &mut World) {
 }
 
 /// Mechanical energy of every body: translational and rotational kinetic energy plus potential
-/// energy from the environment's gravity potential. Returns the total, summed in `SimId` order.
+/// energy from the environment's gravity potential (and, in a rotating world frame, the centrifugal
+/// potential `−½ m |Ω × p|²`, so the total is the frame's Jacobi integral). Returns the total,
+/// summed in `SimId` order.
 pub(crate) fn body_energies(
     world: &World,
     bodies: &BodyTable,
@@ -340,6 +361,7 @@ pub(crate) fn body_energies(
     out: &mut [f64],
 ) -> f64 {
     let mut total = 0.0;
+    let o = environment.frame_rotation();
     for (i, e) in bodies.entries().iter().enumerate() {
         let state: BodyState = match e.dof {
             Dof::Six => (*world.get::<RigidBody6>(e.entity).expect("body")).into(),
@@ -347,6 +369,9 @@ pub(crate) fn body_energies(
         };
         let mut energy = 0.5 * e.mass * state.velocity.length_squared()
             + e.mass * environment.gravity_potential(state.position);
+        if o != DVec3::ZERO {
+            energy -= 0.5 * e.mass * o.cross(state.position).length_squared();
+        }
         if e.dof == Dof::Six {
             energy += 0.5 * state.body_rates.dot(e.inertia * state.body_rates);
         }

@@ -1,5 +1,6 @@
 //! Zero allocations per tick with the environment plugin (IB-08 rule 5): USSA 1976 and J2
-//! sampling, the ground-impact check, and a scenario spawned and resolved from a file each run.
+//! sampling, the ground-impact check, and a scenario spawned and resolved from a file each run;
+//! and with the aero-ballistics plugin (Mach tables, Earth rotation, `AeroState`).
 
 use std::sync::Arc;
 
@@ -90,4 +91,26 @@ fn telemetry_log_never_allocates() {
     assert_eq!(out.snapshots[5].body.pos, pos);
     let log = sim.world().resource::<sim_core::TelemetryLog>();
     assert_eq!(log.snapshots_dropped, last / 50 - 4);
+}
+
+#[test]
+fn ballistic_ticks_never_allocate() {
+    let text = include_str!("scenarios/shell.scn.ron");
+    let mut b = SimAppBuilder::new(SimConfig::new(1.0, 1));
+    sim_models::add_library(&mut b);
+    let registry = b.type_registry();
+    let scenario = Scenario::from_ron(text, &registry.read(), sim_models::LIBRARY_VERSION).unwrap();
+    b.set_config(scenario.config().clone());
+    let mut sim = b.build().unwrap();
+    sim.set_scenario(Arc::new(scenario)).unwrap();
+    for seed in [1, 2] {
+        sim.start(RunSeed::new(0, seed)).unwrap();
+        let n = sim_testkit::count_allocations(|| {
+            for _ in 0..500 {
+                assert!(sim.step().is_none(), "ended at tick {}", sim.tick());
+            }
+        });
+        assert_eq!(n, 0, "run {seed} allocated");
+        sim.reset();
+    }
 }

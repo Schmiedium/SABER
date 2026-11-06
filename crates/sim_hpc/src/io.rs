@@ -13,11 +13,12 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sim_schema::io::{CRASH_COUNTS_KEY, CrashWriter, RUN_IDS_KEY, Table, TableError, TableWriter};
 use sim_schema::{
     CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, EventRow, RangeSet, SnapshotRow, SummaryRow,
@@ -36,7 +37,7 @@ pub enum IoMsg {
 }
 
 /// Rows written to a part, by table.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartRows {
     /// Summary rows (= runs).
     pub summaries: u64,
@@ -49,7 +50,7 @@ pub struct PartRows {
 }
 
 /// A closed part.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartReport {
     /// Part number within the attempt.
     pub part: u32,
@@ -99,6 +100,9 @@ struct OpenPart {
     buf_snapshots: Vec<SnapshotRow>,
     run_ids: RangeSet,
     crash_counts: BTreeMap<u32, u32>,
+    status_counts: BTreeMap<String, u64>,
+    dump_counts: BTreeMap<u32, u32>,
+    manifest_hash: u64,
     rows: PartRows,
     opened: Instant,
 }
@@ -162,6 +166,9 @@ impl OpenPart {
             buf_snapshots: Vec::new(),
             run_ids: RangeSet::new(),
             crash_counts: BTreeMap::new(),
+            status_counts: BTreeMap::new(),
+            dump_counts: BTreeMap::new(),
+            manifest_hash: campaign.manifest.hash,
             rows: PartRows::default(),
             opened: Instant::now(),
         })
@@ -176,9 +183,17 @@ impl OpenPart {
                 .entry(rec.summary.param_set_id)
                 .or_insert(0) += 1;
         }
+        *self
+            .status_counts
+            .entry(format!("{:?}", rec.summary.status))
+            .or_insert(0) += 1;
         if let Some(dump) = &rec.dump {
             self.crashes.append(dump)?;
             self.rows.crash_dumps += 1;
+            *self
+                .dump_counts
+                .entry(rec.summary.param_set_id)
+                .or_insert(0) += 1;
         }
         self.rows.summaries += 1;
         self.rows.events += rec.events.len() as u64;
@@ -217,13 +232,23 @@ impl OpenPart {
             .map(|(k, v)| (k.to_string(), *v))
             .collect();
         let counts = serde_json::to_string(&counts).expect("counts serialise");
+        let statuses = serde_json::to_string(&self.status_counts).expect("counts serialise");
+        let dumps: BTreeMap<String, u32> = self
+            .dump_counts
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+        let dumps = serde_json::to_string(&dumps).expect("counts serialise");
         finish_file(self.events.finish(&[])?)?;
         finish_file(self.snapshots.finish(&[])?)?;
         finish_file(self.crashes.finish()?)?;
-        finish_file(
-            self.summaries
-                .finish(&[(RUN_IDS_KEY, run_ids), (CRASH_COUNTS_KEY, counts)])?,
-        )?;
+        finish_file(self.summaries.finish(&[
+            (RUN_IDS_KEY, run_ids),
+            (CRASH_COUNTS_KEY, counts),
+            (STATUS_COUNTS_KEY, statuses),
+            (DUMP_COUNTS_KEY, dumps),
+            (MANIFEST_HASH_KEY, format!("{:016x}", self.manifest_hash)),
+        ])?)?;
         let mut files = Vec::new();
         let mut names = Vec::new();
         for suffix in SUFFIXES {
@@ -349,7 +374,13 @@ pub struct StageReport {
 }
 
 /// Commit closed parts until `rx` closes, then write `_SUCCESS.{rank}` if every part committed.
-pub fn run_stager(settings: &StageSettings, rx: Receiver<ClosedPart>) -> StageReport {
+/// Each committed part is also pushed to `progress`, so the rank can report it before the stager
+/// finishes (`ChunkRequest.committed`, the heartbeat).
+pub fn run_stager(
+    settings: &StageSettings,
+    rx: Receiver<ClosedPart>,
+    progress: &Mutex<Vec<PartReport>>,
+) -> StageReport {
     let mut report = StageReport::default();
     for part in rx {
         match commit(settings, &part) {
@@ -362,6 +393,10 @@ pub fn run_stager(settings: &StageSettings, rx: Receiver<ClosedPart>) -> StageRe
                         let _ = std::fs::remove_file(f);
                     }
                 }
+                progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(part.report.clone());
                 report.committed.push(part.report);
             }
             Err(e) => report.failed.push((part.report, e)),

@@ -1,0 +1,142 @@
+{
+  "format": "saber-requirements-json",
+  "id": "PROJ-VERIFY",
+  "metric_columns": [
+    "metric_apogee_m",
+    "metric_flight_s"
+  ],
+  "ok": true,
+  "req_set_hash": "8c8e8a3bc8dc099c",
+  "requirement_columns": [
+    "req_R-apogee",
+    "req_R-lands",
+    "req_R-quick",
+    "req_R-quick-p95"
+  ],
+  "resolved_against_scene_hash": null,
+  "schema_version": "1.0.0",
+  "set": {
+    "header": {
+      "format": "requirements",
+      "magic": "SABER",
+      "schema_version": "1.0.0"
+    },
+    "id": "PROJ-VERIFY",
+    "metrics": {
+      "apogee_m": {
+        "reduce": "Max",
+        "signal": "entity(1).PointMass3.position.z"
+      },
+      "flight_s": {
+        "event": "ground_impact",
+        "reduce": "FirstTime"
+      }
+    },
+    "requirements": [
+      {
+        "campaign": "AllPass",
+        "early_stop_on_fail": false,
+        "id": "R-apogee",
+        "kind": {
+          "Threshold": {
+            "metric": "apogee_m",
+            "op": "Le",
+            "value": 300.0
+          }
+        },
+        "per_run": true,
+        "text": "Apogee at most 300 m",
+        "trace": [
+          "SYS-12"
+        ]
+      },
+      {
+        "campaign": {
+          "Quantile": {
+            "op": "Le",
+            "q": 0.5,
+            "value": 100.0
+          }
+        },
+        "early_stop_on_fail": false,
+        "id": "R-apogee-median",
+        "kind": {
+          "Threshold": {
+            "metric": "apogee_m",
+            "op": "Le",
+            "value": 100.0
+          }
+        },
+        "per_run": false,
+        "text": "Median apogee at most 100 m",
+        "trace": [
+          "SYS-12"
+        ]
+      },
+      {
+        "campaign": {
+          "Probability": {
+            "confidence": 0.9,
+            "min_p": 0.8
+          }
+        },
+        "early_stop_on_fail": false,
+        "id": "R-lands",
+        "kind": {
+          "Eventually": {
+            "event": "ground_impact",
+            "within_s": 20.0
+          }
+        },
+        "per_run": true,
+        "text": "Lands within 20 s with probability 0.8",
+        "trace": [
+          "SYS-13"
+        ]
+      },
+      {
+        "campaign": "AllPass",
+        "early_stop_on_fail": false,
+        "id": "R-quick",
+        "kind": {
+          "Threshold": {
+            "metric": "flight_s",
+            "op": "Le",
+            "value": 10.0
+          }
+        },
+        "per_run": true,
+        "text": "Every shot lands within 10 s",
+        "trace": [
+          "SYS-14"
+        ]
+      },
+      {
+        "campaign": {
+          "Probability": {
+            "confidence": 0.9,
+            "min_p": 0.95
+          }
+        },
+        "early_stop_on_fail": false,
+        "id": "R-quick-p95",
+        "kind": {
+          "Threshold": {
+            "metric": "flight_s",
+            "op": "Le",
+            "value": 10.0
+          }
+        },
+        "per_run": true,
+        "text": "Lands within 10 s with probability 0.95",
+        "trace": [
+          "SYS-14",
+          "SYS-15"
+        ]
+      }
+    ],
+    "scenario_hint": "projectile.scn.ron",
+    "version": "0.1.0"
+  },
+  "version": "0.1.0"
+}

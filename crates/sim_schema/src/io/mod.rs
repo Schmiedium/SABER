@@ -32,8 +32,20 @@ pub const HEADER_KEY: &str = "saber.header";
 pub const RUN_IDS_KEY: &str = "saber.run_ids";
 /// Summaries footer key: crash counts per `param_set_id` as JSON `{"id": count}` (IB-07).
 pub const CRASH_COUNTS_KEY: &str = "saber.crash_counts";
+/// Summaries footer key: the part's runs by `SimStatus` name as JSON `{"Terminated": count}`
+/// (IB-07, step 4b), so resume restores the crash policy's counts from footers alone.
+pub const STATUS_COUNTS_KEY: &str = "saber.status_counts";
+/// Summaries footer key: crash dumps kept in the part per `param_set_id` as JSON `{"id": count}`
+/// (IB-07, step 4b), so resume restores the campaign-wide dump quota.
+pub const DUMP_COUNTS_KEY: &str = "saber.dump_counts";
+/// Summaries footer key: the hash of the sweep manifest the part ran, as 16 hex digits (IB-07,
+/// step 4b); resume refuses parts of another manifest.
+pub const MANIFEST_HASH_KEY: &str = "saber.manifest_hash";
 /// Manifest footer key: the sampler (method, n, seed) as JSON (IB-02).
 pub const SAMPLER_KEY: &str = "saber.sampler";
+/// `verdicts.parquet` footer: how `saber.verify` judged (JSON: crash handling, scope, coverage, and
+/// per requirement the upper bound, counterexample runs and runs needed; step 4c).
+pub const VERIFY_KEY: &str = "saber.verify";
 
 /// The type of a column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -668,12 +680,32 @@ pub struct TableFile {
     pub metadata: Vec<(String, String)>,
 }
 
+/// Read a SABER Parquet file held in memory (a manifest broadcast to every rank, IB-05).
+pub fn read_parquet_bytes(bytes: Vec<u8>, table: Table) -> Result<TableFile, TableError> {
+    read_parquet(bytes::Bytes::from(bytes), table)
+}
+
 /// Read a SABER Parquet file of a table, checking the header and the columns first.
 pub fn read_parquet<R: ChunkReader + 'static>(
     input: R,
     table: Table,
-) -> Result<TableFile, TableError> {
+) -> Result<TableFooter, TableError> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
+    let (header, dynamic, metadata) = check_footer(&builder, table)?;
+    Ok(TableFooter {
+        header,
+        dynamic,
+        rows: builder.metadata().file_metadata().num_rows().max(0) as u64,
+        metadata,
+    })
+}
+
+type Footer = (FileHeader, Vec<String>, Vec<(String, String)>);
+
+fn check_footer<R: ChunkReader + 'static>(
+    builder: &ParquetRecordBatchReaderBuilder<R>,
+    table: Table,
+) -> Result<Footer, TableError> {
     let kv: Vec<(String, String)> = builder
         .metadata()
         .file_metadata()
@@ -694,13 +726,28 @@ pub fn read_parquet<R: ChunkReader + 'static>(
     header
         .check(table.name(), table.schema_version())
         .map_err(TableError::Header)?;
-    let schema = builder.schema().clone();
-    let dynamic = table.check_schema(&schema)?;
-    let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
+    let dynamic = table.check_schema(builder.schema())?;
     let metadata = kv
         .into_iter()
         .filter(|(k, _)| k != HEADER_KEY && k != "ARROW:schema")
         .collect();
+    Ok((header, dynamic, metadata))
+}
+
+/// Read a SABER Parquet file held in memory (a manifest broadcast to every rank, IB-05).
+pub fn read_parquet_bytes(bytes: Vec<u8>, table: Table) -> Result<TableFile, TableError> {
+    read_parquet(bytes::Bytes::from(bytes), table)
+}
+
+/// Read a SABER Parquet file of a table, checking the header and the columns first.
+pub fn read_parquet<R: ChunkReader + 'static>(
+    input: R,
+    table: Table,
+) -> Result<TableFile, TableError> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
+    let (header, dynamic, metadata) = check_footer(&builder, table)?;
+    let schema = builder.schema().clone();
+    let batches = builder.build()?.collect::<Result<Vec<_>, _>>()?;
     Ok(TableFile {
         header,
         schema,

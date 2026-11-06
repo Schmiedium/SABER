@@ -105,21 +105,132 @@ pub struct Campaign {
     pub build_id: String,
 }
 
-impl Campaign {
-    /// Read a `campaign.toml` and run preflight.
-    pub fn load(path: &Path, library: Library) -> Result<Self, PreflightError> {
-        let config = CampaignConfig::read(path).map_err(PreflightError::Config)?;
+/// A campaign's input files as bytes: what rank 0 reads once and broadcasts (IB-05, G3), so no
+/// other rank reads the shared file system for them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sources {
+    /// The campaign file's directory; relative paths in it start here.
+    pub base: PathBuf,
+    /// `campaign.toml`.
+    pub campaign: Vec<u8>,
+    /// The scenario.
+    pub scene: Vec<u8>,
+    /// The requirement set, if the campaign names one.
+    pub requirements: Option<Vec<u8>>,
+    /// The sweep manifest.
+    pub manifest: Vec<u8>,
+}
+
+impl Sources {
+    /// Read `campaign.toml` and the files it names.
+    pub fn read(path: &Path) -> Result<Self, PreflightError> {
+        let campaign = std::fs::read(path).map_err(|e| {
+            PreflightError::Config(ConfigError::Read(format!("{}: {e}", path.display())))
+        })?;
         let base = path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        Self::from_config(config, base, library)
+        let config = parse_config(&campaign)?;
+        let scene_path = config.resolve(&base, &config.campaign.scene);
+        let scene = std::fs::read(&scene_path)
+            .map_err(|e| PreflightError::Scene(format!("{}: {e}", scene_path.display())))?;
+        let requirements =
+            match &config.campaign.requirements {
+                None => None,
+                Some(p) => {
+                    let p = config.resolve(&base, p);
+                    Some(std::fs::read(&p).map_err(|e| {
+                        PreflightError::Requirements(format!("{}: {e}", p.display()))
+                    })?)
+                }
+            };
+        let manifest_path = config.resolve(&base, &config.campaign.manifest);
+        let manifest = std::fs::read(&manifest_path).map_err(|e| {
+            PreflightError::Manifest(ManifestError::Read(format!(
+                "{}: {e}",
+                manifest_path.display()
+            )))
+        })?;
+        Ok(Self {
+            base,
+            campaign,
+            scene,
+            requirements,
+            manifest,
+        })
+    }
+}
+
+fn parse_config(bytes: &[u8]) -> Result<CampaignConfig, PreflightError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| PreflightError::Config(ConfigError::Read(format!("campaign.toml: {e}"))))?;
+    CampaignConfig::from_toml(text).map_err(PreflightError::Config)
+}
+
+fn utf8<'a>(bytes: &'a [u8], what: &str) -> Result<&'a str, String> {
+    std::str::from_utf8(bytes).map_err(|e| format!("{what} is not UTF-8: {e}"))
+}
+
+impl Campaign {
+    /// Read a `campaign.toml` and run preflight.
+    pub fn load(path: &Path, library: Library) -> Result<Self, PreflightError> {
+        Self::from_sources(&Sources::read(path)?, library)
     }
 
-    /// Preflight a parsed campaign file whose relative paths start at `base`.
+    /// Preflight a parsed campaign file whose relative paths start at `base`, reading the files it
+    /// names.
     pub fn from_config(
         config: CampaignConfig,
         base: PathBuf,
+        library: Library,
+    ) -> Result<Self, PreflightError> {
+        let read = |p: &Path, e: fn(String) -> PreflightError| {
+            std::fs::read(p).map_err(|err| e(format!("{}: {err}", p.display())))
+        };
+        let scene = read(
+            &config.resolve(&base, &config.campaign.scene),
+            PreflightError::Scene,
+        )?;
+        let requirements = match &config.campaign.requirements {
+            None => None,
+            Some(p) => Some(read(
+                &config.resolve(&base, p),
+                PreflightError::Requirements,
+            )?),
+        };
+        let manifest = read(&config.resolve(&base, &config.campaign.manifest), |m| {
+            PreflightError::Manifest(ManifestError::Read(m))
+        })?;
+        Self::build(
+            config,
+            base,
+            &scene,
+            requirements.as_deref(),
+            manifest,
+            library,
+        )
+    }
+
+    /// Preflight a campaign from its files' bytes (what every rank does with rank 0's broadcast).
+    pub fn from_sources(sources: &Sources, library: Library) -> Result<Self, PreflightError> {
+        let config = parse_config(&sources.campaign)?;
+        Self::build(
+            config,
+            sources.base.clone(),
+            &sources.scene,
+            sources.requirements.as_deref(),
+            sources.manifest.clone(),
+            library,
+        )
+    }
+
+    fn build(
+        config: CampaignConfig,
+        base: PathBuf,
+        scene: &[u8],
+        requirements: Option<&[u8]>,
+        manifest: Vec<u8>,
         library: Library,
     ) -> Result<Self, PreflightError> {
         let found = build_id();
@@ -133,30 +244,38 @@ impl Campaign {
         }
         let mut warnings = Vec::new();
 
-        let scene_path = config.resolve(&base, &config.campaign.scene);
-        let text = std::fs::read_to_string(&scene_path)
-            .map_err(|e| PreflightError::Scene(format!("{}: {e}", scene_path.display())))?;
+        let scene_name = config.campaign.scene.display().to_string();
+        let text = utf8(scene, &scene_name).map_err(PreflightError::Scene)?;
         let mut b = SimAppBuilder::new(sim_core::SimConfig::new(1.0, 1));
         library(&mut b);
         let registry = b.type_registry();
-        let scenario = Scenario::from_ron(&text, &registry.read(), sim_models::LIBRARY_VERSION)
+        let scenario = Scenario::from_ron(text, &registry.read(), sim_models::LIBRARY_VERSION)
             .map(Arc::new)
-            .map_err(|e| PreflightError::Scene(format!("{}: {e}", scene_path.display())))?;
+            .map_err(|e| PreflightError::Scene(format!("{scene_name}: {e}")))?;
 
-        let requirements = match &config.campaign.requirements {
-            None => None,
-            Some(p) => {
-                let p = config.resolve(&base, p);
-                let text = std::fs::read_to_string(&p)
-                    .map_err(|e| PreflightError::Requirements(format!("{}: {e}", p.display())))?;
-                let set = RequirementSet::from_ron(&text)
-                    .map_err(|e| PreflightError::Requirements(format!("{}: {e}", p.display())))?;
+        let requirements = match (requirements, &config.campaign.requirements) {
+            (Some(bytes), Some(p)) => {
+                let name = p.display().to_string();
+                let text = utf8(bytes, &name).map_err(PreflightError::Requirements)?;
+                let set = RequirementSet::from_ron(text)
+                    .map_err(|e| PreflightError::Requirements(format!("{name}: {e}")))?;
                 Some(Arc::new(set))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(PreflightError::Requirements(
+                    "the requirement set and campaign.requirements disagree".to_owned(),
+                ));
             }
         };
 
-        let manifest_path = config.resolve(&base, &config.campaign.manifest);
-        let manifest = Manifest::read(&manifest_path).map_err(PreflightError::Manifest)?;
+        let manifest_name = config.campaign.manifest.display().to_string();
+        let manifest = Manifest::from_bytes(manifest).map_err(|e| {
+            PreflightError::Manifest(match e {
+                ManifestError::Read(m) => ManifestError::Read(format!("{manifest_name}: {m}")),
+                e => e,
+            })
+        })?;
         for k in manifest
             .check_against(&scenario)
             .map_err(PreflightError::Manifest)?

@@ -5,24 +5,28 @@ hypercube and writes the manifest; `saber.campaign` lays out the directory, pref
 it with `sim_hpc --local`; the committed summaries come back through `saber.schema` and are checked
 against the vacuum-parabola answers (apogee `vz^2 / 2g`, flight time `2 vz / g`). The same manifest
 on 1 and 3 threads gives the same `final_state_hash` per run (R3 from Python), and preflight's
-refusals reach Python as statuses.
+refusals reach Python as statuses. Step 4c's exit test judges a campaign with `saber.verify` and
+checks `verdicts.parquet` against verdicts worked out by hand from the same parabola.
 
 Needs pyarrow and the binaries (`SABER_SIM_HPC`, `SABER_CLI` or `PATH`). Without them the tests
 skip, unless `SABER_REQUIRE_BINARIES=1` (set in CI's end-to-end job), where they fail instead.
 """
 
+import math
 import os
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from saber import _tools, campaign, schema, sweep
+from saber import _tools, analyze, campaign, report, schema, sweep, verify
 from saber.campaign import CampaignError, Execution, Status
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENE = ROOT / "crates" / "sim_models" / "tests" / "scenarios" / "projectile.scn.ron"
 REQ = ROOT / "crates" / "saber_cli" / "tests" / "data" / "projectile.req.ron"
+VERIFY_REQ = Path(__file__).resolve().parent / "data" / "projectile_verify.req.ron"
 G = 9.80665
 
 
@@ -69,7 +73,9 @@ def test_tiny_campaign_end_to_end(tmp_path, scene):
 
     run = campaign.run_local(toml, threads=2).check()
     assert run.report["runs"] == 18 and run.report["crashes"] == 0
-    assert run.manifest["status"] == "complete" and run.manifest["missing"] == []
+    assert run.manifest["status"] == "complete" and run.manifest["missing"] == [] and run.abort is None
+    hb = run.heartbeat()
+    assert (hb.state, hb.runs_total, hb.runs_committed) == ("Done", 18, 18) and not hb.stale()
     t = run.read("summaries").sort_by("run_id")
     assert t.column("run_id").to_pylist() == list(range(18))
     assert set(t.column("campaign_id").to_pylist()) == {"proj-e2e"}
@@ -116,4 +122,25 @@ def test_refusals_reach_python_as_statuses(tmp_path, scene):
     run = campaign.run_local(make(tmp_path, "stale-run", stale))
     assert run.status is Status.INVALID and not run.ok and run.files("summaries") == []
     with pytest.raises(CampaignError, match="regenerate"):
+        run.check()
+
+
+def test_a_crash_storm_is_aborted(tmp_path, scene):
+    # An energy bound that every muzzle speed above about 128 m/s breaks at once.
+    stormy = tmp_path / "stormy.scn.ron"
+    stormy.write_text(SCENE.read_text(encoding="utf-8").replace(
+        "at_max_ticks: Timeout,", "at_max_ticks: Timeout,\n        watchdog: (energy_max_j: Some(400.0)),"))
+    params = sweep.scene_params(stormy)
+    s = sweep.generate(params, {"muzzle_vz": sweep.Uniform(140, 200)}, sweep.MonteCarlo(10), replicates=10, seed=5)
+    toml = campaign.prepare(tmp_path / "storm", id="proj-storm", scene=stormy, sweep=s, scratch_dir="scratch",
+                            execution=Execution(chunk_size=4),
+                            crash_policy=campaign.CrashPolicy(abort_min_runs=8, abort_crash_fraction=0.5))
+    run = campaign.run_local(toml, threads=2)
+    assert run.status is Status.ABORTED, run.stderr
+    assert run.abort["reason"] == "CrashStorm"
+    assert run.heartbeat().state == "Failed"
+    t = run.read("summaries")
+    assert 0 < t.num_rows < 100
+    assert set(schema.enum_name("SimStatus", v) for v in t.column("status").to_pylist()) == {"CrashedEnergy"}
+    with pytest.raises(CampaignError, match="crash policy"):
         run.check()

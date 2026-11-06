@@ -20,10 +20,11 @@ arrow-array = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 bincode = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [features]
 # Arrow schemas, Parquet and crash-dump I/O. Off by default so the kernel never builds Arrow.
-io = ["dep:arrow-schema", "dep:arrow-array", "dep:parquet", "dep:zstd", "dep:bincode"]
+io = ["dep:arrow-schema", "dep:arrow-array", "dep:parquet", "dep:zstd", "dep:bincode", "dep:bytes"]
 
 [[bin]]
 name = "export-schemas"

@@ -6,7 +6,10 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{CRASH_COUNTS_KEY, HEADER_KEY, RUN_IDS_KEY, SAMPLER_KEY, Table};
+use super::{
+    CRASH_COUNTS_KEY, DUMP_COUNTS_KEY, HEADER_KEY, MANIFEST_HASH_KEY, RUN_IDS_KEY, SAMPLER_KEY,
+    STATUS_COUNTS_KEY, Table,
+};
 use crate::{
     CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashKind, DiskEnum, IntegratorKind, MAGIC, REQ_FORMAT,
     REQ_SCHEMA_VERSION, SCENE_FORMAT, SCENE_SCHEMA_VERSION, SimStatus, Verdict,
@@ -71,7 +74,11 @@ pub fn formats_json() -> Value {
             "header": HEADER_KEY,
             "run_ids": RUN_IDS_KEY,
             "crash_counts": CRASH_COUNTS_KEY,
+            "status_counts": STATUS_COUNTS_KEY,
+            "dump_counts": DUMP_COUNTS_KEY,
+            "manifest_hash": MANIFEST_HASH_KEY,
             "sampler": SAMPLER_KEY,
+            "verify": VERIFY_KEY,
         },
         "schema_versions": versions,
     })

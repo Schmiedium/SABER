@@ -49,6 +49,11 @@ v0.16 (2026-11-02, build step 3c) records `saber.sweep` and the local half of `s
 the samplers, the replicate-seed rule and the sampler footer (IB-02), `campaign.toml` written from Python with
 `sim_hpc`'s defaults, and exit codes mapped to campaign statuses (IB-04). Preflight now also refuses a manifest
 drawn for another scene (`ManifestError::SceneMismatch`, IB-02), the check seq §4 gave the login node.
+v0.17 (2026-11-03, build step 4a) records MPI dispatch and the crash policy as built (§5.6): one rank loop over a
+`Transport` (MPI behind the `mpi` feature, one rank for `--local`, threads for tests), the init broadcast with
+BLAKE3 checks and the `build_id` gather, the message rules that leave no message unread (IB-05), the crash-storm
+and setup-error aborts with exit 6, and the `campaign_status.json` heartbeat with `output.heartbeat_s` (IB-15,
+IB-04). `Timeout` counts toward the crash-storm rule, the recommended answer to O8, pending Alex.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -393,8 +398,52 @@ is a `SetupError`. It installs the kernel's `Environment` for the world frame (�
 at or below that altitude; the plugin lists the watched bodies at Tick 0, so a stop added during a run is not
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
-`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0) is the version
-scenarios check against (IB-01).
+`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
+0.1.1 from step 5a) is the version scenarios check against (IB-01).
+
+**As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
+`SetupError` names the body that breaks a rule:
+
+- `ProjectileAero { diameter, cd0, cd2, cla, cla2, cma, cma2, cmq, clp, cnpa, cmpa, cl0 }` on a `RigidBody6`
+  whose body `x` axis is the axis of symmetry, nose forward. Each coefficient is a `Coef`: `Constant(f64)` or
+  `Mach(AeroTable)` with one axis named `mach`, looked up at the Mach number of the air-relative velocity.
+  Every coefficient defaults to zero, so a scenario names only those it uses.
+- `PointMassAero { diameter, cd0 }` on a `PointMass3`: drag only (the 3DOF option of D2).
+
+With `v_b = q⁻¹(V − wind)`, `v = |v_b|`, `x̂` the body axis, `q_s = ½ρ·πd²/4`, `sin²δ = (v_y² + v_z²)/v²` and
+`(p, q, r)` the body rates relative to the world frame, the force and moment in body axes are:
+
+| Term | Body-axis form | Sign convention |
+|---|---|---|
+| Drag | `−q_s (C_D0 + C_D2 sin²δ) v v_b` | |
+| Lift | `q_s (C_Lα + C_Lα2 sin²δ) [v_b × (x̂ × v_b)]` | toward the nose for `C_Lα > 0` |
+| Magnus force | `q_s d p C_Npα (x̂ × v_b)` | |
+| Overturning moment | `q_s d v (C_Mα + C_Mα2 sin²δ) (v_b × x̂)` | `C_Mα > 0` is statically unstable, as in McCoy |
+| Pitch damping | `q_s d² v C_Mq (0, q, r)` | `C_Mq` stands for `C_Mq + C_Mα̇` |
+| Spin damping | `q_s d² v C_lp p x̂` | |
+| Magnus moment | `q_s d² p C_Mpα [x̂ × (v_b × x̂)]` | |
+| Roll drive (fin cant) | `q_s d v² C_l0 x̂` | |
+
+Linearised for small yaw, and dropping the Magnus force and products of small terms as McCoy does, these give
+his yaw equation `ξ'' + (H − iP)ξ' − (M + iPT)ξ = 0` per calibre with his `H`, `P`, `M` and `T` (verification
+§6.2). A body carries one of the two components; either on a body of the other kind
+or on an entity without a body, a non-finite coefficient, a non-positive diameter or a table that is invalid
+or not over `mach` is a `SetupError`. The force model copies each body's coefficients at Tick 0, after the
+Resolver, so a coefficient can be swept (`ProjectileAero.cla.0` targets a `Constant`). It skips a body with no
+air or no airspeed. The plugin inserts `AeroState { mach, dynamic_pressure, total_yaw, spin_rate,
+gyro_stability }` on each such body at Tick 0 and updates it in `SimSet::Telemetry` from a list built at Tick 0,
+so metrics can read it (`entity(1).AeroState.mach`). `gyro_stability` is McCoy's
+`S_g = I_x² p² / (2ρ I_y S d v² C_Mα)`. `AeroState` is run output: the plugin overwrites it at every Tick 0, so a
+scenario file need not carry it.
+
+`EnvironmentPlugin` also reads an optional `EarthRotation` (`None`, `Ecef`, or `Local { latitude_deg }` for an
+ENU or NED frame whose origin is at that geodetic latitude). The frame then turns at the WGS 84 rate
+`ω_E = 7.292115e-5 rad/s`: about `+z` in ECEF, `(0, cos φ, sin φ)` in ENU, `(cos φ, 0, −sin φ)` in NED. The
+kernel adds the Coriolis and centrifugal terms (§10.3). Without the component no frame rotates, ECEF
+included, so scenarios written before step 5a run unchanged. `Ecef` with J2 gravity gives WGS 84 normal
+gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
+origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
+origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
 
 `Controller` boundary (in-process, deterministic):
 
@@ -562,6 +611,36 @@ the kernel's `RunOutput`, the `RunVerdictRow` and the manifest row; `SetupError`
 statistics and `Inconclusive` verdicts. The campaign crash policy (storm abort) is rank 0's and arrives with 4a;
 SIGTERM drain and `--resume` with 4b.
 
+**As built (step 4a), MPI dispatch and the crash policy.** Every rank, `--local` included, runs one loop
+(`sim_hpc::rank`) over a `Transport` trait (`broadcast`, tagged `send`, `try_recv`, `try_recv_tag`, `recv_tag`):
+`Mpi` (rsmpi 0.8 with `MPI_THREAD_FUNNELED`, behind the crate's `mpi` feature, so the default build needs no MPI
+library), `Single` (one rank, `--local`) and `Threads` (ranks as threads over channels, for the protocol tests).
+`start` is the init phase: rank 0 reads the four files once (`Sources`) and preflights them, then broadcasts an
+`Init` header and each file's bytes; rank N checks each file's length and BLAKE3 and preflights the same bytes
+(`Campaign::from_sources`), and rank 0 gathers `ReadyAck { rank, threads, build_id, error }` and broadcasts one
+verdict, so a refusal anywhere (rank 0's preflight, a damaged broadcast, mixed builds) ends every rank with the
+same exit code before any run. `run_rank` is the rest. Each rank's worker threads take runs one at a time from a
+local queue of assigned chunks; the main thread asks for the next chunk once no more runs are queued than there are
+threads (one request ahead), and its `ChunkRequest` carries the deltas: finished chunks, a `Tally` (runs, setup
+errors, runs by `SimStatus`, crashes and kept dumps by `param_set_id`, verdict counts per requirement) and the runs
+in parts the stager committed since. Rank 0's main thread serves requests from a `Dispatcher` (plain state: the
+chunk order, the campaign totals, which chunk went to which rank) and its own requests without a message; with
+several ranks it runs one fewer worker thread. The `Quota` view is the campaign-wide counts from the last
+`ChunkAssign` (for the parameter sets the rank reported, and every set whose quota is used up) plus the dumps kept
+since. The crash policy runs on every request: more than `abort_max_setup_errors` `SetupError` runs trip
+`SetupErrors`; at least `abort_min_runs` finished runs of which more than `abort_crash_fraction` crashed or timed
+out trip `CrashStorm` (`Timeout` counts, O8). On a trip the dispatcher answers every further request with
+`Terminate`, `Abort` reaches the ranks still waiting for work, every rank stops taking runs (a run in progress
+finishes; the 1024-tick in-run check is not built) and commits its open part, so the evidence is kept. Every rank
+then sends a `NodeReport` (its full tally, parts, failed parts, finished chunks, kept dumps), rank 0 writes
+`_MANIFEST.json` (status `complete`, `partial`, `io_failed` or `aborted`, the abort reason and numbers, the crash
+histogram by `SimStatus` and `param_set_id`, the `run_id`s of kept dumps, and per rank the chunks assigned and
+done) and broadcasts the exit code, which every rank returns: `6` aborted, then `2` (a rank's output paths do not
+resolve), `4` (a write or stage-out failed), `5` (runs missing), `0`. A rank whose output fails asks for no more
+work (`done` on its request); its chunks are not re-queued, they are listed as missing for `--resume` (4b). Rank 0
+writes `campaign_status.json` (IB-15) when the run starts, every `output.heartbeat_s`, and at the end from the
+ranks' final reports.
+
 ### 5.7 `saber` Python package
 
 ```mermaid
@@ -593,7 +672,41 @@ default spelled out; `tests/shared/campaign/defaults.toml` is that output, check
 directory (the scene and requirement set copied in, the manifest, `campaign.toml`), `preflight` runs
 `sim_hpc --validate-only --json` and `run_local` runs `sim_hpc --local --json`, both mapping exit codes to a
 `Status` (IB-04); `LocalRun` reads `_MANIFEST.json` and the committed parts. Binaries are found from an argument,
-`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` follow with 4b.
+`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` came with 4b
+(IB-04).
+
+**As built (step 4c), `saber.analyze`, `saber.verify` and `saber.report`.** `analyze.open_campaign` takes a
+`campaign.toml` or a shared output directory. A part is committed when its `*_summaries.parquet` has its final
+name; `Campaign.summaries()` reads those of every attempt (ordered by attempt, rank, part) as one pyarrow table
+sorted by `run_id`, keeps a re-queued `run_id` once and raises `AnalysisError` when two copies' `final_state_hash`
+differ. `coverage()` gives the runs in the sweep, those committed and the missing `run_id` ranges (what
+`--resume` would run). `uncertainty` gives per `param_set_id` its parameters, runs by outcome and each metric's
+mean, standard deviation and 5th, 50th and 95th percentiles over finished runs; `crash_regions` the parameter sets
+with crashes or timeouts, worst first. These use pyarrow and numpy: the files are plain Parquet, so DuckDB and
+Polars read them as they are, but neither is a dependency. `verify.verify(campaign, requirements=None, *,
+crashes="fail", by_param_set=False, envelope=None, recompute=False)` reads the campaign's archived requirement set
+through `saber-cli validate --emit-req-json` unless given one, refuses a set whose `req_set_hash` differs from the
+one the campaign ran with (unless `recompute=True`, which re-evaluates `Threshold` requirements from their metric
+columns and leaves the other kinds `Inconclusive`) and refuses an aborted campaign (`CampaignError`, `ABORTED`).
+Each run counts by status: `Completed` and `Terminated` by their `req_<id>` verdict, `Timeout` as `Inconclusive`
+(D20), the crash statuses as failures (seq §11's default) or, with `crashes="inconclusive"`, as inconclusive, and
+`SetupError` not at all (reported). The rules (§8.2) never let inconclusive runs make a verdict wrong, only
+`Inconclusive`: `AllPass` fails on any failure and passes only with no inconclusive run; `Probability` passes when
+the one-sided Clopper–Pearson lower bound, with the inconclusive runs as failures, reaches `min_p`, fails when the
+upper bound with them as passes is below it, and otherwise reports how many all-passing runs would show it;
+`Quantile` takes the empirical quantile (inverted CDF) with the unknown values on the failing side for `Pass` and
+on the passing side for `Fail`. Rules judge every counted run together by default; `by_param_set=True` judges
+each parameter set on its own and reports the worst (O9). `envelope` keeps runs whose parameters lie in given
+ranges. A partial campaign is judged on what committed and says so. The bounds come from a regularized incomplete
+beta in the standard library (no scipy), checked against scipy and the binomial tails in tests.
+`Verification.write()` writes `verdicts.parquet` next to the parts, with the campaign's hashes in its header and
+the policy, counterexamples, upper bounds and warnings in its `saber.verify` footer (IB-12).
+`report.write_report(campaign, verification)` writes `report.html` beside it (IB-12), and
+`python -m saber.verify CAMPAIGN [--req R] [--crashes inconclusive] [--by-param-set] [--envelope KEY=LO:HI]
+[--recompute] [--check]` does all three and prints the verdicts (exit 0, or 1 with `--check` unless every
+requirement passed; 2 a set that does not fit or an unreadable file; 6 an aborted campaign, whose report is still
+written; 64 usage). Sobol sensitivity indices (seq §10) and the top-up manifest for straddling parameter sets
+(seq §11) are not built yet.
 
 ### 5.8 `sim_query` — campaign query engine (new, D10)
 
@@ -1123,6 +1236,16 @@ a cut-short run. At a natural end (`Completed`, or `Terminated` by a stop condit
 `Never` and `Envelope` pass, `Eventually` fails, a `Custom` check answers `at_end`. The `Threshold` rule depends only
 on the reducer, the comparison and the metric value, so `saber.verify` can recompute it from the summary columns.
 
+As built (step 4c): the per-run columns stay as above (a crashed run's `req_*` are `Inconclusive`); the campaign
+step decides what a status counts as. `Timeout` is `Inconclusive` (D20); the crash statuses count as failures by
+default (seq §11) or as inconclusive with `crashes="inconclusive"`; `SetupError` runs are excluded. The diagram's
+"inconclusive fraction ≤ policy" check is replaced by a rule with no threshold to tune: an inconclusive run counts
+against whichever verdict it could overturn. `AllPass` is `Pass` only with every counted run passing; `Probability`
+is `Pass` when the Clopper–Pearson lower bound with inconclusive runs as failures reaches `min_p`, `Fail` when the
+upper bound with them as passes is below it, else `Inconclusive`; `Quantile` puts unknown values on the failing
+side for `Pass` and on the passing side for `Fail`. So a verdict is `Pass` or `Fail` only if every way the
+inconclusive runs could have come out gives it (§5.7).
+
 ---
 
 ## 9. Interface boundary catalogue
@@ -1184,7 +1307,7 @@ flowchart LR
 | | |
 |---|---|
 | Contract | §8.1. Signals addressed as `entity(SimId).Component.field` or `event(Name)`; metrics named `metric_key`. |
-| Owner | `sim_verify`. Python reads the compiled JSON form produced by `sim_hpc --validate-only --emit-req-json` so it never parses RON. |
+| Owner | `sim_verify`. Python reads the compiled JSON form produced by `saber-cli validate --emit-req-json` so it never parses RON. |
 | Validation | Every signal path resolves against the scenario; every metric referenced by a requirement exists; units consistent; IDs unique. |
 | Errors | `ReqError::{UnresolvedSignal, UnknownMetric, DuplicateId, TypeMismatch}` → blocking in Studio and preflight. |
 | As built (step 2) | `RequirementSet::from_ron` checks the header, ids, metric references, reducer against source (signal or event), condition shape, numbers and campaign rules; `VerifyState::compile` resolves signals, events and custom checks against a scenario's Tick-0 World. `ReqError::{Parse{line, col}, BadHeader, VersionMismatch, DuplicateId, UnknownMetric, BadMetric, BadRequirement, UnresolvedSignal, TypeMismatch, UnknownCheck}`. `saber-cli validate <set.req.ron> [--scenario <scn>] --emit-req-json` prints the compiled JSON form (`format: "saber-requirements-json"`, `req_set_hash`, `metric_columns`, `requirement_columns`, the scene hash it was resolved against, and the set itself; JSON objects are unordered, so the column lists carry the order); `sim_hpc --validate-only` reuses it with step 3b. Unit checks wait for `ModelMeta.signals` to carry units. |
@@ -1220,6 +1343,7 @@ auto_resume           = 3        # resubmit up to N times (PBS depend=afterany /
 [output]
 scratch_dir = "${TMPDIR}"
 shared_out = "campaigns/drn-hover-a/out"
+heartbeat_s = 15                 # campaign_status.json (IB-15)
 ```
 
 | | |
@@ -1230,6 +1354,7 @@ shared_out = "campaigns/drn-hover-a/out"
 | Errors | Exit codes: `0` ok (or nothing left to resume), `2` config/validation error (incl. resume mismatch), `3` build_id mismatch, `4` I/O / stage-out failure (some parts not committed), `5` partial (drained before walltime or runs missing; resumable), `6` aborted by crash policy (`CrashStorm` or `SetupErrors`; evidence committed), `70` internal. Python maps exit codes to campaign status. `auto_resume` resubmits after `4`, `5` or a killed job, and stops on `2`, `3` or `6`, or when the last attempt made no progress. |
 | As built (step 3b) | `sim_hpc::CampaignConfig` reads every key above (unknown keys are errors) plus `execution.max_events_per_run` (default 4096) and `execution.threads` (default: available parallelism); paths are relative to the file, and `scratch_dir`/`shared_out` expand `${VAR}` (`${TMPDIR}` falls back to the system temp directory). `flight_recorder_ticks` overrides the scenario's `recorder_frames` (not hashed). `snapshot_policy.adaptive` is accepted with a warning and sampling stays at `base_every`. CLI: `--local` and `--validate-only` (`--json` for both, `--threads N`); without `--local` the binary exits `64` until MPI lands (4a), and `--resume` / `--override-crash-policy` exit `64` until 4b. Exit `64` is a usage error. |
 | As built (step 3c) | `saber.campaign` maps exit codes to statuses: `0` completed, `2` invalid, `3` build mismatch, `4` I/O error, `5` partial, `6` aborted, `64` usage, `70` (or any other code) internal, and a signal (a negative code from Python, or 129–159 from a shell) killed; `4`, `5` and killed are resumable. With `--json`, `sim_hpc` prints one object: on a refusal `{ok: false, exit, kind, error}` with `kind` one of `Config`, `Scene`, `Requirements`, `Manifest`, `SceneMismatch`, `BuildMismatch`; `--validate-only` adds `req_set_hash` and `param_keys` to step 3b's fields; `--local` adds `campaign_id` and `threads`. |
+| As built (step 4a) | Without `--local` or `--validate-only`, `sim_hpc --campaign c.toml` is one rank of an MPI job (`mpiexec -n N sim_hpc --campaign c.toml [--threads N] [--json]`); a binary built without the `mpi` feature refuses that with `64`. Every rank exits with the code rank 0 broadcasts; only rank 0 prints. `--json` adds `ranks`, `abort` (`{reason, detail}`), an `error` sentence for an abort, and `status` (the heartbeat's path). New key `output.heartbeat_s` (default 15, positive, at most a day), mirrored by `saber.campaign.Output`. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
 
@@ -1248,6 +1373,29 @@ requests **ahead** (keeps one chunk queued locally) to hide latency and `Iprobe`
 its pool works; Rank 0 records `chunk_id → rank` so a lost rank's chunks can be listed in `_MANIFEST.json`.
 No extra MPI messages are needed for the crash policy or checkpointing in the normal case: everything
 piggybacks on `ChunkRequest`/`ChunkAssign`.
+
+**As built (step 4a)** (`sim_hpc::protocol`, `sim_hpc::transport`). Messages are bincode (serde, standard
+config); every rank runs the same binary, and `Init` carries `PROTOCOL = 1`. Tags: `1 RequestWork`,
+`2 AssignWork`, `3 Terminate`, `4 Abort`, `5 Gather`, `6 Report`. Byte messages are received with a matched probe,
+broadcasts send the length and then pieces of at most 1 GiB.
+
+| Phase | Op | Payload as built |
+|---|---|---|
+| Init | `Bcast` | `Init::Go { protocol, attempt, base, blobs: [BlobHeader { kind, len, blake3 }] }` then one broadcast per blob (campaign, scene, requirements if any, manifest), or `Init::Refused(Refusal { exit, kind, error })` when rank 0's preflight fails (then nothing follows) |
+| Init | `Gather` + `Bcast` | `ReadyAck { rank, threads, build_id, error: Option<Refusal> }`; rank 0 broadcasts `Option<Refusal>`: the first rank's error (`BroadcastHash` exits `70`), or `BuildMismatch` (`3`) when two `build_id`s differ |
+| Work | `RequestWork` | `ChunkRequest { rank, completed: [chunk_id], delta: Tally, committed: RangeSet, done }`; `Tally { runs, setup_errors, status_counts, crashes_by_param_set, dumps_by_param_set, req_tallies }` |
+| Work | `AssignWork` | `ChunkAssign { chunk_id, start, end, global_dumps }`, a reply |
+| Drain | `Terminate` | `Terminate { abort: Option<AbortMsg> }`, a reply and the rank's last: manifest exhausted, the rank said `done`, or the policy tripped |
+| Fatal | `Abort` | `AbortMsg { reason, detail }`, unsolicited, to the ranks still waiting for work when the policy trips |
+| Finish | `Report` + `Bcast` | `NodeReport { rank, threads, exit, tally, setup_messages, committed, failed, io_error, chunk_ids, dump_run_ids }`, then `Final { exit }` from rank 0 |
+
+No message is left unread at `MPI_Finalize`: every request is answered exactly once, by `AssignWork` or by
+`Terminate` (the last); `Abort` goes at most once and only to a rank not yet sent `Terminate`, and rank 0 sends it
+before any later reply, so a rank that sees `Abort` while a request is out waits for that reply; a rank's
+`NodeReport` is its last message, sent once its last request is answered, and rank 0 keeps serving requests until
+every report is in. A first broadcast that does not decode can only come from another build, and the collectives
+after it cannot be matched, so that rank panics (ending the MPI job) rather than wait. Re-queuing a failed rank's
+chunks to healthy ranks is not built; they are missing in `_MANIFEST.json` and `--resume` (4b) runs them.
 
 ### IB-06 · Worker ↔ IO.Mux channel (in-process, per node)
 
@@ -1329,6 +1477,16 @@ for now; kept current per commit with 4a) holds `campaign_id`, `build_id`, `scen
 crash, dump and setup-error counts, and per attempt and rank the committed parts (files, run ranges, crash
 counts, rows per table) and the failed ones.
 
+**As built (step 4b).** The summaries footer adds `saber.status_counts` (`{"SimStatus name": n}`),
+`saber.dump_counts` (`{"param_set_id": kept dumps}`) and `saber.manifest_hash` (16 hex digits), so resume restores
+the campaign's counts from footers alone (`sim_schema::io::read_parquet_footer` reads a footer without its rows).
+`_MANIFEST.json` is written at the end of each attempt (not per commit; a killed job's attempt is rebuilt from its
+footers by the next `--resume`). Its top level covers the whole campaign (committed and missing ranges, crash and
+status counts, kept dumps of every attempt); `attempts` lists every attempt with `status`, `runs`, `stopped`,
+`override_crash_policy`, `abort` and its ranks' parts. A part whose summaries never committed may leave its other
+files under their final names; readers take a part only with its summaries file (`saber.campaign.LocalRun.files`
+lists parts from `_MANIFEST.json`).
+
 **Commit rule.** A part is committed when its summaries file appears under its final name. IO.Stager
 copies events, snapshots, impacts and crashes as `.tmp` and renames them first, then copies, fsyncs and renames
 the summaries file last. A run is done if and only if its `run_id` is in a committed summaries footer.
@@ -1345,6 +1503,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). A system with a `Query` parameter fills Bevy's archetype cache on its first run after Tick 0 spawned the scenario, which allocates on Tick 1 of every fresh World, so model systems are exclusive (`fn(&mut World)`) and read lists of entities built in `SimPlugin::start`, as the kernel's own systems and `EnvironmentPlugin`'s ground-impact check do (step 1c). |
 | As built (step 2) | Plugins declare the event names they emit (`SimAppBuilder::declare_event`) and may register custom requirement checks (`register_check(name, fn() -> Box<dyn CustomCheck>)`); `sim_core::with_resource` is the allocation-free way for an exclusive system to update its own resource. `EnvironmentPlugin` emits `ground_impact` (value: the body's altitude). |
 | As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrive with the first model that needs them (step 5c). |
+| As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 
@@ -1372,6 +1531,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | Read committed parts listed in `_MANIFEST.json` (or glob `*_summaries.parquet` etc. as in the draft, skipping `.tmp`/`.partial`); Python loads column types from exported schemas and checks `FileHeader.schema_version`. Parts from all attempts are read together. A `run_id` that appears twice (re-queued after a node I/O failure) is deduplicated by `run_id`; determinism makes the copies identical, and a differing `final_state_hash` is reported as an error. |
 | Errors | Missing `run_id` ranges in `_MANIFEST.json` → analysis runs but the report is stamped *partial* with those ranges. A policy-aborted campaign (exit `6`) is reported as aborted, with its crash histogram, never as a verdict. |
+| As built (step 4c) | `saber.analyze` (§5.7). Committed means a `*_summaries.parquet` under its final name, so `.tmp` and `.partial` files and the other files of a part whose summaries never committed are skipped; the missing ranges are computed from the committed `run_id`s against the sweep's run count (`_MANIFEST.json` `runs`, else the manifest file), so a campaign that lost a part after `_MANIFEST.json` was written is still stamped partial. Columns and types are checked through `saber.schema` against the exported schemas. `saber.verify` refuses an aborted campaign; `saber.report` reports it with its abort reason and runs by status. |
 
 ### IB-12 · Verdicts & report (saber.verify → sim_explorer ResultsExplorer, humans)
 
@@ -1379,6 +1539,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | `verdicts.parquet`: `campaign_id, req_id, aggregation, n_runs, n_pass, n_fail, n_inconclusive, estimate, lower_bound, confidence, verdict u8, trace_ids list<str>`. Plus `report.html` with traceability matrix (requirement → metric → evidence query). |
 | Owner | `sim_schema::VERDICTS_SCHEMA`. As built (step 3a): `Table::Verdicts` / `CampaignVerdictRow`; `lower_bound` and `confidence` are null for `AllPass`; sorted by `req_id`. |
+| As built (step 4c) | `saber.verify` writes it (§5.7): `aggregation` is the rule as written (`Probability(min_p: 0.99, confidence: 0.9)`, with ` per param set` appended for `by_param_set`); `estimate` is the pass rate of the conclusive runs (for `Quantile`, the quantile of the known values); `lower_bound` and `confidence` are set for `Probability` only, the lower bound counting inconclusive runs as failures. The header carries the campaign's `campaign_id`, `scene_hash`, `req_set_hash` and `build_id`. The footer key `saber.verify` (`sim_schema::io::VERIFY_KEY`) holds JSON: the crash and timeout policy, `by_param_set`, the envelope, runs judged, excluded `SetupError` runs, `partial` and the missing ranges, the requirement set's id, version and hash, warnings, and per requirement its upper bound, up to ten failing `run_id`s, the worst parameter set, the all-passing runs a straddling `Probability` would need, and a note. `report.html` is one file with inline CSS and no scripts or external resources: the hashes and a *complete*, *partial* or *aborted* stamp, coverage, the traceability matrix (requirement, trace ids, check, metric and its definition, rule, runs by outcome, estimate, bounds, verdict, failing runs, and the evidence query as DuckDB SQL over the committed summaries parts), the policy, runs by status, uncertainty and unstable regions. |
 
 ### IB-13 · External model & requirement import (→ sim_studio / sim_models)
 
@@ -1409,6 +1570,7 @@ truth until a requirements repository exists (D3).
 | Contract | Written atomically (write temp + rename) by Rank 0 to `$SHARED_OUT/campaign_status.json` every `heartbeat_s` (default 15 s): `{campaign_id, attempt, started_utc, updated_utc, state: Starting|Running|Draining|Done|Failed, abort_reason?: CrashStorm|SetupErrors, runs_total, runs_done, runs_committed, setup_errors, chunks_outstanding, queue_depth, per_rank: [{rank, runs_done, crashes, last_seen_utc}], crashes_by_param_set: {id: count}, status_counts: {SimStatus: n}, req_tallies: {req_id: {pass, fail, inconclusive}}}`. Per-rank counts arrive piggybacked on `ChunkRequest` (IB-05), so no extra MPI traffic. |
 | Owner | `sim_schema::CampaignStatus` (JSON Schema exported for Python and Studio). |
 | Errors | Readers treat `updated_utc` older than 3 × `heartbeat_s` as *stale* (job may be dead; check scheduler). A rank whose `last_seen_utc` lags is flagged *suspect*. |
+| As built (step 4a) | `sim_schema::CampaignStatus` (serde; no JSON Schema export yet) with the fields above plus `format: "saber-campaign-status"`, `heartbeat_s`, `ranks`, `crashes` and `abort_detail`; `per_rank[].last_seen_utc` is `null` before a rank's first request, and status names are `SimStatus` variant names. `heartbeat_s` is `output.heartbeat_s` in `campaign.toml`. Rank 0 writes it when the run starts, every `heartbeat_s`, and at the end with the ranks' final counts (`Done`, or `Failed` after an abort or with runs not committed); `Starting` is not written yet. `--local` writes it too. `saber.campaign.read_heartbeat` reads it, with `Heartbeat.stale()` for the 3 × rule. |
 
 
 ### IB-16 · Fragmentation hook (fragmentation model → sim_core)
@@ -1579,8 +1741,13 @@ capture and campaign crash policy as `CrashedNaN`.
 SI throughout the kernel; the Studio may display other units. Every scenario declares a world frame
 (`NED`, `ENU`, or `ECEF` for long-range ballistics). ENU and NED have their origin at mean sea level, so
 altitude is `z` in ENU and `−z` in NED; in ECEF altitude is the WGS 84 geodetic height (Heikkinen's closed
-form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. ECEF is treated as non-rotating until step 5a
-adds Earth rotation (Coriolis and centrifugal terms). Signal metadata (`ModelMeta.signals`) carries unit
+form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. A frame turns only when the scenario carries
+`EarthRotation` (step 5a, §5.2); otherwise every frame, ECEF included, is treated as inertial. A turning frame
+is described by its angular velocity `Ω` in world components (`Environment::frame_rotation`). The kernel then
+integrates `v̇ = F/m + g − 2Ω × v − Ω × (Ω × p)` and the attitude relative to the frame,
+`q̇ = ½ q ⊗ (0, ω − q⁻¹Ωq)`, while `body_rates` stay inertial so Euler's equations are unchanged; aerodynamic
+models use the rates relative to the frame (`Stage::rates_relative_to_frame`). The reported energy is then the
+Jacobi integral, `½mv² + mΦ − ½m|Ω × p|² + T_rot`. Signal metadata (`ModelMeta.signals`) carries unit
 and frame so requirement thresholds can be unit-checked at validation (IB-03).
 
 ### 10.4 Versioning
@@ -1640,14 +1807,15 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | D16 | Contact scope | No built-in contact material library, and no penetration or deformable-terrain models, for now (Alex, 2026-11-02; was O3). Implicit integrators are not needed either, given the adaptive explicit methods (was O4). | `ContactMaterial` values are entered per body in the scenario (IB-19); terrain is rigid, contact is surface-only; `physics-engine-tradeoffs.md` §12. |
 | D17 | 3D models | Entities can be linked to 3D models in glTF 2.0 / GLB, Bevy's native format. Defaults live in the code base and users can bring their own. OBJ import with conversion to glTF and GLB is a nice-to-have stretch goal. Other engineering model formats are out of scope; conversion happens elsewhere (Alex, 2026-11-02). Campaigns keep a copy of the workspace and library-root models they use, up to 2 GB per campaign (was O5). Spinning rotors and moving control surfaces come later; v1 models are rigid (was O7). Extra library folders (`model_roots`) stay as an option; Import still copies into the workspace by default (was O6). | `sim_assets` crate (§1, §3, §4, §5.10) with the built-in library in `crates/sim_assets/builtin/`; `Studio.Assets` (§5.5); `visual:` section with its own `visual_hash` (IB-01); IB-20; derived collision shapes (IB-19); IB-13 row; G18; roadmap P2v and P6b; `sim_studio_ux.md` §7.11; `sequence-diagrams.md` §2.1–2.3. |
 | D18 | Project name | The project is SABER (was SABERS), and identifiers follow: Python package `saber`, `saber-cli`, `~/.saber/`, `saber://` deep links, `saber.workspace.ron`, `FileHeader.saber_version` (Alex, 2026-11-02). | Renamed across all design docs; the code uses the new names from the first commit. |
-| D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy stays open as O8. |
+| D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy was O8, decided as D20. |
+| D20 | `Timeout` and the crash policy | A run that ends `Timeout` counts toward the campaign's crash-storm rule, and is `Inconclusive`, not a failure, in `saber.verify`'s statistics (Alex, 2026-11-03; was O8). | `sim_hpc::protocol::counts_toward_storm` (§5.6, step 4a); seq §8.2 and §11; `saber.verify` (step 4c). |
 
 ### Still open
 
 | # | Question | Where |
 |---|---|---|
 | O1 | Fragmentation physics: trigger criteria, fragment mass and velocity distributions, fragment lifetime when nothing is hit. | IB-16 (designed separately) |
-| O8 | Whether a `Timeout` run counts as a failure in the campaign crash policy and in `saber.verify`'s statistics (seq §11 says yes by default; §8.2 treats it as inconclusive, not a crash). What reaching `max_ticks` means is decided (D19). | §8.2, seq §11; needed by step 4a |
+| O8 | Whether a `Timeout` run counts as a failure in the campaign crash policy and in `saber.verify`'s statistics (seq §11 says yes by default; §8.2 treats it as inconclusive, not a crash). What reaching `max_ticks` means is decided (D19). Step 4a is built on the recommended answer, pending Alex: `Timeout` counts toward the crash-storm rule (`sim_hpc::protocol::counts_toward_storm`), and is `Inconclusive`, not a failure, in verdict statistics (step 4c). | §8.2, seq §11; step 4a (built on the recommendation), step 4c |
 
 ---
 

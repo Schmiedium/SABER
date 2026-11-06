@@ -308,9 +308,11 @@ mod header;
 pub mod io;
 mod ranges;
 mod rows;
+mod status;
 pub use crash::{CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump};
 pub use ranges::RangeSet;
 pub use rows::{CampaignVerdictRow, EventRow, ImpactRow, ManifestRow, SnapshotRow, SummaryRow};
+pub use status::{CAMPAIGN_STATUS_FORMAT, CampaignState, CampaignStatus, RankStatus, ReqTally};
 
 /// This crate's version, which is SABER's (`FileHeader::saber_version`).
 pub const SABER_VERSION: &str = env!("CARGO_PKG_VERSION");
