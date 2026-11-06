@@ -5,12 +5,14 @@ hypercube and writes the manifest; `saber.campaign` lays out the directory, pref
 it with `sim_hpc --local`; the committed summaries come back through `saber.schema` and are checked
 against the vacuum-parabola answers (apogee `vz^2 / 2g`, flight time `2 vz / g`). The same manifest
 on 1 and 3 threads gives the same `final_state_hash` per run (R3 from Python), and preflight's
-refusals reach Python as statuses.
+refusals reach Python as statuses. Step 4c's exit test judges a campaign with `saber.verify` and
+checks `verdicts.parquet` against verdicts worked out by hand from the same parabola.
 
 Needs pyarrow and the binaries (`SABER_SIM_HPC`, `SABER_CLI` or `PATH`). Without them the tests
 skip, unless `SABER_REQUIRE_BINARIES=1` (set in CI's end-to-end job), where they fail instead.
 """
 
+import math
 import os
 import time
 from pathlib import Path
@@ -18,12 +20,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from saber import _tools, campaign, schema, sweep
+from saber import _tools, analyze, campaign, report, schema, sweep, verify
 from saber.campaign import CampaignError, Execution, Status
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENE = ROOT / "crates" / "sim_models" / "tests" / "scenarios" / "projectile.scn.ron"
 REQ = ROOT / "crates" / "saber_cli" / "tests" / "data" / "projectile.req.ron"
+VERIFY_REQ = Path(__file__).resolve().parent / "data" / "projectile_verify.req.ron"
 G = 9.80665
 
 

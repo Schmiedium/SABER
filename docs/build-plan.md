@@ -66,8 +66,9 @@ flowchart LR
 | Question | Blocks | Where |
 |---|---|---|
 | O1: fragmentation trigger, fragment mass and velocity distributions, lifetime when nothing is hit | Step 7 (5e builds the hook without them) | subsystems §11 |
+| O9: judge `Probability` requirements over all runs pooled, or per parameter set | Nothing: 4c pools by default and judges per set on request (`by_param_set=True`); only the default would change | subsystems §11 |
 | T1: which McCoy projectiles have complete data for M3 | The M3 part of 5a | verification §13 |
-| T2: exact `H`, `T` definitions and signs for the M2 linear-theory oracle | The M2 part of 5a | verification §13 |
+| T2: exact `H`, `T` definitions and signs for the M2 linear-theory oracle | Nothing for M2, whose oracle 5a derived from the plugin's own force laws; M3 still needs the transcribed tables' signs checked | verification §6.2, §13 |
 | T4: access to STANAG 4355 | An optional modified-point-mass reference in 5a | verification §13 |
 | O8: does a `Timeout` run count against the crash policy (reaching `max_ticks` itself is decided, D19: `at_max_ticks`, default `Completed`) | Step 4c's verdict statistics. Step 4a is built on the recommended answer (counts toward the storm rule, `Inconclusive` in statistics); another answer changes one function, `sim_hpc::protocol::counts_toward_storm` | subsystems §11 |
 

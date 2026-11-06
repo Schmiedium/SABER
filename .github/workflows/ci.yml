@@ -58,12 +58,30 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e './python[test]'
-      - name: Tiny campaign from Python (build step 3c)
+      - name: Tiny campaign and its verdicts from Python (build steps 3c, 4b, 4c)
         env:
           SABER_SIM_HPC: ${{ github.workspace }}/target/debug/sim_hpc
           SABER_CLI: ${{ github.workspace }}/target/debug/saber-cli
           SABER_REQUIRE_BINARIES: "1"
-        run: pytest python/tests/test_campaign_local.py
+        run: pytest python/tests/test_campaign_local.py python/tests/test_verify.py
+
+  mpi:
+    name: MPI (sim_hpc under mpiexec, R5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenMPI and libclang (rsmpi's bindings)
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin libclang-dev
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mpi
+      - run: cargo clippy -p sim_hpc --all-targets --features mpi --locked -- -D warnings
+      - name: sim_hpc tests with MPI, mpiexec -n 1, 2 and 4 --oversubscribe (build step 4a)
+        env:
+          MPIEXEC_FLAGS: --oversubscribe
+        run: cargo test -p sim_hpc --features mpi --locked
 
   mpi:
     name: MPI (sim_hpc under mpiexec, R5)

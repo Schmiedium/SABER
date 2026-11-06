@@ -973,6 +973,8 @@ sequenceDiagram
     end
 ```
 
+As built (step 4c): `saber.analyze` (subsystems §5.7, IB-11) does these steps with pyarrow and numpy instead of DuckDB, over the committed summaries parts in place: coverage against the sweep (with the missing ranges `--resume` would run), duplicates kept once and an error if their hashes differ, the uncertainty table (mean, standard deviation, 5th, 50th and 95th percentiles per `param_set_id`) and the unstable regions. They are returned as tables rather than written as `uncertainty.parquet` and `crash_regions.parquet`; `saber.report` puts both in `report.html`. Trajectory drill-down, Sobol indices and plots are not built yet.
+
 ### 10.1 Exploring a campaign in the explorer
 
 Decided 2026-10-31 (subsystems D10), moved to a separate app 2026-11-01 (D12): `sim_explorer` queries campaign Parquet with DataFusion through `sim_query`. For a campaign on the cluster the query runs in `Query.Service` on a compute node, and only Arrow result batches cross the SSH tunnel (IB-17). For a campaign on the workstation the same engine runs embedded in the explorer and the service steps are skipped. Python (above) is unaffected.
@@ -1102,6 +1104,8 @@ sequenceDiagram
 ```
 
 Every verdict carries the campaign, scene and requirements hashes and the binary git sha, so a verdict traces back to exactly what was simulated and checked.
+
+As built (step 4c): `saber.verify.verify(campaign)` or `python -m saber.verify campaign.toml` (subsystems §5.7, §8.2, IB-12). The requirement set is the campaign's archived copy unless another is given, compiled by `saber-cli validate --emit-req-json`; a set whose `req_set_hash` differs from the one in the summaries header is refused unless `recompute=True`, which re-evaluates only `Threshold` requirements from their metric columns. An aborted campaign is refused. The crash policy is as drawn, with `crashes="inconclusive"` as the alternative. The verdicts differ from the diagram in two ways. First, there is no separate "too few samples" branch: inconclusive runs count against whichever verdict they could overturn, and a `Probability` whose bounds straddle `min_p` is `Inconclusive` with the number of all-passing runs that would show it, which covers both cases. Second, rules judge every counted run together by default (the probability over the sweep's sampled inputs); judging each `param_set_id` and reporting the worst, as drawn, is `by_param_set=True` until O9 is answered. Bounds are one-sided Clopper–Pearson (no Wilson). `verdicts.parquet` carries the hashes and `build_id` in its header and the counterexample `run_id`s, upper bounds and policy in its `saber.verify` footer, and `report.html` lists each requirement's evidence as a DuckDB query. The top-up manifest for straddling parameter sets is not built yet.
 
 ---
 

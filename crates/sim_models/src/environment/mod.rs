@@ -1,14 +1,15 @@
 //! `EnvironmentPlugin` (subsystems §5.2): gravity, atmosphere and wind as scenario components,
 //! and the ground-impact stop condition.
 //!
-//! A scenario describes its environment with up to one each of [`Gravity`], [`Atmosphere`] and
-//! [`Wind`], on any entity (the studio puts them on an environment entity with its own `SimId`).
+//! A scenario describes its environment with up to one each of [`Gravity`], [`Atmosphere`],
+//! [`Wind`] and [`EarthRotation`], on any entity (the studio puts them on an environment entity with its own `SimId`).
 //! At every run's Tick 0 the plugin reads them (after parameter resolution, so they can be swept
 //! or drawn, for example `Wind.velocity.x`) and installs a [`StandardEnvironment`] for the
 //! kernel; a missing component means no gravity, vacuum or calm. The world frame decides which
 //! way is down and what altitude is: `z` in ENU, `−z` in NED (origins at mean sea level), the WGS 84
-//! geodetic height in ECEF. Flat gravity needs a local frame and J2 gravity needs ECEF. ECEF is
-//! non-rotating until Earth rotation arrives with step 5a.
+//! geodetic height in ECEF. Flat gravity needs a local frame and J2 gravity needs ECEF. Without an
+//! [`EarthRotation`] every frame, ECEF included, is treated as inertial; with one the kernel adds the
+//! Coriolis and centrifugal accelerations (build step 5a).
 //!
 //! Do not combine this plugin with `SimAppBuilder::set_environment`: the plugin replaces the
 //! environment at every Tick 0.
@@ -77,6 +78,59 @@ pub enum Wind {
     },
 }
 
+/// Whether the world frame turns with the Earth (build step 5a). Without this component the frame
+/// does not rotate, in ECEF too, so scenarios written before rotation existed run as they did.
+#[derive(Component, Reflect, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component)]
+pub enum EarthRotation {
+    /// The frame is inertial.
+    None,
+    /// The ECEF frame turns about its +z axis at the WGS 84 rate [`wgs84::OMEGA_E`]. The centrifugal
+    /// acceleration is then added by the kernel, so J2 gravity plus rotation gives WGS 84's normal
+    /// gravity less its small J4 term.
+    Ecef,
+    /// A local ENU or NED frame fixed to the Earth with its origin at geodetic latitude
+    /// `latitude_deg`: it turns at the WGS 84 rate about the Earth's axis, `(0, cos φ, sin φ)` in
+    /// ENU and `(cos φ, 0, −sin φ)` in NED. Flat gravity is the local plumb line, which already
+    /// holds the centrifugal acceleration at the origin; the kernel adds the Coriolis term and the
+    /// centrifugal term of the offset from the origin.
+    Local {
+        /// Geodetic latitude of the frame's origin, degrees (north positive).
+        latitude_deg: f64,
+    },
+}
+
+impl EarthRotation {
+    /// The frame's angular velocity in world-frame components, rad/s, or why the rotation does not
+    /// fit the frame.
+    pub fn rate(self, frame: Frame) -> Result<DVec3, String> {
+        match (self, frame) {
+            (EarthRotation::None, _) => Ok(DVec3::ZERO),
+            (EarthRotation::Ecef, Frame::Ecef) => Ok(DVec3::Z * wgs84::OMEGA_E),
+            (EarthRotation::Ecef, _) => {
+                Err("EarthRotation::Ecef needs the ECEF frame; a local frame uses Local".to_owned())
+            }
+            (EarthRotation::Local { latitude_deg }, Frame::Enu | Frame::Ned) => {
+                if !(latitude_deg.is_finite() && latitude_deg.abs() <= 90.0) {
+                    return Err(format!(
+                        "EarthRotation latitude {latitude_deg}° must be within ±90°"
+                    ));
+                }
+                let (s, c) = latitude_deg.to_radians().sin_cos();
+                Ok(wgs84::OMEGA_E
+                    * if frame == Frame::Enu {
+                        DVec3::new(0.0, c, s)
+                    } else {
+                        DVec3::new(c, 0.0, -s)
+                    })
+            }
+            (EarthRotation::Local { .. }, Frame::Ecef) => Err(
+                "EarthRotation::Local needs a local frame (ENU or NED); ECEF uses Ecef".to_owned(),
+            ),
+        }
+    }
+}
+
 /// Stop condition: the run ends (`Terminated`, reason `"ground_impact"`) at the end of the first
 /// tick in which this body's altitude is at or below `altitude_m`. Read at Tick 0: a stop added
 /// to an entity during the run is not watched.
@@ -125,6 +179,7 @@ pub struct StandardEnvironment {
     gravity: GravityField,
     air: Air,
     wind: DVec3,
+    rotation: DVec3,
 }
 
 impl StandardEnvironment {
@@ -198,7 +253,14 @@ impl StandardEnvironment {
             gravity,
             air,
             wind,
+            rotation: DVec3::ZERO,
         })
+    }
+
+    /// The same environment in a frame that turns with the Earth (see [`EarthRotation`]).
+    pub fn with_rotation(mut self, rotation: EarthRotation) -> Result<Self, String> {
+        self.rotation = rotation.rate(self.frame)?;
+        Ok(self)
     }
 }
 
@@ -239,6 +301,10 @@ impl Environment for StandardEnvironment {
             GravityField::J2 => wgs84::j2_potential(position),
         }
     }
+
+    fn frame_rotation(&self) -> DVec3 {
+        self.rotation
+    }
 }
 
 /// Gravity, atmosphere, wind and the ground-impact stop condition.
@@ -274,6 +340,7 @@ impl SimPlugin for EnvironmentPlugin {
         app.register_type::<Gravity>()
             .register_type::<Atmosphere>()
             .register_type::<Wind>()
+            .register_type::<EarthRotation>()
             .register_type::<GroundImpactStop>()
             .declare_event(GROUND_IMPACT)
             .add_systems(SimSet::Constraints, ground_impact_system);
@@ -284,12 +351,13 @@ impl SimPlugin for EnvironmentPlugin {
         let gravity = single::<Gravity>(world, "Gravity")?.unwrap_or(Gravity::None);
         let atmosphere = single::<Atmosphere>(world, "Atmosphere")?.unwrap_or(Atmosphere::Vacuum);
         let wind = single::<Wind>(world, "Wind")?.unwrap_or(Wind::Calm);
-        let env =
-            StandardEnvironment::new(frame, gravity, atmosphere, wind).map_err(|message| {
-                SetupError::Model {
-                    model: "environment",
-                    message,
-                }
+        let rotation =
+            single::<EarthRotation>(world, "EarthRotation")?.unwrap_or(EarthRotation::None);
+        let env = StandardEnvironment::new(frame, gravity, atmosphere, wind)
+            .and_then(|env| env.with_rotation(rotation))
+            .map_err(|message| SetupError::Model {
+                model: "environment",
+                message,
             })?;
         let mut watch = Vec::new();
         for (entity, id, stop) in world

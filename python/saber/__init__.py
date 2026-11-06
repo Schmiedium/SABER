@@ -2,7 +2,9 @@
 
 Subpackages: schema, sweep, campaign, analyze, verify, report, testing. `schema` reads and
 writes the on-disk tables (build step 3a); `sweep` writes sweep manifests and `campaign` writes
-`campaign.toml` and drives `sim_hpc` (step 3c); the others are stubs until their build steps.
+`campaign.toml`, drives `sim_hpc` and submits PBS or Slurm jobs (steps 3c, 4b); `analyze` reads a
+campaign's committed parts, `verify` turns per-run verdicts into campaign verdicts with confidence
+bounds (`verdicts.parquet`) and `report` writes the HTML evidence report (step 4c).
 Column lists are never hand-coded here; they come from the JSON schemas in `saber/schemas/`,
 exported by `cargo run -p sim_schema --features io --bin export-schemas`.
 """

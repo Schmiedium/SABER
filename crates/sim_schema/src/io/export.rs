@@ -78,6 +78,7 @@ pub fn formats_json() -> Value {
             "dump_counts": DUMP_COUNTS_KEY,
             "manifest_hash": MANIFEST_HASH_KEY,
             "sampler": SAMPLER_KEY,
+            "verify": VERIFY_KEY,
         },
         "schema_versions": versions,
     })

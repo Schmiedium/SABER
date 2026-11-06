@@ -9,8 +9,8 @@ use sim_core::{
 };
 use sim_models::environment::ussa1976::{M0, R_STAR, R0, Ussa1976};
 use sim_models::environment::{
-    Atmosphere, GROUND_IMPACT, Gravity, GroundImpactStop, STANDARD_GRAVITY, StandardEnvironment,
-    Wind, altitude, wgs84,
+    Atmosphere, EarthRotation, GROUND_IMPACT, Gravity, GroundImpactStop, STANDARD_GRAVITY,
+    StandardEnvironment, Wind, altitude, wgs84,
 };
 use sim_schema::Frame;
 
@@ -376,4 +376,207 @@ fn environment_fields_can_be_swept() {
         .sample(DVec3::ZERO, 0.0);
     assert_eq!(s.gravity, DVec3::new(0.0, 0.0, -3.71));
     assert_eq!(s.wind, DVec3::new(6.5, 0.0, 0.0));
+}
+
+// --- Earth rotation (build step 5a) ---------------------------------------------------------------
+
+#[test]
+fn earth_rotation_fits_the_frame() {
+    let w = wgs84::OMEGA_E;
+    assert_eq!(EarthRotation::None.rate(Frame::Ecef), Ok(DVec3::ZERO));
+    assert_eq!(
+        EarthRotation::Ecef.rate(Frame::Ecef),
+        Ok(DVec3::new(0.0, 0.0, w))
+    );
+    let local = EarthRotation::Local { latitude_deg: 30.0 };
+    let (s, c) = 30f64.to_radians().sin_cos();
+    assert_eq!(local.rate(Frame::Enu), Ok(DVec3::new(0.0, c * w, s * w)));
+    assert_eq!(local.rate(Frame::Ned), Ok(DVec3::new(c * w, 0.0, -s * w)));
+    assert!(EarthRotation::Ecef.rate(Frame::Enu).is_err());
+    assert!(local.rate(Frame::Ecef).is_err());
+    assert!(
+        EarthRotation::Local { latitude_deg: 91.0 }
+            .rate(Frame::Enu)
+            .is_err()
+    );
+    assert!(
+        EarthRotation::Local {
+            latitude_deg: f64::NAN
+        }
+        .rate(Frame::Ned)
+        .is_err()
+    );
+
+    // Through the plugin: a scenario without the component does not rotate, in ECEF too.
+    let rate = |frame: Frame, rotation: Option<EarthRotation>| {
+        let mut sim = library_world(SimConfig::new(0.01, 1));
+        sim.world_mut().insert_resource(WorldFrame(frame));
+        if let Some(r) = rotation {
+            sim.spawn(SimId(100), r);
+        }
+        sim.start(RunSeed::new(0, 0))
+            .map(|_| sim.world().resource::<SimEnvironment>().0.frame_rotation())
+    };
+    assert_eq!(rate(Frame::Ecef, None).unwrap(), DVec3::ZERO);
+    assert_eq!(
+        rate(Frame::Ecef, Some(EarthRotation::Ecef)).unwrap(),
+        DVec3::new(0.0, 0.0, w)
+    );
+    assert!(matches!(
+        rate(Frame::Enu, Some(EarthRotation::Ecef)),
+        Err(SetupError::Model {
+            model: "environment",
+            ..
+        })
+    ));
+}
+
+/// Position after `t` of a mass dropped from rest at `r0` under gravity `g` fixed in a frame that
+/// turns at `omega`: solved in inertial space (`r'' = R(Ωt) g`) and rotated back.
+fn rotating_drop(omega: DVec3, g: DVec3, r0: DVec3, t: f64) -> DVec3 {
+    let w = omega.length();
+    let n = omega / w;
+    let g_par = n * g.dot(n);
+    let wt = w * t;
+    // At the Earth's rate ωt is ~1e-3, so 1 − cos and x − sin are formed without cancellation.
+    let one_minus_cos = 2.0 * (0.5 * wt).sin().powi(2);
+    let x_minus_sin = if wt.abs() < 1e-2 {
+        let x2 = wt * wt;
+        wt * x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0))
+    } else {
+        wt - wt.sin()
+    };
+    let ri = r0
+        + omega.cross(r0) * t
+        + g_par * (0.5 * t * t)
+        + (g - g_par) * (one_minus_cos / (w * w))
+        + n.cross(g) * (x_minus_sin / (w * w));
+    glam::DQuat::from_scaled_axis(-omega * t) * ri
+}
+
+fn drop_in(
+    frame: Frame,
+    gravity: Gravity,
+    rotation: EarthRotation,
+    start: DVec3,
+    ticks: u64,
+) -> DVec3 {
+    let mut sim = library_world(SimConfig::new(0.01, ticks));
+    sim.world_mut().insert_resource(WorldFrame(frame));
+    sim.spawn(SimId(100), (gravity, rotation));
+    sim.spawn(
+        SimId(1),
+        (
+            PointMass3 {
+                position: start,
+                velocity: DVec3::ZERO,
+            },
+            MassProps::point(1.0),
+        ),
+    );
+    sim.start(RunSeed::new(0, 0)).unwrap();
+    assert_eq!(sim.run(), SimStatus::Completed);
+    let e = sim.body(SimId(1)).unwrap();
+    sim.world().get::<PointMass3>(e).unwrap().position
+}
+
+/// Verification §7.1, rotating Earth: a mass dropped from rest lands east of the plumb line by
+/// `⅓ ω g t³ cos φ` to first order in `ω t`; with flat gravity the exact answer is the inertial
+/// solution seen from the turning frame.
+#[test]
+fn a_dropped_mass_lands_east_of_the_plumb_line() {
+    let (g, t) = (STANDARD_GRAVITY, 10.0);
+    for lat in [0.0f64, 45.0, -60.0] {
+        let first_order = wgs84::OMEGA_E * g * t * t * t * lat.to_radians().cos() / 3.0;
+        let rotation = EarthRotation::Local { latitude_deg: lat };
+        let enu = drop_in(
+            Frame::Enu,
+            Gravity::Flat { g },
+            rotation,
+            DVec3::new(0.0, 0.0, 1000.0),
+            1000,
+        );
+        let ned = drop_in(
+            Frame::Ned,
+            Gravity::Flat { g },
+            rotation,
+            DVec3::new(0.0, 0.0, -1000.0),
+            1000,
+        );
+        for (east, what) in [(enu.x, "ENU"), (ned.y, "NED")] {
+            assert!(
+                (east - first_order).abs() < 1e-3 * first_order,
+                "{what} {lat}°: {east} vs {first_order}"
+            );
+        }
+        let omega = rotation.rate(Frame::Enu).unwrap();
+        let exact = rotating_drop(
+            omega,
+            DVec3::new(0.0, 0.0, -g),
+            DVec3::new(0.0, 0.0, 1000.0),
+            t,
+        );
+        sim_testkit::Tol::vec3(1e-9, 1e-12).assert(enu.to_array(), exact.to_array());
+        let (n_ned, e_ned, d_ned) = (ned.x, ned.y, ned.z);
+        sim_testkit::Tol::vec3(1e-9, 1e-12).assert([e_ned, n_ned, -d_ned], exact.to_array());
+    }
+    // Without rotation it falls straight down.
+    let still = drop_in(
+        Frame::Enu,
+        Gravity::Flat { g },
+        EarthRotation::None,
+        DVec3::new(0.0, 0.0, 1000.0),
+        1000,
+    );
+    assert_eq!((still.x, still.y), (0.0, 0.0));
+}
+
+/// In ECEF the rotating frame adds the centrifugal acceleration to J2 gravitation, so a mass at rest
+/// on the equator starts to fall at WGS 84's normal gravity (to the J4 term J2 leaves out, 2e-5),
+/// and over 10 s it lands east by `⅓ ω g t³`.
+#[test]
+fn ecef_rotation_gives_normal_gravity_and_the_eastward_drop() {
+    let top = DVec3::new(wgs84::A, 0.0, 0.0);
+    let gamma_e = 9.780_325_335_9;
+    // One 10 ms tick from rest: v = a t to O(t² |∇a|).
+    let mut sim = library_world(SimConfig::new(0.01, 1));
+    sim.world_mut().insert_resource(WorldFrame(Frame::Ecef));
+    sim.spawn(SimId(100), (Gravity::J2, EarthRotation::Ecef));
+    sim.spawn(
+        SimId(1),
+        (
+            PointMass3 {
+                position: top,
+                velocity: DVec3::ZERO,
+            },
+            MassProps::point(1.0),
+        ),
+    );
+    sim.start(RunSeed::new(0, 0)).unwrap();
+    sim.run();
+    let v = sim
+        .world()
+        .get::<PointMass3>(sim.body(SimId(1)).unwrap())
+        .unwrap()
+        .velocity;
+    assert!(
+        (-v.x / 0.01 - gamma_e).abs() < 2e-5 * gamma_e,
+        "{}",
+        -v.x / 0.01
+    );
+    // Coriolis turns the fall east: v_y = ω γ t² to first order.
+    let east = wgs84::OMEGA_E * gamma_e * 1e-4;
+    assert!((v.y - east).abs() < 1e-3 * east && v.z == 0.0, "{v}");
+
+    let start = DVec3::new(wgs84::A + 1000.0, 0.0, 0.0);
+    let end = drop_in(Frame::Ecef, Gravity::J2, EarthRotation::Ecef, start, 1000);
+    let g = wgs84::j2_gravity(start).length() - wgs84::OMEGA_E.powi(2) * start.x;
+    let east = end.y; // east at longitude 0 is +y
+    let first_order = wgs84::OMEGA_E * g * 1000.0 / 3.0;
+    assert!(
+        (east - first_order).abs() < 3e-3 * first_order,
+        "{east} vs {first_order}"
+    );
+    let fell = altitude(Frame::Ecef, start) - altitude(Frame::Ecef, end);
+    assert!((fell - 0.5 * g * 100.0).abs() < 1e-3 * fell, "{fell}");
 }

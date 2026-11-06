@@ -503,6 +503,24 @@ The test, for any projectile definition and launch state:
 4. Repeat with initial yaw halved twice. The discrepancy must shrink like `α₀²`, and at the smallest
    amplitude be within the `Δs` approximation error.
 
+**As built (step 5a).** The oracle is derived from the plugin's own force and moment laws
+(subsystems §5.2), so it needs no outside sign convention. For flight along `+x` with complex yaw
+`δ = δ_y + iδ_z` (the body axis less its component along the velocity), per metre of arclength,
+
+```text
+δ'' + A δ' − B δ = 0,   A = b − D − M_q − iP̃,   B = (D + M_q + iP̃) b + M_α + i M_p
+b = a_L − i a_N,  a_L = q_s C_Lα/m,  a_N = (q_s/m)(pd/v) C_Npα,  D = q_s C_D/m,
+M_q = q_s d² C_Mq/I_y,  M_α = q_s d C_Mα/I_y,  M_p = q_s d² p C_Mpα/(I_y v),  P̃ = I_x p/(I_y v),  q_s = ½ρS
+```
+
+with `δ(0) = 0` and `δ'(0) = −i(ω_y + iω_z)/v` for a launch along the velocity with transverse rate
+`(ω_y, ω_z)`. Per calibre, `Re(A d) = H` and `B d² = M + iPT` once the Magnus force (`a_N`) and the product
+`(D + M_q)·a_L` are dropped, which is McCoy's equation with his `H`, `P`, `M`, `T`. The test evaluates
+`δ(s) = K(e^{r₁s} − e^{r₂s})` from the exact roots of `r² + Ar − B = 0` instead of fitting, so the comparison is
+direct. With drag, a spin damping `C_lp = −C_D I_x/(m d²)` keeps `p/v`, and so `A` and `B`, constant over the whole
+window. Measured: the relative gap is `2.2 α²` at peak yaw `α` = 0.1, 0.05 and 0.025 rad (ratio 3.99 per
+halving), with and without drag.
+
 Because the closed form uses only the coefficients the model consumes, this works for every projectile in
 the model library, new or old, and it runs as a property test over randomized but stable coefficient sets
 (`S_g > 1`, dynamically stable). It catches wrong moment signs, wrong reference lengths, `I_x`/`I_y`
@@ -543,7 +561,7 @@ The minimum oracle set per plugin. Each line names the rung from §5.
 | Quaternion algebra, exponential map, frames NED/ENU/ECEF round-trip | identities, property tests | 1, 6 |
 | USSA 1976 atmosphere | published table at standard altitudes. As built: the PDAS COESA 1976 tables (pdas.com `atmosTable1SI`, `atmosTable2SI`) to one unit in their last printed digit from 0 to 20 km (above that they drift from the standard by more than their print precision), and the standard's own layer-base pressures (22632.1, 5474.89, 868.019, 110.9063, 66.9389, 3.95642 Pa) to half a unit | 9 |
 | WGS 84 gravity, J2 | published values; flat-Earth limit. As built: the WGS 84 normal gravity (Somigliana) at the equator and poles to 1e-7 relative once the J4 radial term is added to the model's J2 field (J2 alone within 2e-5), the gradient of the J2 potential, a short drop under J2 against the flat-Earth closed form, and the geodetic-height round trip | 9, 5 |
-| Rotating Earth: dropped mass eastward deflection `≈ ⅓ ω g t³ cos φ` | first-order formula, asymptotic | 1, 5 |
+| Rotating Earth: dropped mass eastward deflection `≈ ⅓ ω g t³ cos φ` | first-order formula, asymptotic. As built (step 5a): the kernel against the inertial solution seen from a frame turning at `(0.1, −0.2, 0.5)` rad/s, for point masses and rigid bodies with and without gravity, the Jacobi integral conserved, and the attitude `R(Ωt)⁻¹ q₀ exp(ωt)` with inertial body rates unchanged; through the plugin, the drop from 1 km at 0°, 45° and −60° within 1e-3 of `⅓ ω g t³ cos φ` and to 1e-9 m of the exact rotating-frame solution in ENU and NED; in ECEF with J2, WGS 84 normal gravity at the equator to 2e-5, the first-tick Coriolis velocity and the eastward drop to 3e-3 | 1, 5 |
 | Dryden turbulence | spectrum of a long seeded realization vs the MIL-HDBK-1797 PSD (statistical) | Statistical |
 | `AeroTable` interpolation | exact at breakpoints, linear between, clamping/extrapolation policy, monotonic input stays monotonic | 1, 6 |
 | `SimRng` substreams | R9, distribution tests (KS) on each sampler. As built: KS at α = 1e-3 with 20 000 draws for every distribution plain and truncated, the far-tail truncated-normal mean against Simpson's rule, monotone in `u`, one 64-bit draw per sample | 4.2, Statistical |
@@ -568,6 +586,25 @@ The minimum oracle set per plugin. Each line names the rung from §5.
 
 M1–M3 from §6, plus force-function spot checks (§5.7) for every term in McCoy's 6DOF force and moment
 buildup, plus the metamorphic mirror test (spin sense reverses drift and Magnus side force).
+
+As built (step 5a), all with a synthetic 155 mm-class shell (TD1):
+
+| Check | Oracle | Tolerance |
+|---|---|---|
+| M1: constant-`C_D` flight without gravity, point mass and a 6DOF shell at zero yaw: `x = ln(1 + kv₀t)/k`, `v = v₀/(1 + kv₀t)`, and the spin `p₀ exp(q_s d² C_lp x / I_x)` | closed form | 1e-9 m |
+| M1: point mass dropped in air, `v_t tanh(gt/v_t)` and `(v_t²/g) ln cosh(gt/v_t)` | closed form | 1e-8 m |
+| Vacuum: a shell with every coefficient flies bit-for-bit the run without the model; Mach 0 | identity | exact |
+| Wind is a change of frame: launching at `V₀ + W` into wind `W` shifts the calm flight by `Wt`, with a `C_D(Mach)` table across a breakpoint (catches Mach from the ground speed) | metamorphic | 1e-8 m |
+| M2: small-yaw motion against the exact linear solution (§6.2), three amplitudes and with drag | asymptotic | gap below `3α²`, ratio 3.2–4.8 per halving |
+| M2: McCoy's first-order `φ'_{F,S}` and `λ_{F,S}` against the exact roots; `S_g` from `AeroState` | closed form | 1e-4 (rates), 1e-2 (damping) |
+| Gyroscopic stability boundary: with `H = T = 0`, a scan of `S_g` over 0.9–1.1 diverges exactly below 1 | linear theory | the scan step |
+| Drift: right-hand spin drifts right (−y firing along +x in ENU); reversing the spin mirrors position, velocity and the body rates (a pseudovector) | sign, metamorphic | 1e-9 m |
+| Every force and moment term against the vector form (`v_b × (x̂ × v_b)`, `x̂ × v_b`, …), one coefficient at a time and summed; directions of drag, lift and the overturning moment | independent computation | 1e-12 |
+| Setup rules: model on the wrong body kind or on no body, both models on one body, bad diameter, non-finite coefficient, table not over `mach` or not increasing | error kinds | exact |
+| The shell scenario file (Earth rotation at 45° N, `C_D(Mach)`, a swept `C_Lα`) round-trips, validates in `saber-cli`, and flies to ground impact drifting right; zero allocations per tick | integration | exact |
+
+Not yet: the drift magnitude against the linear-theory estimate, 6DOF against 3DOF range (yaw drag), and M3
+(T1).
 
 ### 7.4 `FixedWingPlugin`
 
@@ -712,7 +749,8 @@ Subsystems together, and the interface boundaries:
 
 | Test | Pass criterion |
 |---|---|
-| Tiny campaign, local | `verdicts.parquet` equals a hand-computed expectation for a scenario designed so the answer is known (e.g. a vacuum projectile with a range threshold split exactly by the parameter sweep, so the pass fraction is known analytically). As built (step 3c), up to the summaries: `python/tests/test_campaign_local.py` draws a Latin hypercube over the projectile's `muzzle_vz` with `saber.sweep`, prepares, preflights and runs it with `saber.campaign` through `sim_hpc --local`, and checks every committed summary against the vacuum parabola (apogee `vz²/2g` within 0.01 m, flight time `2vz/g` within 0.02 s, the `R-quick` verdict from the flight time), the manifest's parameters and seeds run by run, and the same `final_state_hash` per run on 1 and 3 threads; preflight refusals (a manifest drawn for another scene, another build) reach Python as statuses. CI runs it in the end-to-end job against freshly built binaries (`SABER_REQUIRE_BINARIES=1`, so it cannot silently skip). `saber.verify` and `verdicts.parquet` follow with step 4c. |
+| Tiny campaign, local | `verdicts.parquet` equals a hand-computed expectation for a scenario designed so the answer is known (e.g. a vacuum projectile with a range threshold split exactly by the parameter sweep, so the pass fraction is known analytically). As built (step 3c), up to the summaries: `python/tests/test_campaign_local.py` draws a Latin hypercube over the projectile's `muzzle_vz` with `saber.sweep`, prepares, preflights and runs it with `saber.campaign` through `sim_hpc --local`, and checks every committed summary against the vacuum parabola (apogee `vz²/2g` within 0.01 m, flight time `2vz/g` within 0.02 s, the `R-quick` verdict from the flight time), the manifest's parameters and seeds run by run, and the same `final_state_hash` per run on 1 and 3 threads; preflight refusals (a manifest drawn for another scene, another build) reach Python as statuses. CI runs it in the end-to-end job against freshly built binaries (`SABER_REQUIRE_BINARIES=1`, so it cannot silently skip). As built (step 4c), the whole row: `test_verdicts_match_a_hand_computed_expectation` sweeps `muzzle_vz` over the levels 20, 30, 40, 60 and 160 m/s with 4 replicates against `python/tests/data/projectile_verify.req.ron`, where the parabola puts each requirement's threshold between levels and the 160 m/s shots outlast the scenario's 30 s (`Timeout`, so inconclusive, D20); `saber.verify` through the archived set and `saber-cli`, and the `verdicts.parquet` it writes, read back through `saber.schema`, must equal the table worked out by hand in the test (counts, estimates, Clopper–Pearson lower bounds to 1e-4, each also checked against its binomial tail, verdicts, trace ids), with the same campaign judged inside an envelope through `python -m saber.verify` and again after a part is deleted (stamped partial). The crash-storm test checks that an aborted campaign is refused by `saber.verify` and reported with its histogram. |
+| Campaign statistics | `python/tests/test_verify.py` (standard library only): the regularized incomplete beta against closed forms; the Clopper–Pearson bounds against `(1 − c)^(1/n)` for all-passing runs, the rule of three, the textbook 8-of-10 interval, their defining binomial tails computed with `math.comb`, and scipy where installed; `runs_needed` (59 for 0.95 at 0.95); each campaign rule on hand-made outcomes, including inconclusive runs on each side, crashed runs in `Quantile`, and the worst parameter set; the requirement JSON fixture, which a binary-gated test regenerates with `saber-cli`; the report's layout and escaping, its evidence SQL, and the command line's usage errors. `python/tests/test_verify_arrow.py` (pyarrow): a hand-written campaign of two attempts with a re-queued run, a timeout, a crash, a setup error, a missing run and uncommitted `.tmp`/`.partial` files, read by `saber.analyze` and judged by `saber.verify` with every verdict worked out in the test, under both crash policies, an envelope and per parameter set; `verdicts.parquet` and its footer read back; a changed requirement set refused without `recompute`; an aborted campaign refused and reported. |
 | 2-node PBS and Slurm | Same outputs as local (R5) except rank and wall-time columns. |
 | Resume | R6 plus no duplicated or missing `run_id`. |
 | Crash storm | Deliberately unstable parameter region trips `[crash_policy]`, exit code 6, evidence kept. As built (step 4a): an energy bound that three of four muzzle speeds break; on 3 ranks (`tests/ranks.rs`, and `tests/mpi.rs` under `mpiexec`), locally (same file) and from Python (`test_campaign_local.py`), every rank exits 6 with `CrashStorm`, fewer runs than the manifest are committed and each committed one has its summary, crash dumps are kept (at most `M` × ranks per parameter set, G6), `_MANIFEST.json` says `aborted` with the reason and the kept dumps' `run_id`s, and the heartbeat says `Failed`; with `abort_crash_fraction = 1` the same campaign completes. Also: rank 0's preflight refusal and a damaged broadcast end every rank with one exit code (`2`, `70`) before any run, mixed `build_id`s refuse with `3` (unit test of the gather verdict), and a rank whose scratch cannot be created asks for no work (exit 4, every run missing). The `SetupErrors` rule and `Timeout` counting are unit tests of the dispatcher. |
@@ -939,6 +977,6 @@ it, and the nightly report flags any feature with fewer than two.
 | # | Question | Notes |
 |---|---|---|
 | T1 | Which McCoy projectiles have complete data (mass properties, full coefficient tables, a plotted 6DOF result) for M3? | Needs a pass through the book; 155 mm M107 and 7.62 mm M80 are likely candidates from memory and need checking. |
-| T2 | Exact `H`, `T` definitions and sign conventions for the M2 linear-theory oracle | Take from McCoy directly and match the conventions of the coefficient tables. |
+| T2 | Exact `H`, `T` definitions and sign conventions for the M2 linear-theory oracle | Narrowed (step 5a): the M2 oracle is derived from the plugin's own force laws (§6.2), and McCoy's `H`, `P`, `M`, `T` fall out of it with `C_Mα > 0` statically unstable. What remains is checking that the coefficient tables transcribed for M3 use the same signs, chiefly `C_Npα` and `C_Mpα`. |
 | T4 | Access to STANAG 4355 for a modified-point-mass reference | Distribution may be restricted (`flight-dynamics-sources.md` §5). |
 | T5 | Default contact materials and their sources (physics doc O-P1) | Sets the material parameters the §7.5 reference cases use. |

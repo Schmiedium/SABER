@@ -398,8 +398,52 @@ is a `SetupError`. It installs the kernel's `Environment` for the world frame (�
 at or below that altitude; the plugin lists the watched bodies at Tick 0, so a stop added during a run is not
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
-`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0) is the version
-scenarios check against (IB-01).
+`sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
+0.1.1 from step 5a) is the version scenarios check against (IB-01).
+
+**As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
+`SetupError` names the body that breaks a rule:
+
+- `ProjectileAero { diameter, cd0, cd2, cla, cla2, cma, cma2, cmq, clp, cnpa, cmpa, cl0 }` on a `RigidBody6`
+  whose body `x` axis is the axis of symmetry, nose forward. Each coefficient is a `Coef`: `Constant(f64)` or
+  `Mach(AeroTable)` with one axis named `mach`, looked up at the Mach number of the air-relative velocity.
+  Every coefficient defaults to zero, so a scenario names only those it uses.
+- `PointMassAero { diameter, cd0 }` on a `PointMass3`: drag only (the 3DOF option of D2).
+
+With `v_b = q⁻¹(V − wind)`, `v = |v_b|`, `x̂` the body axis, `q_s = ½ρ·πd²/4`, `sin²δ = (v_y² + v_z²)/v²` and
+`(p, q, r)` the body rates relative to the world frame, the force and moment in body axes are:
+
+| Term | Body-axis form | Sign convention |
+|---|---|---|
+| Drag | `−q_s (C_D0 + C_D2 sin²δ) v v_b` | |
+| Lift | `q_s (C_Lα + C_Lα2 sin²δ) [v_b × (x̂ × v_b)]` | toward the nose for `C_Lα > 0` |
+| Magnus force | `q_s d p C_Npα (x̂ × v_b)` | |
+| Overturning moment | `q_s d v (C_Mα + C_Mα2 sin²δ) (v_b × x̂)` | `C_Mα > 0` is statically unstable, as in McCoy |
+| Pitch damping | `q_s d² v C_Mq (0, q, r)` | `C_Mq` stands for `C_Mq + C_Mα̇` |
+| Spin damping | `q_s d² v C_lp p x̂` | |
+| Magnus moment | `q_s d² p C_Mpα [x̂ × (v_b × x̂)]` | |
+| Roll drive (fin cant) | `q_s d v² C_l0 x̂` | |
+
+Linearised for small yaw, and dropping the Magnus force and products of small terms as McCoy does, these give
+his yaw equation `ξ'' + (H − iP)ξ' − (M + iPT)ξ = 0` per calibre with his `H`, `P`, `M` and `T` (verification
+§6.2). A body carries one of the two components; either on a body of the other kind
+or on an entity without a body, a non-finite coefficient, a non-positive diameter or a table that is invalid
+or not over `mach` is a `SetupError`. The force model copies each body's coefficients at Tick 0, after the
+Resolver, so a coefficient can be swept (`ProjectileAero.cla.0` targets a `Constant`). It skips a body with no
+air or no airspeed. The plugin inserts `AeroState { mach, dynamic_pressure, total_yaw, spin_rate,
+gyro_stability }` on each such body at Tick 0 and updates it in `SimSet::Telemetry` from a list built at Tick 0,
+so metrics can read it (`entity(1).AeroState.mach`). `gyro_stability` is McCoy's
+`S_g = I_x² p² / (2ρ I_y S d v² C_Mα)`. `AeroState` is run output: the plugin overwrites it at every Tick 0, so a
+scenario file need not carry it.
+
+`EnvironmentPlugin` also reads an optional `EarthRotation` (`None`, `Ecef`, or `Local { latitude_deg }` for an
+ENU or NED frame whose origin is at that geodetic latitude). The frame then turns at the WGS 84 rate
+`ω_E = 7.292115e-5 rad/s`: about `+z` in ECEF, `(0, cos φ, sin φ)` in ENU, `(cos φ, 0, −sin φ)` in NED. The
+kernel adds the Coriolis and centrifugal terms (§10.3). Without the component no frame rotates, ECEF
+included, so scenarios written before step 5a run unchanged. `Ecef` with J2 gravity gives WGS 84 normal
+gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
+origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
+origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
 
 `Controller` boundary (in-process, deterministic):
 
@@ -628,7 +672,41 @@ default spelled out; `tests/shared/campaign/defaults.toml` is that output, check
 directory (the scene and requirement set copied in, the manifest, `campaign.toml`), `preflight` runs
 `sim_hpc --validate-only --json` and `run_local` runs `sim_hpc --local --json`, both mapping exit codes to a
 `Status` (IB-04); `LocalRun` reads `_MANIFEST.json` and the committed parts. Binaries are found from an argument,
-`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` follow with 4b.
+`SABER_SIM_HPC`/`SABER_CLI`, or `PATH`. PBS and Slurm templates, submit, resume and `auto_resume` came with 4b
+(IB-04).
+
+**As built (step 4c), `saber.analyze`, `saber.verify` and `saber.report`.** `analyze.open_campaign` takes a
+`campaign.toml` or a shared output directory. A part is committed when its `*_summaries.parquet` has its final
+name; `Campaign.summaries()` reads those of every attempt (ordered by attempt, rank, part) as one pyarrow table
+sorted by `run_id`, keeps a re-queued `run_id` once and raises `AnalysisError` when two copies' `final_state_hash`
+differ. `coverage()` gives the runs in the sweep, those committed and the missing `run_id` ranges (what
+`--resume` would run). `uncertainty` gives per `param_set_id` its parameters, runs by outcome and each metric's
+mean, standard deviation and 5th, 50th and 95th percentiles over finished runs; `crash_regions` the parameter sets
+with crashes or timeouts, worst first. These use pyarrow and numpy: the files are plain Parquet, so DuckDB and
+Polars read them as they are, but neither is a dependency. `verify.verify(campaign, requirements=None, *,
+crashes="fail", by_param_set=False, envelope=None, recompute=False)` reads the campaign's archived requirement set
+through `saber-cli validate --emit-req-json` unless given one, refuses a set whose `req_set_hash` differs from the
+one the campaign ran with (unless `recompute=True`, which re-evaluates `Threshold` requirements from their metric
+columns and leaves the other kinds `Inconclusive`) and refuses an aborted campaign (`CampaignError`, `ABORTED`).
+Each run counts by status: `Completed` and `Terminated` by their `req_<id>` verdict, `Timeout` as `Inconclusive`
+(D20), the crash statuses as failures (seq §11's default) or, with `crashes="inconclusive"`, as inconclusive, and
+`SetupError` not at all (reported). The rules (§8.2) never let inconclusive runs make a verdict wrong, only
+`Inconclusive`: `AllPass` fails on any failure and passes only with no inconclusive run; `Probability` passes when
+the one-sided Clopper–Pearson lower bound, with the inconclusive runs as failures, reaches `min_p`, fails when the
+upper bound with them as passes is below it, and otherwise reports how many all-passing runs would show it;
+`Quantile` takes the empirical quantile (inverted CDF) with the unknown values on the failing side for `Pass` and
+on the passing side for `Fail`. Rules judge every counted run together by default; `by_param_set=True` judges
+each parameter set on its own and reports the worst (O9). `envelope` keeps runs whose parameters lie in given
+ranges. A partial campaign is judged on what committed and says so. The bounds come from a regularized incomplete
+beta in the standard library (no scipy), checked against scipy and the binomial tails in tests.
+`Verification.write()` writes `verdicts.parquet` next to the parts, with the campaign's hashes in its header and
+the policy, counterexamples, upper bounds and warnings in its `saber.verify` footer (IB-12).
+`report.write_report(campaign, verification)` writes `report.html` beside it (IB-12), and
+`python -m saber.verify CAMPAIGN [--req R] [--crashes inconclusive] [--by-param-set] [--envelope KEY=LO:HI]
+[--recompute] [--check]` does all three and prints the verdicts (exit 0, or 1 with `--check` unless every
+requirement passed; 2 a set that does not fit or an unreadable file; 6 an aborted campaign, whose report is still
+written; 64 usage). Sobol sensitivity indices (seq §10) and the top-up manifest for straddling parameter sets
+(seq §11) are not built yet.
 
 ### 5.8 `sim_query` — campaign query engine (new, D10)
 
@@ -1158,6 +1236,16 @@ a cut-short run. At a natural end (`Completed`, or `Terminated` by a stop condit
 `Never` and `Envelope` pass, `Eventually` fails, a `Custom` check answers `at_end`. The `Threshold` rule depends only
 on the reducer, the comparison and the metric value, so `saber.verify` can recompute it from the summary columns.
 
+As built (step 4c): the per-run columns stay as above (a crashed run's `req_*` are `Inconclusive`); the campaign
+step decides what a status counts as. `Timeout` is `Inconclusive` (D20); the crash statuses count as failures by
+default (seq §11) or as inconclusive with `crashes="inconclusive"`; `SetupError` runs are excluded. The diagram's
+"inconclusive fraction ≤ policy" check is replaced by a rule with no threshold to tune: an inconclusive run counts
+against whichever verdict it could overturn. `AllPass` is `Pass` only with every counted run passing; `Probability`
+is `Pass` when the Clopper–Pearson lower bound with inconclusive runs as failures reaches `min_p`, `Fail` when the
+upper bound with them as passes is below it, else `Inconclusive`; `Quantile` puts unknown values on the failing
+side for `Pass` and on the passing side for `Fail`. So a verdict is `Pass` or `Fail` only if every way the
+inconclusive runs could have come out gives it (§5.7).
+
 ---
 
 ## 9. Interface boundary catalogue
@@ -1219,7 +1307,7 @@ flowchart LR
 | | |
 |---|---|
 | Contract | §8.1. Signals addressed as `entity(SimId).Component.field` or `event(Name)`; metrics named `metric_key`. |
-| Owner | `sim_verify`. Python reads the compiled JSON form produced by `sim_hpc --validate-only --emit-req-json` so it never parses RON. |
+| Owner | `sim_verify`. Python reads the compiled JSON form produced by `saber-cli validate --emit-req-json` so it never parses RON. |
 | Validation | Every signal path resolves against the scenario; every metric referenced by a requirement exists; units consistent; IDs unique. |
 | Errors | `ReqError::{UnresolvedSignal, UnknownMetric, DuplicateId, TypeMismatch}` → blocking in Studio and preflight. |
 | As built (step 2) | `RequirementSet::from_ron` checks the header, ids, metric references, reducer against source (signal or event), condition shape, numbers and campaign rules; `VerifyState::compile` resolves signals, events and custom checks against a scenario's Tick-0 World. `ReqError::{Parse{line, col}, BadHeader, VersionMismatch, DuplicateId, UnknownMetric, BadMetric, BadRequirement, UnresolvedSignal, TypeMismatch, UnknownCheck}`. `saber-cli validate <set.req.ron> [--scenario <scn>] --emit-req-json` prints the compiled JSON form (`format: "saber-requirements-json"`, `req_set_hash`, `metric_columns`, `requirement_columns`, the scene hash it was resolved against, and the set itself; JSON objects are unordered, so the column lists carry the order); `sim_hpc --validate-only` reuses it with step 3b. Unit checks wait for `ModelMeta.signals` to carry units. |
@@ -1415,6 +1503,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Contract | A model is a `SimPlugin` (`sim_core`'s own trait: the kernel uses `bevy_ecs` without `bevy_app`) that (1) registers reflected components in `SimTypeRegistry`, (2) adds systems **only** into `SimSet`s, (3) declares `ModelMeta{id, version, params, signals, stop_conditions, events}` for the library catalogue and for IB-03 signal resolution, (4) contributes dynamics only as pure right-hand-side functions (`ForceModel`, `ContactForces`, and model states registered with `Core.Integrator`), never by stepping state itself, so every model works with every integrator (D14), (5) obeys the hot-loop rules: f64, no allocation after Tick 0, no wall clock, RNG only via its named `RngStream`, no I/O, and no per-run state in system `Local`s (they survive World reuse; per-run state lives in resources that `SimPlugin::start` re-initialises at Tick 0). A system with a `Query` parameter fills Bevy's archetype cache on its first run after Tick 0 spawned the scenario, which allocates on Tick 1 of every fresh World, so model systems are exclusive (`fn(&mut World)`) and read lists of entities built in `SimPlugin::start`, as the kernel's own systems and `EnvironmentPlugin`'s ground-impact check do (step 1c). |
 | As built (step 2) | Plugins declare the event names they emit (`SimAppBuilder::declare_event`) and may register custom requirement checks (`register_check(name, fn() -> Box<dyn CustomCheck>)`); `sim_core::with_resource` is the allocation-free way for an exclusive system to update its own resource. `EnvironmentPlugin` emits `ground_impact` (value: the body's altitude). |
 | As built (step 1b) | `trait SimPlugin { fn name(&self) -> &'static str; fn build(&self, app: &mut SimAppBuilder); fn start(&self, world: &mut World) -> Result<(), SetupError> }`. `trait ForceModel { fn setup(&mut self, world: &mut World, bodies: &BodyTable) -> Result<(), SetupError>; fn prepare(&mut self, world: &mut World, bodies: &BodyTable); fn eval(&self, stage: &Stage, out: &mut [Wrench]) }`: `setup` at Tick 0 (allocation allowed), `prepare` once per tick (copy inputs held constant over the tick, draw this tick's random numbers), `eval` at every stage, pure, adding force (world frame) and moment (body frame) only for the bodies the model acts on. Model-registered integrated states arrive with the first model that needs them (step 5c). |
+| As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 
@@ -1442,6 +1531,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | Read committed parts listed in `_MANIFEST.json` (or glob `*_summaries.parquet` etc. as in the draft, skipping `.tmp`/`.partial`); Python loads column types from exported schemas and checks `FileHeader.schema_version`. Parts from all attempts are read together. A `run_id` that appears twice (re-queued after a node I/O failure) is deduplicated by `run_id`; determinism makes the copies identical, and a differing `final_state_hash` is reported as an error. |
 | Errors | Missing `run_id` ranges in `_MANIFEST.json` → analysis runs but the report is stamped *partial* with those ranges. A policy-aborted campaign (exit `6`) is reported as aborted, with its crash histogram, never as a verdict. |
+| As built (step 4c) | `saber.analyze` (§5.7). Committed means a `*_summaries.parquet` under its final name, so `.tmp` and `.partial` files and the other files of a part whose summaries never committed are skipped; the missing ranges are computed from the committed `run_id`s against the sweep's run count (`_MANIFEST.json` `runs`, else the manifest file), so a campaign that lost a part after `_MANIFEST.json` was written is still stamped partial. Columns and types are checked through `saber.schema` against the exported schemas. `saber.verify` refuses an aborted campaign; `saber.report` reports it with its abort reason and runs by status. |
 
 ### IB-12 · Verdicts & report (saber.verify → sim_explorer ResultsExplorer, humans)
 
@@ -1449,6 +1539,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|
 | Contract | `verdicts.parquet`: `campaign_id, req_id, aggregation, n_runs, n_pass, n_fail, n_inconclusive, estimate, lower_bound, confidence, verdict u8, trace_ids list<str>`. Plus `report.html` with traceability matrix (requirement → metric → evidence query). |
 | Owner | `sim_schema::VERDICTS_SCHEMA`. As built (step 3a): `Table::Verdicts` / `CampaignVerdictRow`; `lower_bound` and `confidence` are null for `AllPass`; sorted by `req_id`. |
+| As built (step 4c) | `saber.verify` writes it (§5.7): `aggregation` is the rule as written (`Probability(min_p: 0.99, confidence: 0.9)`, with ` per param set` appended for `by_param_set`); `estimate` is the pass rate of the conclusive runs (for `Quantile`, the quantile of the known values); `lower_bound` and `confidence` are set for `Probability` only, the lower bound counting inconclusive runs as failures. The header carries the campaign's `campaign_id`, `scene_hash`, `req_set_hash` and `build_id`. The footer key `saber.verify` (`sim_schema::io::VERIFY_KEY`) holds JSON: the crash and timeout policy, `by_param_set`, the envelope, runs judged, excluded `SetupError` runs, `partial` and the missing ranges, the requirement set's id, version and hash, warnings, and per requirement its upper bound, up to ten failing `run_id`s, the worst parameter set, the all-passing runs a straddling `Probability` would need, and a note. `report.html` is one file with inline CSS and no scripts or external resources: the hashes and a *complete*, *partial* or *aborted* stamp, coverage, the traceability matrix (requirement, trace ids, check, metric and its definition, rule, runs by outcome, estimate, bounds, verdict, failing runs, and the evidence query as DuckDB SQL over the committed summaries parts), the policy, runs by status, uncertainty and unstable regions. |
 
 ### IB-13 · External model & requirement import (→ sim_studio / sim_models)
 
@@ -1650,8 +1741,13 @@ capture and campaign crash policy as `CrashedNaN`.
 SI throughout the kernel; the Studio may display other units. Every scenario declares a world frame
 (`NED`, `ENU`, or `ECEF` for long-range ballistics). ENU and NED have their origin at mean sea level, so
 altitude is `z` in ENU and `−z` in NED; in ECEF altitude is the WGS 84 geodetic height (Heikkinen's closed
-form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. ECEF is treated as non-rotating until step 5a
-adds Earth rotation (Coriolis and centrifugal terms). Signal metadata (`ModelMeta.signals`) carries unit
+form). Flat gravity needs ENU or NED and J2 gravity needs ECEF. A frame turns only when the scenario carries
+`EarthRotation` (step 5a, §5.2); otherwise every frame, ECEF included, is treated as inertial. A turning frame
+is described by its angular velocity `Ω` in world components (`Environment::frame_rotation`). The kernel then
+integrates `v̇ = F/m + g − 2Ω × v − Ω × (Ω × p)` and the attitude relative to the frame,
+`q̇ = ½ q ⊗ (0, ω − q⁻¹Ωq)`, while `body_rates` stay inertial so Euler's equations are unchanged; aerodynamic
+models use the rates relative to the frame (`Stage::rates_relative_to_frame`). The reported energy is then the
+Jacobi integral, `½mv² + mΦ − ½m|Ω × p|² + T_rot`. Signal metadata (`ModelMeta.signals`) carries unit
 and frame so requirement thresholds can be unit-checked at validation (IB-03).
 
 ### 10.4 Versioning
