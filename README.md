@@ -27,8 +27,8 @@ aircraft.
 > `saber.campaign.submit` queues it on PBS or Slurm with automatic resubmissions. `saber.analyze` reads a campaign's
 > committed parts with its coverage and uncertainty, `saber.verify` turns per-run verdicts into campaign verdicts
 > with Clopper–Pearson bounds in `verdicts.parquet`, and `saber.report` writes a self-contained `report.html` with
-> the traceability matrix (`python -m saber.verify campaign.toml` does all three). Fixed-wing and rotorcraft
-> models come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> the traceability matrix (`python -m saber.verify campaign.toml` does all three). Impulsive contact (bounces and
+> ricochets at a located time of impact) and the fragment pool come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

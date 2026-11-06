@@ -11,6 +11,7 @@
 //! allocates. The `events.parquet` row is `sim_schema::EventRow` (step 3a); `IO.Mux` writes it with step 3b.
 
 use bevy_ecs::prelude::*;
+use glam::DVec3;
 
 use crate::body::SimId;
 
@@ -21,8 +22,25 @@ pub struct SimEvent {
     pub name: &'static str,
     /// The entity it happened to, when there is one.
     pub sim_id: Option<SimId>,
+    /// The other entity, for an event between two (a contact), or `None`.
+    pub other: Option<SimId>,
+    /// Where it happened, world frame, m; `None` logs the position of `sim_id`'s body.
+    pub pos: Option<DVec3>,
     /// A value that goes with it (for example an impact speed), or `NaN`.
     pub value: f64,
+}
+
+impl SimEvent {
+    /// An event on one entity, logged at that body's position.
+    pub fn new(name: &'static str, sim_id: Option<SimId>, value: f64) -> Self {
+        Self {
+            name,
+            sim_id,
+            other: None,
+            pos: None,
+            value,
+        }
+    }
 }
 
 /// This tick's events and the declared event names.

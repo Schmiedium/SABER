@@ -682,6 +682,36 @@ geometry:
 | Fragment and sensor hits recorded with interpolated time, no response | `EventOnly` | §7.7 |
 | Post-contact continuation: a projectile glances off the ground and keeps flying under aero forces | `Impulsive` | closed-form rebound, then the §7.2–7.3 checks on the continued flight |
 
+**As built (step 5d, part 1).** Geometry, compliant contact, gear points and `EventOnly` at tick ends
+(`crates/sim_core/tests/contact.rs`, `contact_alloc.rs`). All material values are synthetic (TD1). The
+`Impulsive` rows above, swept `EventOnly` casts, penetration recovery, and time of impact against a thin
+plate are step 5d-2. A linear dashpot's force steps to `c v₀` at touchdown, so the closed-form drops start
+1 pm inside the contact, where the closed form starts; a stage that lands exactly on `δ = 0` would miss
+the step.
+
+| Check | Oracle | Tolerance |
+|---|---|---|
+| Ball (3DOF and 6DOF) dropping at 0.2 m/s onto a linear spring–dashpot ground, 0.5 s in contact | closed-form underdamped spring–damper under gravity | 1e-9 m every tick |
+| A gear leg (ray along the strut) on flat ground, same drop; `Contacts` reports the compression | same closed form | 1e-9 m |
+| Resting deflection: linear `m g / k`; Hertzian `(m g / k)^(2/3)` with Hunt–Crossley damping; two materials in series; a pair override winning over both materials | closed form, after 3 s | 1e-9 relative; normal force `m g` to 1e-6 N |
+| Two equal balls, undamped Hertzian contact in vacuum: velocities swap, momentum conserved, peak overlap `(5 μ v² / 4k)^(2/5)`, contact time `2.9432 δ_max / v` | closed form | 1e-12 momentum; 1e-7 m/s; 1e-5 relative; ±2 ticks |
+| Level and tilted box, capsule, ball, convex hull pressed into a half-space: force and moment against sums over the documented points (corners, end spheres, deepest point) | hand computation | 1e-12 relative |
+| Upright cylinder stands on four rim points | closed form | 1e-12 |
+| Ball pressed into a flat and three sloped height fields (slopes along `x`, `y` and both, checking row orientation) and a flat triangle mesh: `k δ` along the surface normal; a box on the mesh through GJK and the reused EPA | closed form | 1e-9 relative; depth 1e-12 m |
+| Two overlapping boxes (EPA between bodies): equal and opposite, `k δ` with the stiffnesses in series | closed form | exact opposite; 1e-9 relative |
+| Gear leg on flat and ±slopes (force along the surface normal at the hit point, with its moment); a steered, braked wheel rolling straight: `−(c_rr + brake μ_b) F_n` along the wheel, nothing across it | closed form | 1e-9 N |
+| Point mass on a slope with regularised friction: below the friction angle it creeps at `v_ε atanh(tan θ / μ)`; above it accelerates at `g (sin θ − μ cos θ)`; never leaves the surface | closed form | 1e-9 m/s, m/s² |
+| Sliding to rest on flat ground: distance `v₀² / 2μg + π² v_ε² / 12μg` (the second term is the regularisation's creep, exact to `O(e^{−2v₀/v_ε})`) | closed form | 1e-8 m |
+| Tick-0 stiffness check at `ω dt` = 2.1, 1.0 and 0.3, and three gear legs adding up past 0.5 and past 2 | exact | error kind and message; warning count |
+| Dropped Hunt–Crossley ball: each touchdown logs `contact` with both `SimId`s, the contact point and the approach speed (first one within 1 % of `√(2 g h)`, each later one slower); each lift-off logs `contact_end` with a peak force above `m g` | closed form, invariant | 1e-9 m in x, y; 1e-3 m in z; 1 % |
+| `EventOnly` material: the contact and its `contact` event at Tick 0, zero force | exact | exact |
+| Six bodies of three shapes falling onto a height field and each other, spawned in two orders | R1-style exact | every tick's state hash and every event bit-equal |
+| The same Hunt–Crossley drop at the origin and 360 km away (ground and body moved together) | metamorphic (§5.6) | 1e-9 m |
+| More near pairs than `max_contact_pairs`: at Tick 0 against a half-space, and mid-run as balls fall near a bounded height field | exact status | `CrashedSolver(ContactCapacity)` |
+| Setup errors: a half-space on a body, a collider without a `SimId`, `Impulsive` before 5d-2, unmixable materials, a zero stroke, a short height list, a compliant material without stiffness, a flat convex hull; `max_contact_pairs = 0` | error kinds | exact |
+| `config.contact` in `sim_config_hash`; contact components and gear points load from a scenario file with their defaults | exact | exact |
+| Zero allocations for 800 ticks per run, under RK4 and adaptive Dormand–Prince, across a World reset: every shape on a half-space, a height field and a mesh, two overlapping boxes, a three-legged body on braked wheels, contacts starting and ending | counting allocator | 0 |
+
 ### 7.6 `RotorcraftPlugin`, `ActuatorPlugin`, `SensorPlugin`, `ControlPlugin`
 
 | Check | Oracle |

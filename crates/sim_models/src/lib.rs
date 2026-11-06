@@ -14,6 +14,7 @@
 
 pub mod actuators;
 pub mod ballistics;
+pub mod control;
 pub mod environment;
 pub mod fixedwing;
 pub mod sensors;
@@ -23,6 +24,7 @@ use sim_core::{Semver, SimAppBuilder};
 
 pub use actuators::ActuatorPlugin;
 pub use ballistics::AeroBallisticsPlugin;
+pub use control::{ControlPlugin, Controller, ControllerPlugin};
 pub use environment::EnvironmentPlugin;
 pub use fixedwing::FixedWingPlugin;
 pub use sensors::SensorPlugin;

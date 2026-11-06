@@ -396,7 +396,7 @@ fn event_row(row: &ManifestRow, e: &LoggedEvent) -> EventRow {
         t_s: e.t_s,
         event: e.name.to_owned(),
         sim_id: e.sim_id.map(|s| s.0),
-        other_sim_id: None,
+        other_sim_id: e.other.map(|s| s.0),
         pos: e.pos,
         value: e.value,
     }

@@ -352,11 +352,11 @@ flowchart LR
 | `SimClock` | Tick counter + fixed dt + multi-rate dividers so controllers/sensors can run at e.g. 1/10 physics rate deterministically. | `RateDivider(u32)` |
 | `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Integrator`, `Tableau<S>`, `trait OdeSystem`, `StateLayout`, `TickReport`, `IntegratorStats`, `SolverFailure` |
 | `SimRng` | Root RNG + **named substreams** (`rng.stream("wind")`) so adding a new noise source doesn't shift every other random draw. | `SimRng`, `RngStream` |
-| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). As built (step 3b): after the recorder in `SimSet::Record`, `TelemetryLog` copies this tick's events (with the body's position from the frame just recorded) and, every `snapshot_every` ticks from Tick 0, every body's state; buffers are sized at Tick 0 from `TelemetryConfig { max_events, snapshot_every, max_snapshots }` (a campaign setting, not in `sim_config_hash`), so overflow is counted, never allocated, and `RunOutput` adds the final state when it was off the cadence. Adaptive snapshot ramp-up is not built yet. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
+| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). As built (step 3b): after the recorder in `SimSet::Record`, `TelemetryLog` copies this tick's events (with the body's position from the frame just recorded) and, every `snapshot_every` ticks from Tick 0, every body's state; buffers are sized at Tick 0 from `TelemetryConfig { max_events, snapshot_every, max_snapshots }` (a campaign setting, not in `sim_config_hash`), so overflow is counted, never allocated, and `RunOutput` adds the final state when it was off the cadence. Adaptive snapshot ramp-up is not built yet. As built (step 5d, part 1): `SimEvent` also carries `other` (the second entity of a contact) and `pos` (where it happened; when absent the log uses the body's position), and the log row fills `other_sim_id`. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
 | `FieldPath`, `CheckCatalog` | Kernel support for verification that model plugins can reach without depending on `sim_verify` (§4): `FieldPath` reads a number or `bool` from `Component.field.path` through a path parsed once (no allocation per read); `CheckCatalog` holds the named custom requirement checks plugins register with `SimAppBuilder::register_check` (step 2). | `FieldPath`, `FieldReadError`, `CustomCheck`, `CheckState`, `CheckCatalog` |
 | `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). | `FlightRecorder` |
-| `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). | `CollisionShape`, `ContactPairs`, `TerrainBvh` |
-| `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. | `ContactMaterial`, `ContactPoints`, `trait ContactForces` |
+| `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). As built (step 5d, part 1): the module is `sim_core::geometry`; shapes are `CollisionShape { parts }` of `ShapePart { shape: ShapeDesc, pose: Pose }`, built into Parry shapes at Tick 0 (meshes and height fields with their BVH); the broad phase lives in `ContactSolver`. Ray queries serve gear points now and range sensors in 5d-2. | `CollisionShape`, `ShapePart`, `ShapeDesc`, `Pose` |
+| `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. As built (step 5d, part 1): `sim_core::contact`, owned by `Dynamics`; `Compliant` and `EventOnly` (at tick ends) only, `Impulsive` arrives in 5d-2. Forces are added after the force models in every stage; `SimSet::Constraints` fills `Contacts` and emits `contact` and `contact_end`. Details in `physics-engine-tradeoffs.md` §9.7a. | `ContactMaterial`, `DampingLaw`, `ContactPoints`, `GearPoint`, `ContactOverrides`, `ContactConfig`, `Contacts`, `ContactPoint` |
 | `FragmentPool` | Fixed-capacity store of dormant 3DOF fragment slots, sized from the scenario and allocated at Tick 0 so fragmentation never allocates mid-run (IB-16). Absent when a scenario declares no fragmentation. | `FragmentPool`, `FragmentSlot` |
 | `Core.Watchdog` | Detects divergence, sets `SimStatus::Crashed*`, tags `FLAG_NAN_ORIGIN`. Checks every body's state is finite, then (when set) that total mechanical energy (translational, rotational and the environment's gravity potential) stays at or below `energy_max_j`. Names the first non-finite body in `SimId` order, or the body with the most energy. | `WatchdogConfig { energy_max_j: Option<f64> }`, `RunStatus` |
 | `TerminationPolicy` | Ends the run: tick budget, model-declared stop conditions (impact, landing, goal reached), crash. Stop conditions call `StopRequests::request(name)`; the run ends as `Terminated` at the end of that tick. At `max_ticks` the run ends with `at_max_ticks`, `Completed` by default (D19). | `SimStatus`, `StopRequests`, `MaxTicksOutcome` |
@@ -542,15 +542,23 @@ The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lew
 `Controller` boundary (in-process, deterministic):
 
 ```rust
-/// Implemented by any flight/robot controller run inside the tick loop.
-pub trait Controller: Send + Sync + 'static {
-    type Obs: Reflect;      // what the sensors deliver
-    type Cmd: Reflect;      // what the actuators accept
-    fn rate_divider(&self) -> u32;               // runs every N physics ticks
-    fn reset(&mut self, rng: &mut RngStream);
-    fn step(&mut self, t: SimTime, obs: &Self::Obs) -> Self::Cmd; // must be pure f64, no I/O, no alloc
+/// A native controller run inside the tick loop: a component on the entity it controls.
+pub trait Controller: Component<Mutability = Mutable> + Sized {
+    type Obs: Component + Clone;                  // read from the same entity (a sensor, an estimate)
+    type Cmd: Component<Mutability = Mutable> + Default; // written to the same entity (MixerCommand, ControlSurfaces)
+    const NAME: &'static str;                     // errors, and its stream control/<NAME>/<SimId>
+    fn rate_divider(&self) -> u32;                // runs every N physics ticks
+    fn reset(&mut self, rng: &mut RngStream);     // Tick 0, with its own stream
+    fn step(&mut self, t: f64, obs: &Self::Obs) -> Self::Cmd; // pure f64, no I/O, no alloc
 }
 ```
+
+`ControllerPlugin::<C>::new()` runs every `C` in `SimSet::Control`, after the PID loops, in `SimId` order. It sets
+up in `start` (a controller needs a `SimId` and its `Obs`; a missing `Cmd` is inserted at its default) so the
+command component exists before other plugins' `after_setup`. The design sketch had `Obs` and `Cmd` as
+reflected values handed over by the kernel; as components on the controlled entity, a controller plugs into
+sensors, the mixer, actuators and PID loops with no glue, and its inputs and outputs are visible to field
+paths, probes and the recorder.
 
 Controllers are native Rust `Controller` implementations only. Real flight software in the loop is out of
 scope (D4).
@@ -1145,7 +1153,10 @@ Notes:
   contact forces are evaluated inside every RK4 stage through `trait ContactForces`; `Impulsive` contacts are
   event-located inside `Integrate` (integrate all bodies to the time of impact, apply impulses, finish the
   step, at most `max_events_per_tick`); `EventOnly` casts, `SimEvent::Contact` and contact stop conditions
-  run in `Constraints`. See `physics-engine-tradeoffs.md` §9.4.
+  run in `Constraints`. See `physics-engine-tradeoffs.md` §9.4. As built (step 5d, part 1): the solver is a
+  kernel part of `Dynamics` rather than a `trait ContactForces` implementation, and runs after the force
+  models in every stage of every substep; its end-of-tick pass is the first system of `Constraints`, so
+  plugin systems there already see this tick's `Contacts`.
 
 ---
 
@@ -1794,6 +1805,7 @@ sequenceDiagram
 | Owner | `sim_core` (types, Parry wrapper); `sim_schema` (event schema). Parry is pinned exactly and is part of `build_id`. |
 | Validation | `Core.Resolver` at Tick 0: shapes valid and non-degenerate, `max_contact_pairs` sized, compliant stability `ω·dt ≤ 2.0` (else `SetupError`, warning above 0.5), `0 ≤ e ≤ 1`, `μ ≥ 0`. |
 | Errors | Pair buffer overflow → `CrashedSolver(ContactCapacity)`; persistent penetration above `max_penetration` or energy gain across an impulse → watchdog crash; more than `max_events_per_tick` impacts → deferred and logged, run continues. |
+| As built (step 5d, part 1) | `CollisionShape { parts: Vec<ShapePart { shape, pose }> }` (several parts instead of `Compound`; `HalfSpace`, `HeightField { rows, cols, size_x, size_y, heights }` and `TriMesh { vertices, indices }` inline rather than in a sidecar, static only). `ContactMaterial` adds `damping_law` (`HuntCrossley` or `Linear`) and `slip_speed`. `ContactPoints { points: Vec<GearPoint> }`, each `GearPoint { attach, axis, stroke, material, rolling, forward, steer, rolling_resistance, brake, brake_friction }` with its own material only. Per-pair materials are `ContactOverrides { pairs: [ContactOverride { other, material }] }` on either entity; without one, two materials combine (series stiffness and damping, geometric-mean friction) and must share exponent and damping law. No `trait ContactForces`: the kernel's solver adds the forces. Events are the declared names `contact` (value: approach speed, with `other` and the point) and `contact_end` (value: peak normal force). `config.contact.max_contact_pairs` (default 1024) is in `sim_config_hash`. Stiffness warnings go to `ResolveReport.warnings`. `Impulsive`, `ContactDeferred`, `max_penetration` and the impulse energy check arrive with 5d-2. |
 
 ### IB-20 · 3D model assets (model files → sim_assets → Studio.Assets, new, D17)
 

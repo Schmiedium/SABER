@@ -20,6 +20,10 @@
 //! Force models may own integrated states (`ForceModel::state_len`, for example an engine's power
 //! lag). They are packed after the bodies, one error-norm group per model, and crossed by the same
 //! integrator, so every model works with every method (D14).
+//!
+//! Compliant contact forces (`contact::ContactSolver`, step 5d) are added after the force models
+//! in every stage; the solver's broad phase runs once per tick before the integrator, and its
+//! end-of-tick pass (`SimSet::Constraints`) reports the contacts and their events.
 
 use std::ops::Range;
 
@@ -30,6 +34,7 @@ use sim_schema::CrashReason;
 use crate::app::SetupError;
 use crate::body::{BodyState, BodyTable, Dof, PointMass3, RigidBody6, SimId};
 use crate::clock::SimClock;
+use crate::contact::{ContactConfig, ContactSolver};
 use crate::environment::{EnvSample, Environment, SimEnvironment};
 use crate::force::{ForceModel, Stage, Wrench};
 use crate::integrator::{
@@ -52,6 +57,7 @@ pub struct Dynamics {
     env: Vec<EnvSample>,
     wrenches: Vec<Wrench>,
     tick_wrenches: Vec<Wrench>,
+    contact: ContactSolver,
 }
 
 impl Default for Dynamics {
@@ -73,6 +79,7 @@ impl Dynamics {
             env: Vec::new(),
             wrenches: Vec::new(),
             tick_wrenches: Vec::new(),
+            contact: ContactSolver::default(),
         }
     }
 
@@ -95,20 +102,28 @@ impl Dynamics {
             .unwrap_or_default()
     }
 
-    /// Tick 0: collect the bodies, set up the force models, build or reset the integrator and its
-    /// buffers. Buffers are kept when the layout is unchanged, so a reused World does not reallocate.
+    /// Tick 0: collect the bodies, set up the force models and the contact solver, build or reset
+    /// the integrator and its buffers. Buffers are kept when the layout is unchanged, so a reused
+    /// World does not reallocate.
     pub(crate) fn start(
         &mut self,
         world: &mut World,
         config: &IntegratorConfig,
+        contact: ContactConfig,
         dt: f64,
     ) -> Result<(), SetupError> {
         self.bodies = BodyTable::build(world)?;
         {
-            let Self { models, bodies, .. } = self;
+            let Self {
+                models,
+                bodies,
+                contact: solver,
+                ..
+            } = self;
             for model in models.iter_mut() {
                 model.setup(world, bodies)?;
             }
+            solver.setup(world, bodies, contact, dt)?;
         }
         let mut layout = self.bodies.layout();
         self.model_ranges.clear();
@@ -139,6 +154,12 @@ impl Dynamics {
         self.tick_wrenches.clear();
         self.tick_wrenches.resize(n, Wrench::ZERO);
         Ok(())
+    }
+
+    /// The contacts at the World's current state into `Contacts`, with their events (the end of
+    /// every tick, and Tick 0).
+    pub(crate) fn contact_end_of_tick(&mut self, world: &mut World) {
+        self.contact.end_of_tick(world, &self.bodies);
     }
 
     /// Copy the body components into the packed state.
@@ -218,6 +239,7 @@ struct BodyOde<'a> {
     env: &'a mut [EnvSample],
     wrenches: &'a mut [Wrench],
     tick_wrenches: &'a mut [Wrench],
+    contact: &'a mut ContactSolver,
     first_stage: bool,
     frame_rotation: DVec3,
 }
@@ -272,6 +294,8 @@ impl OdeSystem for BodyOde<'_> {
                 model.state_rhs(&stage, rates);
             }
         }
+        self.contact
+            .eval(self.states, self.frame_rotation, self.wrenches);
         if self.first_stage {
             self.tick_wrenches.copy_from_slice(self.wrenches);
             self.first_stage = false;
@@ -337,8 +361,9 @@ pub(crate) fn integrate_system(world: &mut World) {
         for model in d.models.iter_mut() {
             model.prepare(world, &d.bodies);
         }
-        d.pack(world);
         let (t0, t1) = world.resource::<SimClock>().next_interval();
+        d.contact.prepare(world, &d.bodies, t1 - t0);
+        d.pack(world);
         let result = {
             let Dynamics {
                 bodies,
@@ -350,6 +375,7 @@ pub(crate) fn integrate_system(world: &mut World) {
                 env,
                 wrenches,
                 tick_wrenches,
+                contact,
                 ..
             } = d;
             let environment = world.resource::<SimEnvironment>().0.as_ref();
@@ -363,6 +389,7 @@ pub(crate) fn integrate_system(world: &mut World) {
                 env,
                 wrenches,
                 tick_wrenches,
+                contact,
                 first_stage: true,
                 frame_rotation: environment.frame_rotation(),
             };
@@ -480,6 +507,7 @@ pub fn derivatives(world: &mut World) -> Derivatives {
         for model in d.models.iter_mut() {
             model.prepare(world, &d.bodies);
         }
+        d.contact.prepare(world, &d.bodies, 0.0);
         d.pack(world);
         let t = world.resource::<SimClock>().time();
         let mut dydt = vec![0.0; d.y.len()];
@@ -493,6 +521,7 @@ pub fn derivatives(world: &mut World) -> Derivatives {
                 env,
                 wrenches,
                 tick_wrenches,
+                contact,
                 ..
             } = d;
             let environment = world.resource::<SimEnvironment>().0.as_ref();
@@ -506,6 +535,7 @@ pub fn derivatives(world: &mut World) -> Derivatives {
                 env,
                 wrenches,
                 tick_wrenches,
+                contact,
                 // Leave the tick's recorded wrenches alone.
                 first_stage: false,
                 frame_rotation: environment.frame_rotation(),
@@ -549,4 +579,12 @@ pub fn derivatives(world: &mut World) -> Derivatives {
             .collect();
         Derivatives { bodies, models }
     })
+}
+
+/// `SimSet::Constraints` (first core system): the contacts at the end of the tick and their
+/// `contact` and `contact_end` events.
+pub(crate) fn contact_system(world: &mut World) {
+    crate::with_resource(world, |world, d: &mut Dynamics| {
+        d.contact_end_of_tick(world)
+    });
 }

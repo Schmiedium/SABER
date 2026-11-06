@@ -2,11 +2,13 @@
 //! sampling, the ground-impact check, and a scenario spawned and resolved from a file each run;
 //! with the aero-ballistics plugin (Mach tables, Earth rotation, `AeroState`); and with the
 //! fixed-wing plugin (the F-16's table buildup, the turbofan's integrated power lag, `AirData`,
-//! trim at Tick 0).
+//! trim at Tick 0); with turbulence, servos and sensors; and with rotorcraft, PID loops and a native
+//! controller.
 
 use std::sync::Arc;
 
 use sim_core::{RunSeed, Scenario, SimAppBuilder, SimConfig};
+use sim_models::rotorcraft::{Rotor, Rotorcraft, Spin};
 
 #[global_allocator]
 static ALLOC: sim_testkit::CountingAllocator = sim_testkit::CountingAllocator;
