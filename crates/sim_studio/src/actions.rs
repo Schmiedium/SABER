@@ -21,6 +21,7 @@ use crate::crash::OpenCrash;
 use crate::preview::{ParamChoice, PreviewCrash, PreviewRun, Speed, params_for, sweeps};
 use crate::recent::RecentList;
 use crate::state::{AppState, Rail, RailContext, RailTarget};
+use crate::viewport::{FocusMode, ViewToggle, ViewportState};
 use crate::workspace::{Pack, Workspace, WorkspaceError};
 
 /// Something the user asked for.
@@ -141,6 +142,10 @@ pub enum StudioCommand {
     AddChannel(String),
     /// Stop plotting a signal.
     RemoveChannel(String),
+    /// Point the viewport's camera at a body (by `SimId`) in a mode; `None` frees it.
+    CameraFocus(Option<u32>, FocusMode),
+    /// Show or hide part of the viewport.
+    ToggleView(ViewToggle),
 }
 
 /// The Preview Run screen (`sim_studio_ux.md` §7.5): the run and how it is driven.
@@ -389,6 +394,7 @@ pub struct CommandCx<'w> {
     preview: ResMut<'w, PreviewState>,
     live_crash: ResMut<'w, LiveCrash>,
     preview_changed: MessageWriter<'w, PreviewChanged>,
+    view: ResMut<'w, ViewportState>,
 }
 
 /// Carry out the user's commands.
@@ -517,6 +523,9 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             | StudioCommand::StopPreview
             | StudioCommand::AddChannel(_)
             | StudioCommand::RemoveChannel(_) => preview_command(command, &mut cx),
+            StudioCommand::CameraFocus(..) | StudioCommand::ToggleView(_) => {
+                view_command(command, &mut cx);
+            }
             StudioCommand::Undo | StudioCommand::Redo if cx.req.tab == BuilderTab::Requirements => {
                 edit_requirements(command, &mut cx);
             }
@@ -828,6 +837,7 @@ fn preview_ended(
 fn preview_command(command: &StudioCommand, cx: &mut CommandCx) {
     let rebuild = |cx: &mut CommandCx| match build_preview(cx) {
         Ok(run) => {
+            cx.view.show(run.frame(), &run.bodies());
             cx.preview.run = Some(run);
             true
         }
@@ -904,6 +914,68 @@ fn preview_command(command: &StudioCommand, cx: &mut CommandCx) {
         }
     }
     cx.preview_changed.write(PreviewChanged);
+}
+
+/// The viewport's commands: focus and what it shows.
+fn view_command(command: &StudioCommand, cx: &mut CommandCx) {
+    let view = &mut *cx.view;
+    match command {
+        StudioCommand::CameraFocus(Some(id), mode) => {
+            let rig = view.rig;
+            view.focus.set(*id, *mode, &rig);
+        }
+        StudioCommand::CameraFocus(None, _) => view.focus.release(),
+        StudioCommand::ToggleView(ViewToggle::Hud) => view.hud = !view.hud,
+        StudioCommand::ToggleView(ViewToggle::Grid) => view.grid = !view.grid,
+        StudioCommand::ToggleView(ViewToggle::Gizmos) => view.gizmos = !view.gizmos,
+        _ => return,
+    }
+    cx.preview_changed.write(PreviewChanged);
+}
+
+/// The viewport's keys in Preview Run (`sim_studio_ux.md` §9.6): F frames the focus target (or
+/// the first body), Shift+F follows it, H shows or hides the HUD, Esc frees the camera.
+pub fn viewport_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    view: Res<ViewportState>,
+    preview: Res<PreviewState>,
+    focus: Option<Res<InputFocus>>,
+    editing: Query<(), With<EditableText>>,
+    mut out: MessageWriter<StudioCommand>,
+) {
+    if focus
+        .and_then(|f| f.get())
+        .is_some_and(|e| editing.contains(e))
+    {
+        return;
+    }
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if ctrl {
+        return;
+    }
+    let target = view.focus.target.or_else(|| {
+        preview
+            .run
+            .as_ref()
+            .and_then(|r| r.bodies().first().map(|b| b.sim_id))
+    });
+    if keys.just_pressed(KeyCode::KeyF)
+        && let Some(t) = target
+    {
+        let mode = if shift {
+            FocusMode::Follow
+        } else {
+            FocusMode::Frame
+        };
+        out.write(StudioCommand::CameraFocus(Some(t), mode));
+    }
+    if keys.just_pressed(KeyCode::KeyH) {
+        out.write(StudioCommand::ToggleView(ViewToggle::Hud));
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        out.write(StudioCommand::CameraFocus(None, view.focus.mode));
+    }
 }
 
 /// Step the playing preview once per frame, as fast as its speed asks, within a frame budget.

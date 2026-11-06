@@ -17,7 +17,7 @@ use sim_core::{
     FieldPath, FlightRecorder, ParamBindings, ParamValues, RunOutput, RunSeed, Scenario,
     SimAppBuilder, SimId, SimStatus, SimTypeRegistry, SimWorld,
 };
-use sim_schema::{BodySnapshot, CrashReason, TickFrame, Verdict};
+use sim_schema::{BodySnapshot, CrashReason, Frame, TickFrame, Verdict};
 use sim_verify::{
     RequirementKind, RequirementSet, RunVerdictRow, VerifyPlugin, VerifyState, parse_signal,
     run_verdicts,
@@ -195,6 +195,7 @@ pub struct PreviewRun {
     every: u64,
     verdicts: Option<RunVerdictRow>,
     owed_s: f64,
+    frame: Frame,
 }
 
 impl std::fmt::Debug for PreviewRun {
@@ -221,6 +222,7 @@ impl PreviewRun {
             b.add_plugin(VerifyPlugin::new(set.clone()));
         }
         let mut sim = b.build().map_err(|e| e.to_string())?;
+        let frame = scenario.frame();
         sim.set_scenario(scenario).map_err(|e| e.to_string())?;
         sim.set_recorder_frames(RECORDER_FRAMES);
         let mut run = Self {
@@ -236,6 +238,7 @@ impl PreviewRun {
             every: 1,
             verdicts: None,
             owed_s: 0.0,
+            frame,
         };
         run.start()?;
         run.channels.push(Channel {
@@ -283,6 +286,11 @@ impl PreviewRun {
             }
         }
         out
+    }
+
+    /// The scenario's world frame.
+    pub fn frame(&self) -> Frame {
+        self.frame
     }
 
     /// The seed it runs with.

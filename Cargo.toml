@@ -58,6 +58,12 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "bevy_clipboard",
     "custom_cursor",
     "bevy_scene",
+    # The 3D viewport (step S3-2): meshes, unlit materials and gizmo lines, rendered into a
+    # `ViewportNode`'s image. No glTF, lights or tonemapping LUTs yet.
+    "bevy_pbr",
+    "bevy_mesh",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
 ] }
 # Collision detection (D13). Only `sim_core::geometry` imports it (IB-19); pinned exactly because a new
 # version can move contact points, and it is part of `build_id`.

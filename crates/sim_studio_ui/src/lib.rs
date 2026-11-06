@@ -4,17 +4,20 @@
 //! Panels compose the scene functions in [`widgets`] with `bsn!` and listen to kit events
 //! ([`widgets::KitActivated`], [`widgets::KitChanged`]); colors come from [`theme`] tokens. The
 //! kit's own widgets so far are the [`dock`] (fixed regions and splitters) and [`toast`]
-//! notifications, and [`plot`] (line plots drawn on the CPU); the data table, tree, pickers and
-//! command palette follow with the screens that need them (S2–S6).
+//! notifications, and [`plot`] (line plots drawn on the CPU); [`fonts`] puts a symbol font behind
+//! Feathers' fonts. The data table, tree, pickers and command palette follow with the screens that
+//! need them (S2–S6).
 //!
 //! Design: `docs/design/sim_studio_ux.md` §6.1, §10, §11; subsystems §5.5 (`Studio.UiKit`, D11).
 
 pub mod dock;
+pub mod fonts;
 pub mod plot;
 pub mod theme;
 pub mod toast;
 pub mod widgets;
 
+use bevy::app::PropagateSet;
 use bevy::feathers::FeathersPlugins;
 use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
@@ -24,7 +27,7 @@ pub use bevy;
 /// What panels need in scope: the scene macros, the facade, tokens and kit events.
 pub mod prelude {
     pub use crate::dock::{DockLayout, DockLayoutChanged, DockRegion, DockSide, dock};
-    pub use crate::theme::{StudioTheme, ThemeMode, Token, token};
+    pub use crate::theme::{StudioTheme, ThemeColors, ThemeMode, Token, token};
     pub use crate::toast::{Toast, ToastLevel, ToastLog, toast_stack};
     pub use crate::widgets::{
         FieldId, Fields, KitActivated, KitChanged, KitSubmit, Status, button, column, heading,
@@ -51,8 +54,8 @@ impl Plugin for KitCorePlugin {
     }
 }
 
-/// The whole kit on a windowed app: Feathers, the theme, the dock's splitters and text fields.
-/// Add after `DefaultPlugins`.
+/// The whole kit on a windowed app: Feathers, the theme, the symbol font, the dock's splitters and
+/// text fields. Add after `DefaultPlugins`.
 pub struct KitPlugin;
 
 impl Plugin for KitPlugin {
@@ -73,6 +76,13 @@ impl Plugin for KitPlugin {
             .add_observer(dock::on_splitter_drag_end)
             .add_observer(dock::on_splitter_click)
             .add_observer(widgets::submit_on_enter)
+            .add_systems(
+                PostUpdate,
+                fonts::with_symbols
+                    .after(PropagateSet::<TextFont>::default())
+                    .before(bevy::text::load_font_assets_into_font_collection),
+            )
             .add_observer(widgets::submit_on_blur);
+        fonts::add_symbol_font(app);
     }
 }
