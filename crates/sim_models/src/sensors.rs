@@ -1,6 +1,5 @@
-//! `SensorPlugin` (subsystems §5.2, build steps 5c and 5d-3): an IMU, a GNSS receiver, a barometer
-//! and a range finder, each sampling the truth with noise, a bias random walk, quantisation, a
-//! sample rate and a latency.
+//! `SensorPlugin` (subsystems §5.2, build step 5c): an IMU, a GNSS receiver and a barometer, each
+//! sampling the truth with noise, a bias random walk, quantisation, a sample rate and a latency.
 //!
 //! A sensor is a component on a body; its measurement is in the same component (`Imu.gyro`,
 //! `Gnss.position`, `Barometer.altitude`), where controllers, probes and metrics read it. In
@@ -31,16 +30,11 @@
 //! - [`Gnss`] on any body: position and velocity in the world frame, m and m/s.
 //! - [`Barometer`] on any body: static pressure from the environment, Pa, and the pressure
 //!   altitude of the measured pressure in the 1976 standard atmosphere (geopotential), m.
-//! - [`RangeFinder`] on any body (a laser or radar altimeter): the distance from its mount point
-//!   along its beam to the first collider the beam meets within `max_range`, through the kernel's
-//!   ray query on the contact geometry (`Dynamics::ray_cast`), skipping the body's own collider.
-//!   With nothing in range it reads `max_range` with `hit` false (the noise draws are taken all the
-//!   same). Noise never makes a range negative.
 
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
 use glam::{DQuat, DVec3};
-use sim_core::dynamics::{Dynamics, derivatives};
+use sim_core::dynamics::derivatives;
 use sim_core::{
     MassProps, PointMass3, RigidBody6, RngStream, RngStreams, SetupError, SimAppBuilder, SimClock,
     SimEnvironment, SimId, SimPlugin, SimSet, StreamHandle,
@@ -245,59 +239,7 @@ impl Default for Barometer {
     }
 }
 
-/// A range finder: the distance along a beam to the first collider it meets.
-#[derive(Component, Reflect, Clone, Copy, Debug, PartialEq)]
-#[reflect(Component)]
-pub struct RangeFinder {
-    /// Samples every `rate_divider` ticks (≥ 1).
-    #[reflect(default = "every_tick")]
-    pub rate_divider: u32,
-    /// Ticks between a sample and its publication.
-    #[reflect(default)]
-    pub latency: u32,
-    /// Where the beam starts, body axes from the centre of mass, m.
-    #[reflect(default)]
-    pub mount: DVec3,
-    /// Beam direction, body axes (default `+z`, down in FRD axes; world axes on a point mass).
-    #[reflect(default = "down")]
-    pub direction: DVec3,
-    /// Longest range measured, m (> 0).
-    pub max_range: f64,
-    /// Noise on the range, m.
-    #[reflect(default)]
-    pub noise: Noise,
-    /// Measured range, m (`max_range` when nothing is in range).
-    #[reflect(default)]
-    pub range: f64,
-    /// Whether the published sample found something within `max_range`.
-    #[reflect(default)]
-    pub hit: bool,
-    /// Whether a measurement has been published.
-    #[reflect(default)]
-    pub valid: bool,
-}
-
-fn down() -> DVec3 {
-    DVec3::Z
-}
-
-impl Default for RangeFinder {
-    fn default() -> Self {
-        Self {
-            rate_divider: 1,
-            latency: 0,
-            mount: DVec3::ZERO,
-            direction: down(),
-            max_range: 0.0,
-            noise: Noise::default(),
-            range: 0.0,
-            hit: false,
-            valid: false,
-        }
-    }
-}
-
-/// IMU, GNSS, barometer and range-finder models.
+/// IMU, GNSS and barometer models.
 pub struct SensorPlugin;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -305,7 +247,6 @@ enum Kind {
     Imu,
     Gnss,
     Barometer,
-    Range,
 }
 
 impl Kind {
@@ -314,15 +255,14 @@ impl Kind {
             Kind::Imu => "imu",
             Kind::Gnss => "gnss",
             Kind::Barometer => "barometer",
-            Kind::Range => "range",
         }
     }
 
-    /// Measured (noisy) values per sample.
+    /// Measured values per sample.
     fn width(self) -> usize {
         match self {
             Kind::Imu | Kind::Gnss => 6,
-            Kind::Barometer | Kind::Range => 1,
+            Kind::Barometer => 1,
         }
     }
 }
@@ -352,8 +292,6 @@ struct Sensor {
     previous: Previous,
     /// The Tick-0 specific force (IMU only), world frame.
     initial_force: DVec3,
-    /// Range finder: mount and unit beam direction (body axes) and the longest range.
-    beam: (DVec3, DVec3, f64),
 }
 
 impl Sensor {
@@ -401,38 +339,24 @@ impl SimPlugin for SensorPlugin {
             .register_type::<Imu>()
             .register_type::<Gnss>()
             .register_type::<Barometer>()
-            .register_type::<RangeFinder>()
             .add_systems(SimSet::Sensors, sensor_system);
         app.world_mut().insert_resource(SensorBank::default());
     }
 
     fn after_setup(&self, world: &mut World) -> Result<(), SetupError> {
         let dt = world.resource::<SimClock>().dt;
-        type Found = (
-            SimId,
-            Entity,
-            Kind,
-            u32,
-            u32,
-            [Noise; 2],
-            (DVec3, DVec3, f64),
-        );
-        let mut found: Vec<Found> = Vec::new();
+        let mut found: Vec<(SimId, Entity, Kind, u32, u32, [Noise; 2])> = Vec::new();
         let mut q = world.query::<(
             Entity,
             Option<&SimId>,
-            (
-                Option<&Imu>,
-                Option<&Gnss>,
-                Option<&Barometer>,
-                Option<&RangeFinder>,
-            ),
+            Option<&Imu>,
+            Option<&Gnss>,
+            Option<&Barometer>,
             Has<RigidBody6>,
             Has<PointMass3>,
         )>();
-        let no_beam = (DVec3::ZERO, DVec3::ZERO, 0.0);
-        for (entity, id, (imu, gnss, baro, range), six, three) in q.iter(world) {
-            if imu.is_none() && gnss.is_none() && baro.is_none() && range.is_none() {
+        for (entity, id, imu, gnss, baro, six, three) in q.iter(world) {
+            if imu.is_none() && gnss.is_none() && baro.is_none() {
                 continue;
             }
             let who = id.map_or_else(|| format!("{entity:?}"), |id| format!("SimId {}", id.0));
@@ -446,11 +370,7 @@ impl SimPlugin for SensorPlugin {
             if !(six || three) {
                 return Err(err("a sensor needs a RigidBody6 or a PointMass3".into()));
             }
-            let mut add = |kind: Kind,
-                           divider: u32,
-                           latency: u32,
-                           noise: [Noise; 2],
-                           beam: (DVec3, DVec3, f64)| {
+            let mut add = |kind: Kind, divider: u32, latency: u32, noise: [Noise; 2]| {
                 if divider == 0 {
                     return Err(err(format!("{} rate_divider must be ≥ 1", kind.name())));
                 }
@@ -458,7 +378,7 @@ impl SimPlugin for SensorPlugin {
                     n.validate()
                         .map_err(|m| err(format!("{}: {m}", kind.name())))?;
                 }
-                found.push((id, entity, kind, divider, latency, noise, beam));
+                found.push((id, entity, kind, divider, latency, noise));
                 Ok(())
             };
             if let Some(s) = imu {
@@ -470,7 +390,6 @@ impl SimPlugin for SensorPlugin {
                     s.rate_divider,
                     s.latency,
                     [s.gyro_noise, s.accel_noise],
-                    no_beam,
                 )?;
             }
             if let Some(s) = gnss {
@@ -479,7 +398,6 @@ impl SimPlugin for SensorPlugin {
                     s.rate_divider,
                     s.latency,
                     [s.position_noise, s.velocity_noise],
-                    no_beam,
                 )?;
             }
             if let Some(s) = baro {
@@ -488,31 +406,6 @@ impl SimPlugin for SensorPlugin {
                     s.rate_divider,
                     s.latency,
                     [s.noise, Noise::default()],
-                    no_beam,
-                )?;
-            }
-            if let Some(s) = range {
-                if !(s.max_range.is_finite() && s.max_range > 0.0) {
-                    return Err(err(format!(
-                        "range max_range {} must be finite and > 0",
-                        s.max_range
-                    )));
-                }
-                let Some(dir) = s.direction.try_normalize() else {
-                    return Err(err(format!(
-                        "range direction {} must be finite and non-zero",
-                        s.direction
-                    )));
-                };
-                if !s.mount.is_finite() {
-                    return Err(err(format!("range mount {} must be finite", s.mount)));
-                }
-                add(
-                    Kind::Range,
-                    s.rate_divider,
-                    s.latency,
-                    [s.noise, Noise::default()],
-                    (s.mount, dir, s.max_range),
                 )?;
             }
         }
@@ -539,7 +432,7 @@ impl SimPlugin for SensorPlugin {
         };
 
         let mut sensors = Vec::with_capacity(found.len());
-        for (id, entity, kind, divider, latency, noise, beam) in found {
+        for (id, entity, kind, divider, latency, noise) in found {
             let rng = world.resource_mut::<RngStreams>().register(&format!(
                 "sensors/{}/{}",
                 kind.name(),
@@ -547,7 +440,7 @@ impl SimPlugin for SensorPlugin {
             ));
             let period = f64::from(divider) * dt;
             let per_axis = |k: usize| {
-                let n = if kind == Kind::Barometer || kind == Kind::Range || k < 3 {
+                let n = if kind == Kind::Barometer || k < 3 {
                     noise[0]
                 } else {
                     noise[1]
@@ -571,7 +464,6 @@ impl SimPlugin for SensorPlugin {
                 len: 0,
                 previous: Previous::default(),
                 initial_force,
-                beam,
             });
             // Outputs start empty.
             let mut e = world.entity_mut(entity);
@@ -587,10 +479,6 @@ impl SimPlugin for SensorPlugin {
                 Kind::Barometer => {
                     let mut s = e.get_mut::<Barometer>().unwrap();
                     (s.pressure, s.altitude, s.valid) = (0.0, 0.0, false);
-                }
-                Kind::Range => {
-                    let mut s = e.get_mut::<RangeFinder>().unwrap();
-                    (s.range, s.hit, s.valid) = (0.0, false, false);
                 }
             }
         }
@@ -652,35 +540,11 @@ fn sensor_system(world: &mut World) {
                         }
                         Kind::Gnss => [p.x, p.y, p.z, v.x, v.y, v.z],
                         Kind::Barometer => [sample.pressure, 0.0, 0.0, 0.0, 0.0, 0.0],
-                        Kind::Range => {
-                            let (mount, dir, max) = s.beam;
-                            let w: &World = world;
-                            let hit = w.resource::<Dynamics>().ray_cast(
-                                w,
-                                p + q * mount,
-                                q * dir,
-                                max,
-                                w.get::<SimId>(s.entity).copied(),
-                            );
-                            match hit {
-                                Some(h) => [h.distance, 1.0, 0.0, 0.0, 0.0, 0.0],
-                                None => [max, 0.0, 0.0, 0.0, 0.0, 0.0],
-                            }
-                        }
                     };
                     let rng = streams.get_mut(s.rng);
                     let mut measured = [0.0; 6];
                     for k in 0..s.kind.width() {
                         measured[k] = s.noise[k].measure(truth[k], rng);
-                    }
-                    if s.kind == Kind::Range {
-                        // No return reads the longest range, noise or not.
-                        measured[0] = if truth[1] > 0.0 {
-                            measured[0].max(0.0)
-                        } else {
-                            truth[0]
-                        };
-                        measured[1] = truth[1];
                     }
                     s.push(tick, measured);
                 }
@@ -707,13 +571,6 @@ fn sensor_system(world: &mut World) {
                         if let Some(mut out) = e.get_mut::<Barometer>() {
                             out.pressure = m[0];
                             out.altitude = atmosphere.pressure_altitude(m[0]);
-                            out.valid = true;
-                        }
-                    }
-                    Kind::Range => {
-                        if let Some(mut out) = e.get_mut::<RangeFinder>() {
-                            out.range = m[0];
-                            out.hit = m[1] > 0.0;
                             out.valid = true;
                         }
                     }

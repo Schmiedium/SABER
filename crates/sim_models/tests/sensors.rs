@@ -2,9 +2,7 @@
 //! force with gravity and a turning frame removed, GNSS position and velocity, static pressure and
 //! pressure altitude), latency is exactly `n` ticks at the stated rate, white noise and bias have
 //! their stated statistics, the bias walk spreads as `√t`, each sensor draws from its own stream,
-//! and the setup errors. Range finders (step 5d-3) read the slant range to the ground from a tilted
-//! body, the range to sloped terrain, static obstacles and other bodies but not their own, the
-//! longest range when nothing is in range, with the same latency, and never below zero.
+//! and the setup errors.
 //!
 //! The Sensors set runs at the start of a tick, on the state the tick starts from, so after a
 //! `step()` the published values describe the state before it.
@@ -12,13 +10,12 @@
 use bevy_ecs::prelude::*;
 use glam::{DMat3, DQuat, DVec3};
 use sim_core::{
-    BodyTable, CollisionShape, ForceModel, MassProps, PointMass3, Pose, RigidBody6, RunSeed,
-    SetupError, ShapeDesc, ShapePart, SimAppBuilder, SimConfig, SimId, SimPlugin, SimRng, SimWorld,
-    Stage, WorldFrame, Wrench,
+    BodyTable, ForceModel, MassProps, PointMass3, RigidBody6, RunSeed, SetupError, SimAppBuilder,
+    SimConfig, SimId, SimPlugin, SimRng, SimWorld, Stage, WorldFrame, Wrench,
 };
 use sim_models::environment::ussa1976::Ussa1976;
 use sim_models::environment::{Atmosphere, EarthRotation, Gravity, STANDARD_GRAVITY};
-use sim_models::sensors::{Barometer, Gnss, Imu, Noise, NoiseState, RangeFinder};
+use sim_models::sensors::{Barometer, Gnss, Imu, Noise, NoiseState};
 use sim_schema::Frame;
 
 const DT: f64 = 0.01;
@@ -473,44 +470,6 @@ fn setup_rejects_bad_sensors() {
                 );
             }),
         ),
-        (
-            "range max_range 0",
-            Box::new(move |sim| {
-                sim.spawn(SimId(1), (point(), RangeFinder::default()));
-            }),
-        ),
-        (
-            "range beam of zero length",
-            Box::new(move |sim| {
-                sim.spawn(
-                    SimId(1),
-                    (
-                        point(),
-                        RangeFinder {
-                            max_range: 10.0,
-                            direction: DVec3::ZERO,
-                            ..RangeFinder::default()
-                        },
-                    ),
-                );
-            }),
-        ),
-        (
-            "range mount NaN",
-            Box::new(move |sim| {
-                sim.spawn(
-                    SimId(1),
-                    (
-                        point(),
-                        RangeFinder {
-                            max_range: 10.0,
-                            mount: DVec3::new(0.0, f64::NAN, 0.0),
-                            ..RangeFinder::default()
-                        },
-                    ),
-                );
-            }),
-        ),
     ];
     for (why, spawn) in cases {
         let mut sim = world(Frame::Enu);
@@ -527,240 +486,4 @@ fn setup_rejects_bad_sensors() {
             "{why}: {r:?}"
         );
     }
-}
-
-fn ranger(max_range: f64, direction: DVec3) -> RangeFinder {
-    RangeFinder {
-        max_range,
-        direction,
-        ..RangeFinder::default()
-    }
-}
-
-fn at(position: DVec3) -> (PointMass3, MassProps) {
-    (
-        PointMass3 {
-            position,
-            velocity: DVec3::ZERO,
-        },
-        MassProps::point(1.0),
-    )
-}
-
-/// NED, ground the half-space below `z = 0`: a tilted, yawed 6DOF body reads the slant range from
-/// its offset mount along its body `+z` beam, through its own collider (which it never sees); a
-/// point mass's beam is along world axes.
-#[test]
-fn a_range_finder_reads_the_slant_range_to_the_ground() {
-    let mut sim = world(Frame::Ned);
-    sim.spawn(
-        SimId(1000),
-        CollisionShape::single(ShapeDesc::HalfSpace {
-            normal: DVec3::NEG_Z,
-        }),
-    );
-    let attitude = DQuat::from_euler(glam::EulerRot::ZYX, 0.7, 0.3, -0.2);
-    let mount = DVec3::new(0.5, -0.2, 0.3);
-    let position = DVec3::new(3.0, 4.0, -20.0);
-    sim.spawn(
-        SimId(1),
-        (
-            RigidBody6 {
-                position,
-                velocity: DVec3::ZERO,
-                attitude,
-                body_rates: DVec3::ZERO,
-            },
-            MassProps {
-                mass: 2.0,
-                inertia: DMat3::from_diagonal(DVec3::splat(1.0)),
-            },
-            CollisionShape::single(ShapeDesc::Ball { radius: 1.0 }),
-            RangeFinder {
-                mount,
-                ..ranger(100.0, DVec3::Z)
-            },
-        ),
-    );
-    sim.spawn(
-        SimId(2),
-        (at(DVec3::new(50.0, 0.0, -7.5)), ranger(100.0, DVec3::Z)),
-    );
-    sim.start(RunSeed::new(0, 0)).unwrap();
-    for _ in 0..3 {
-        sim.step();
-        let origin = position + attitude * mount;
-        let slant = -origin.z / (attitude * DVec3::Z).z;
-        let r = get::<RangeFinder>(&sim, 1);
-        assert!(r.valid && r.hit);
-        assert!(
-            (r.range - slant).abs() < 1e-12 * slant,
-            "{} {slant}",
-            r.range
-        );
-        let r = get::<RangeFinder>(&sim, 2);
-        assert!(r.valid && r.hit);
-        assert!((r.range - 7.5).abs() < 1e-12, "{}", r.range);
-    }
-}
-
-/// ENU: a beam down onto a sloped height field reads the height above the slope; beams along `+x`
-/// read the range to a static box's face and to another body's ball, and the longest range with
-/// `hit` false when the box is beyond it, noise or not.
-#[test]
-fn a_range_finder_sees_terrain_obstacles_and_other_bodies() {
-    let (rows, cols, size) = (21u32, 21u32, 20.0);
-    let slope = |x: f64, y: f64| 0.1 * x + 0.2 * y;
-    let mut heights = Vec::new();
-    for r in 0..rows {
-        for c in 0..cols {
-            heights.push(slope(-10.0 + f64::from(c), -10.0 + f64::from(r)));
-        }
-    }
-    let mut sim = world(Frame::Enu);
-    sim.spawn(
-        SimId(1000),
-        CollisionShape::single(ShapeDesc::HeightField {
-            rows,
-            cols,
-            size_x: size,
-            size_y: size,
-            heights,
-        }),
-    );
-    sim.spawn(
-        SimId(1001),
-        CollisionShape {
-            parts: vec![ShapePart::at(
-                ShapeDesc::Cuboid {
-                    half_extents: DVec3::new(1.0, 2.0, 5.0),
-                },
-                Pose::at(DVec3::new(30.0, 0.0, 5.0)),
-            )],
-        },
-    );
-    let over = DVec3::new(2.3, -1.4, 10.0);
-    sim.spawn(SimId(1), (at(over), ranger(50.0, DVec3::NEG_Z)));
-    sim.spawn(
-        SimId(2),
-        (at(DVec3::new(20.0, 0.0, 3.0)), ranger(50.0, DVec3::X)),
-    );
-    let noisy = Noise {
-        white: 0.3,
-        bias: 0.1,
-        ..Noise::default()
-    };
-    sim.spawn(
-        SimId(3),
-        (
-            at(DVec3::new(20.0, 0.0, 3.0)),
-            RangeFinder {
-                noise: noisy,
-                ..ranger(5.0, DVec3::X)
-            },
-        ),
-    );
-    sim.spawn(
-        SimId(4),
-        (at(DVec3::new(20.0, 5.0, 3.0)), ranger(50.0, DVec3::X)),
-    );
-    sim.spawn(
-        SimId(5),
-        (
-            at(DVec3::new(25.0, 5.0, 3.0)),
-            CollisionShape::single(ShapeDesc::Ball { radius: 0.5 }),
-        ),
-    );
-    sim.start(RunSeed::new(0, 0)).unwrap();
-    for _ in 0..50 {
-        sim.step();
-        let read = |id| {
-            let r = get::<RangeFinder>(&sim, id);
-            assert!(r.valid);
-            (r.range, r.hit)
-        };
-        let (range, hit) = read(1);
-        let expected = over.z - slope(over.x, over.y);
-        assert!(
-            hit && (range - expected).abs() < 1e-12,
-            "{range} {expected}"
-        );
-        let (range, hit) = read(2);
-        assert!(hit && (range - 9.0).abs() < 1e-12, "{range}");
-        assert_eq!(read(3), (5.0, false));
-        let (range, hit) = read(4);
-        assert!(hit && (range - 4.5).abs() < 1e-12, "{range}");
-    }
-}
-
-/// A body sinking at 0.2 m/s reads its height with the same latency and sample rate as every other
-/// sensor; a noisy range finder a millimetre up never reads below zero.
-#[test]
-fn ranges_have_latency_and_never_go_negative() {
-    let (divider, latency) = (2u32, 3u32);
-    let mut sim = world(Frame::Enu);
-    sim.spawn(
-        SimId(1000),
-        CollisionShape::single(ShapeDesc::HalfSpace { normal: DVec3::Z }),
-    );
-    sim.spawn(
-        SimId(1),
-        (
-            PointMass3 {
-                position: DVec3::new(0.0, 0.0, 10.0),
-                velocity: DVec3::new(0.0, 0.0, -0.2),
-            },
-            MassProps::point(1.0),
-            RangeFinder {
-                rate_divider: divider,
-                latency,
-                ..ranger(50.0, DVec3::NEG_Z)
-            },
-        ),
-    );
-    sim.spawn(
-        SimId(2),
-        (
-            at(DVec3::new(5.0, 0.0, 1e-3)),
-            RangeFinder {
-                noise: Noise {
-                    white: 1.0,
-                    ..Noise::default()
-                },
-                ..ranger(50.0, DVec3::NEG_Z)
-            },
-        ),
-    );
-    sim.start(RunSeed::new(0, 0)).unwrap();
-    let (mut truth, mut zeros) = (Vec::new(), 0);
-    let n_ticks = 2000u64;
-    for n in 0..n_ticks {
-        truth.push(
-            sim.world()
-                .get::<PointMass3>(sim.body(SimId(1)).unwrap())
-                .unwrap()
-                .position
-                .z,
-        );
-        sim.step();
-        let r = get::<RangeFinder>(&sim, 1);
-        let due = n
-            .checked_sub(u64::from(latency))
-            .map(|m| m - m % u64::from(divider));
-        match due {
-            None => assert!(!r.valid && r.range == 0.0, "tick {n}"),
-            Some(s) => {
-                let t = truth[s as usize];
-                assert!(r.valid && r.hit, "tick {n}");
-                assert!((r.range - t).abs() < 1e-12, "tick {n}: {} {t}", r.range);
-            }
-        }
-        let low = get::<RangeFinder>(&sim, 2);
-        assert!(low.range >= 0.0 && low.hit);
-        if low.range == 0.0 {
-            zeros += 1;
-        }
-    }
-    // About half the draws fall below the 1 mm truth and read zero.
-    assert!((800..1200).contains(&zeros), "{zeros}");
 }

@@ -1,7 +1,6 @@
 # SABER: Verification and Test Strategy
 
-Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2; v0.9 (2026-11-02, build step 1c) names the USSA 1976 and WGS 84 oracles actually used and the scenario-file tests, §7.1; v1.0 (2026-11-02, build step 2) lists the per-run verification tests as built, §7.8; v1.1 (2026-11-02, build step 3a) adds the golden output files read by both Rust and Python, §8.3; v1.2 (2026-11-02, build step 3b) lists the local runner's tests, R3 and R4 as built, §8.3; v1.3 (2026-11-02, build step 3c) adds the Python-driven local campaign and the shared `campaign.toml` defaults, §8.3, §8.4; v1.4 (2026-11-03, build step 4a) records R5 on 1, 2 and 4 ranks, as threads and under `mpiexec`, and the crash-storm and init-refusal tests, §8.3, §8.4; v1.5 (2026-11-03, build step 4b) records R6 and the drain, SIGTERM and resume-refusal tests, §8.4; v1.6 (2026-11-03, build step 4c) completes the tiny-campaign test with `verdicts.parquet` against hand-computed verdicts and adds the campaign-statistics tests, §8.4; v1.7 (2026-11-03, build step 5a) records the rotating-frame and aero-ballistics tests, writes out the linear yaw equation of the plugin's own force laws for M2 and narrows T2, §6.2, §7.1, §7.3, §13; v1.8 (2026-11-03, build step 5b) records the fixed-wing tests: the Stevens–Lewis F-16 check case, the book's trims, an envelope sweep against an independent port of the book's subroutines, and adds T5, §7.4, §13; v1.9 (2026-11-03, build step 5c, part 1) records the Dryden spectrum and autocorrelation tests and the actuator and sensor tests, §7.1, §7.6; v1.10 (2026-11-03, build step 5c, part 2) records the rotorcraft and control tests and leaves the RotorPy cross-check open, §7.6;
-v1.11 (2026-11-03, build step 5d, part 1) records the compliant-contact, geometry and gear tests, §7.5; v1.12 (2026-11-03, build step 5d, part 2) records the impulsive-contact tests, §7.5; v1.13 (2026-11-03, build step 5d, part 3) records the penetration-watchdog and range-finder tests, §7.5, §7.6). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
+Version 0.4 (2026-11-01; v0.2 adopts the custom engine + Parry decision (D13) and drops robotics; v0.3 adds selectable integrators (D14); v0.4 aligns names and tests with `physics-engine-tradeoffs.md` §9–§11; v0.5 (2026-11-02) follows D15: no exact cross-build re-runs, §11.1; v0.6 (2026-11-02) records Alex's answers to T3 and T6 as decisions TD1 and TD2, §13, with TD1 covering all published data; v0.7 (2026-11-02, build step 1a) states how `close` treats infinities, checks DOP853 against its published decimals because its nodes are irrational, and matches the estimate tests to local extrapolation, §3.2, §5.4.1; v0.8 (2026-11-02, build step 1b) states the state hash field by field, how the rolling hash is switched on, and what the rigid-body tests found, §4.1, §4.2, §7.2; v0.9 (2026-11-02, build step 1c) names the USSA 1976 and WGS 84 oracles actually used and the scenario-file tests, §7.1; v1.0 (2026-11-02, build step 2) lists the per-run verification tests as built, §7.8; v1.1 (2026-11-02, build step 3a) adds the golden output files read by both Rust and Python, §8.3; v1.2 (2026-11-02, build step 3b) lists the local runner's tests, R3 and R4 as built, §8.3; v1.3 (2026-11-02, build step 3c) adds the Python-driven local campaign and the shared `campaign.toml` defaults, §8.3, §8.4; v1.4 (2026-11-03, build step 4a) records R5 on 1, 2 and 4 ranks, as threads and under `mpiexec`, and the crash-storm and init-refusal tests, §8.3, §8.4; v1.5 (2026-11-03, build step 4b) records R6 and the drain, SIGTERM and resume-refusal tests, §8.4; v1.6 (2026-11-03, build step 4c) completes the tiny-campaign test with `verdicts.parquet` against hand-computed verdicts and adds the campaign-statistics tests, §8.4; v1.7 (2026-11-03, build step 5a) records the rotating-frame and aero-ballistics tests, writes out the linear yaw equation of the plugin's own force laws for M2 and narrows T2, §6.2, §7.1, §7.3, §13; v1.8 (2026-11-03, build step 5b) records the fixed-wing tests: the Stevens–Lewis F-16 check case, the book's trims, an envelope sweep against an independent port of the book's subroutines, and adds T5, §7.4, §13; v1.9 (2026-11-03, build step 5c, part 1) records the Dryden spectrum and autocorrelation tests and the actuator and sensor tests, §7.1, §7.6). Companion to `subsystems-and-interfaces.md` (names, IBs, determinism contract §10.1),
 `sequence-diagrams.md` and `flight-dynamics-sources.md`.
 
 This document answers one question: **how do we know SABER computes the right numbers, without
@@ -709,39 +708,9 @@ the step.
 | Six bodies of three shapes falling onto a height field and each other, spawned in two orders | R1-style exact | every tick's state hash and every event bit-equal |
 | The same Hunt–Crossley drop at the origin and 360 km away (ground and body moved together) | metamorphic (§5.6) | 1e-9 m |
 | More near pairs than `max_contact_pairs`: at Tick 0 against a half-space, and mid-run as balls fall near a bounded height field | exact status | `CrashedSolver(ContactCapacity)` |
-| Setup errors: a half-space on a body, a collider without a `SimId`, restitution outside `[0, 1]` (before 5d-2: any `Impulsive` material), unmixable materials, a zero stroke, a short height list, a compliant material without stiffness, a flat convex hull; `max_contact_pairs = 0` | error kinds | exact |
+| Setup errors: a half-space on a body, a collider without a `SimId`, `Impulsive` before 5d-2, unmixable materials, a zero stroke, a short height list, a compliant material without stiffness, a flat convex hull; `max_contact_pairs = 0` | error kinds | exact |
 | `config.contact` in `sim_config_hash`; contact components and gear points load from a scenario file with their defaults | exact | exact |
 | Zero allocations for 800 ticks per run, under RK4 and adaptive Dormand–Prince, across a World reset: every shape on a half-space, a height field and a mesh, two overlapping boxes, a three-legged body on braked wheels, contacts starting and ending | counting allocator | 0 |
-
-**As built (step 5d, part 2).** Impulsive contact, swept `EventOnly` checks and penetration recovery
-(`crates/sim_core/tests/impact.rs`, `contact_alloc.rs`), all with synthetic values (TD1). Free flight
-under constant gravity is a quadratic, which every method integrates to round-off, so the bouncing-ball
-errors are those of the located impact times alone. The glancing projectile has friction (sliding
-throughout) and is checked against the closed-form impulse rather than the frictionless invariant. The
-persistent-penetration watchdog followed in step 5d-3.
-
-| Check | Oracle | Tolerance |
-|---|---|---|
-| Ball bouncing on rigid ground, 3DOF and 6DOF, RK4 and adaptive Dormand–Prince, `e` = 0.8: the first five impacts at the closed-form times with the closed-form approach speeds; the parabola between them; apex heights `h e²ⁿ` | closed form | 1e-9 s; 1e-8 m/s; 1e-8 m every tick; apex within one tick's `½ g dt²` |
-| The same ball until it rests: 21 impacts (the 22nd approach is below the rest speed), then one `contact`, no `contact_end`, the static deflection `m g / k` and no motion after 9 s | closed form, exact counts | 1e-7 s, 1e-6 relative on the impacts; 1e-9 m and 1e-9 m/s at rest |
-| Two spheres head-on in vacuum, restitutions 0.36 and 1 combined to `e = 0.6`: velocities after, momentum, kinetic energy lost `(1 − e²) ½ μ u²`, the impact time, no spin | closed form | 1e-12; 1e-9 s |
-| Solid sphere striking the ground obliquely: sticking (`v_t' = 5/7 v_t` from rest, and with spin), sliding (`v_t − μ (1 + e) u`), and a 300 m/s projectile at 5° with 2000 rad/s backspin that ricochets while sliding; normal speed `e u`, spin, rolling after sticking, energy lost, one impact at the closed-form time | closed-form impulse solution | 1e-7 relative; 5e-9 s |
-| A 1 cm ball at 600 m/s against a 2 mm static plate (0.6 m per tick): it never passes the plate's face, bounces at `e v` at the closed-form time | closed form | 1e-9 s; 1e-9 m/s |
-| `max_events_per_tick = 1` with two balls landing in the same tick: the first located (`impact`), the second resolved at the tick's end (`contact_deferred`, approach `g t`), its overlap projected out in the same tick (`contact_projected` equal to the overlap), `contact_end` the next tick | closed form, exact counts | 1e-9; 1e-12 m |
-| A box placed 3.5 mm into the ground at rest in vacuum: pushed out 1, 1, 1 and 0.5 mm in ticks 1–4 (not at Tick 0), no velocity gained | exact | 1e-12 m |
-| A box falling flat: its four corners resolved together, one `impact`, straight up at `e` times its approach speed with no spin | closed form | 1e-9 s; 1e-9 m/s, rad/s |
-| A tumbling box with friction (`e`, `μ` of 0.9, 0.6; 1, 0; 0.5, 1; 1, 0.8) bouncing for up to 3 s: mechanical energy never grows from tick to tick until the box first rests on its compliance (whose spring energy the check does not count), at least three impacts, the run never crashes (Newton's rule adds energy at some of these impacts; the Poisson and plastic fallbacks take over) | invariant | 1e-9 relative |
-| An `EventOnly` ball at 600 m/s through a thin plate inside one tick: one `contact` at the time it first touched, with its approach speed, the plate's `SimId` and the point on the face; not slowed | closed form | 1e-12 s; 1e-9 m/s; 1e-9 m |
-| Twelve boxes and balls raining onto the ground and each other, twice and in reversed spawn order | R1-style exact | every final state and every event bit-equal |
-| Zero allocations for 1000 ticks per run, under RK4 and adaptive Dormand–Prince, across a World reset: tumbling boxes and balls on the ground and each other, a deferred impact, a projected overlap, rigid and event-only fast balls at a thin plate | counting allocator | 0 |
-
-**As built (step 5d, part 3).** The persistent-penetration watchdog (`crates/sim_core/tests/contact.rs`),
-with synthetic values (TD1). The ray query is checked through the range finders of §7.6.
-
-| Check | Oracle | Tolerance |
-|---|---|---|
-| A 1 kg ball settling on a soft linear ground (`k` = 1000 N/m, `ζ` = 0.1) to its static overlap `m g / k` ≈ 9.8 mm: with `max_penetration` 5 mm and `penetration_ticks` 10 the run ends `CrashedSolver(Penetration)` at exactly the tick that ends the first stretch of 11 ticks deeper than 5 mm in the unwatched run, bit-identical to it until then, with both `SimId`s and the limit in the detail; with 15 mm and 100 ticks the first overshoot goes deeper for fewer ticks and the run completes; with the watchdog off (the default) it completes | exact against the unwatched run | bit-exact; exact tick |
-| `max_penetration` of 0, negative, NaN or infinite and `penetration_ticks = 0` are configuration errors; both settings change `sim_config_hash` and parse from RON as `config.contact` | error kinds, exact | exact |
 
 ### 7.6 `RotorcraftPlugin`, `ActuatorPlugin`, `SensorPlugin`, `ControlPlugin`
 
@@ -756,7 +725,8 @@ with synthetic values (TD1). The ray query is checked through the range finders 
 | PID: closed-loop response of a known linear plant matches the analytic transfer function | closed form |
 | RotorPy hover, step and gust responses | cross-code |
 
-**As built (step 5c, part 1).** Actuators and sensors.
+**As built (step 5c, part 1).** Actuators and sensors; hover, motor lag, mixer, PID and RotorPy come with
+part 2.
 
 | Check | Oracle | Tolerance |
 |---|---|---|
@@ -771,35 +741,6 @@ with synthetic values (TD1). The ray query is checked through the range finders 
 | Bias random walk: 4000 streams, variance `bias_walk² · t` at three times | statistical (`σ² ∝ t`) | 5σ |
 | Each sensor's draws are its own: adding sensors on this and another body leaves its output bit-identical | exact (R9) | bit-exact |
 | Setup errors for both plugins; zero allocations per tick with Dryden wind, every lag and every sensor loaded from a scenario file on the trimmed F-16 | error kinds, integration | exact |
-
-**As built (step 5c, part 2).** Rotorcraft and control. All rotor data are synthetic (TD1). The RotorPy
-cross-check is not built: running RotorPy in this build environment was not possible, so its hover, step and
-gust cases wait for a CI job that installs it or for exported reference trajectories committed under
-`tests/reference/rotorpy/` (the tests above already pin the same physics analytically).
-
-| Check | Oracle | Tolerance |
-|---|---|---|
-| Quad X, quad + and hexarotor at `ω_h = √(m g / (n k_T))` with frame drag, rotor drag and rotor inertia loaded: zero linear and angular acceleration, zero rotor rates, then 500 ticks without moving; the mixer given `m g` finds `ω_h` itself and holds the hover for 1000 ticks | algebraic | 1e-13 m/s², rad/s²; 1e-10 m; 1e-12 rad |
-| Motor lag `ω(t) = c + (ω₀ − c) e^{−t/τ}` toward commands inside, above and below the speed range | closed form; RK4's step factor differs from `e^x` by `|x|⁵/120`, at most `|x|⁴/(120 e)` relative over a run | 1e-7 of the step |
-| `B B⁺ = I` for quad X, quad +, hex and a hex with rotors tilted ±15° (least squares); with the rotors at the mixed speeds the World's wrench is the commanded thrust (world axes) and moment (body axes) | algebraic | 1e-12 |
-| The full wrench (tilted rotors away from their commands, a turning body in a wind, frame and rotor drag) and the rotor rates against the same physics written with matrices (projector `I − a aᵀ`, skew products), gyroscopic term non-zero | independent form | 1e-13 relative |
-| P and PI loops on a first-order servo (`y_{n+1} = a y_n + b u_n`) at dividers 1 to 4: every period against the roots of `z² + [b(K + k_i T) − 1 − a] z + [a − bK]` (P: `K/(1+K) (1 − λⁿ)`); the command moves only on the loop's ticks; telemetry `u = K e + I` | closed form | 1e-12; exact |
-| Filtered derivative on a measurement ramping at `c`: `d_n = −c (1 − ρⁿ)`, `ρ = τ_f/(τ_f + T)`, unchanged by a setpoint step | closed form | 1e-12 |
-| Conditional integration: the integral is frozen while the output is on its limit, and the output leaves the limit on the first step after the error turns | exact | bit-exact |
-| Cascade (`Loop(0)` as the next loop's setpoint in the same tick), `Field` setpoints and an angle error of 6 rad wrapped to `6 − 2π` | algebraic | bit-exact; 1e-15 |
-| `tests/scenarios/quadrotor.scn.ron`: climb from 2 m to 10 m on cascaded GNSS loops and IMU rate loops through the mixer; ends `Completed` at 3000 ticks, within 1 cm of 10 m, level, climb rate near its 3 m/s limit | integration | 0.01 m; 1e-9 rad |
-| A native `Controller` (PD altitude hold on `Gnss` writing `MixerCommand`, with a trim error drawn at reset) inserts its command, steps every 5th tick, and settles at `target − hover·trim/k_p`; the same seed repeats the run bit for bit, another seed draws another trim | closed form, exact (R9) | 1e-4 m; bit-exact |
-| Setup errors for both plugins and for a controller; zero allocations per tick for the quadrotor scenario in Dryden wind with noisy sensors beside a second quad flown by a native controller | error kinds, integration | exact |
-
-**As built (step 5d, part 3).** Range finders on the kernel's ray query (`crates/sim_models/tests/sensors.rs`,
-`alloc.rs`), synthetic geometry (TD1).
-
-| Check | Oracle | Tolerance |
-|---|---|---|
-| A yawed, pitched and rolled 6DOF body 20 m up, beam from an offset mount through its own ball collider: the slant range `−z₀ / (q·ẑ)_z` to the ground; a point mass's world-axis beam: its height | closed form | 1e-12 relative; 1e-12 m |
-| A beam down onto a height field sloped along both axes (`z − 0.1 x − 0.2 y`), a beam to a static box's face, a beam to another body's ball; a noisy range finder whose box lies beyond `max_range` reads exactly `max_range` with `hit` false | closed form | 1e-12 m; exact |
-| A body sinking at 0.2 m/s, divider 2 and latency 3: the published range is the height at the newest due tick, nothing valid before; a noisy range finder 1 mm up never reads below 0 (about half its 2000 readings are 0) | exact, statistical | 1e-12 m; count in 800–1200 |
-| Setup errors: `max_range` 0, a zero beam direction, a NaN mount; zero allocations per tick with a noisy altimeter and a forward beam on the two quads over a ground and a box | error kinds, counting allocator | exact; 0 |
 
 ### 7.7 Fragmentation hook (IB-16)
 

@@ -156,6 +156,59 @@ impl EarthRotation {
     }
 }
 
+/// Whether the world frame turns with the Earth (build step 5a). Without this component the frame
+/// does not rotate, in ECEF too, so scenarios written before rotation existed run as they did.
+#[derive(Component, Reflect, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component)]
+pub enum EarthRotation {
+    /// The frame is inertial.
+    None,
+    /// The ECEF frame turns about its +z axis at the WGS 84 rate [`wgs84::OMEGA_E`]. The centrifugal
+    /// acceleration is then added by the kernel, so J2 gravity plus rotation gives WGS 84's normal
+    /// gravity less its small J4 term.
+    Ecef,
+    /// A local ENU or NED frame fixed to the Earth with its origin at geodetic latitude
+    /// `latitude_deg`: it turns at the WGS 84 rate about the Earth's axis, `(0, cos φ, sin φ)` in
+    /// ENU and `(cos φ, 0, −sin φ)` in NED. Flat gravity is the local plumb line, which already
+    /// holds the centrifugal acceleration at the origin; the kernel adds the Coriolis term and the
+    /// centrifugal term of the offset from the origin.
+    Local {
+        /// Geodetic latitude of the frame's origin, degrees (north positive).
+        latitude_deg: f64,
+    },
+}
+
+impl EarthRotation {
+    /// The frame's angular velocity in world-frame components, rad/s, or why the rotation does not
+    /// fit the frame.
+    pub fn rate(self, frame: Frame) -> Result<DVec3, String> {
+        match (self, frame) {
+            (EarthRotation::None, _) => Ok(DVec3::ZERO),
+            (EarthRotation::Ecef, Frame::Ecef) => Ok(DVec3::Z * wgs84::OMEGA_E),
+            (EarthRotation::Ecef, _) => {
+                Err("EarthRotation::Ecef needs the ECEF frame; a local frame uses Local".to_owned())
+            }
+            (EarthRotation::Local { latitude_deg }, Frame::Enu | Frame::Ned) => {
+                if !(latitude_deg.is_finite() && latitude_deg.abs() <= 90.0) {
+                    return Err(format!(
+                        "EarthRotation latitude {latitude_deg}° must be within ±90°"
+                    ));
+                }
+                let (s, c) = latitude_deg.to_radians().sin_cos();
+                Ok(wgs84::OMEGA_E
+                    * if frame == Frame::Enu {
+                        DVec3::new(0.0, c, s)
+                    } else {
+                        DVec3::new(c, 0.0, -s)
+                    })
+            }
+            (EarthRotation::Local { .. }, Frame::Ecef) => Err(
+                "EarthRotation::Local needs a local frame (ENU or NED); ECEF uses Ecef".to_owned(),
+            ),
+        }
+    }
+}
+
 /// Stop condition: the run ends (`Terminated`, reason `"ground_impact"`) at the end of the first
 /// tick in which this body's altitude is at or below `altitude_m`. Read at Tick 0: a stop added
 /// to an entity during the run is not watched.

@@ -26,8 +26,6 @@ pub struct SimEvent {
     pub other: Option<SimId>,
     /// Where it happened, world frame, m; `None` logs the position of `sim_id`'s body.
     pub pos: Option<DVec3>,
-    /// When it happened inside the tick, s (a located impact); `None` logs the tick's end.
-    pub time: Option<f64>,
     /// A value that goes with it (for example an impact speed), or `NaN`.
     pub value: f64,
 }
@@ -40,7 +38,6 @@ impl SimEvent {
             sim_id,
             other: None,
             pos: None,
-            time: None,
             value,
         }
     }

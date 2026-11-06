@@ -25,9 +25,8 @@ use crate::body::{MassProps, PointMass3, RigidBody6, SimId};
 use crate::checks::{CheckCatalog, CheckFactory};
 use crate::clock::SimClock;
 use crate::contact::{
-    CONTACT, CONTACT_DEFERRED, CONTACT_END, CONTACT_PROJECTED, ContactConfig, ContactMaterial,
-    ContactModel, ContactOverride, ContactOverrides, ContactPoints, Contacts, DampingLaw,
-    GearPoint, IMPACT,
+    CONTACT, CONTACT_END, ContactConfig, ContactMaterial, ContactModel, ContactOverride,
+    ContactOverrides, ContactPoints, Contacts, DampingLaw, GearPoint,
 };
 use crate::dynamics::{Dynamics, contact_system, integrate_system};
 use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldFrame};
@@ -135,25 +134,6 @@ impl SimConfig {
                 "contact.max_contact_pairs must be at least 1",
             ));
         }
-        if !(self.contact.max_projection.is_finite() && self.contact.max_projection >= 0.0) {
-            return Err(SetupError::BadConfig(
-                "contact.max_projection must be finite and at least 0",
-            ));
-        }
-        if self
-            .contact
-            .max_penetration
-            .is_some_and(|m| !(m.is_finite() && m > 0.0))
-        {
-            return Err(SetupError::BadConfig(
-                "contact.max_penetration must be finite and above 0",
-            ));
-        }
-        if self.contact.penetration_ticks == 0 {
-            return Err(SetupError::BadConfig(
-                "contact.penetration_ticks must be at least 1",
-            ));
-        }
         if self.watchdog.energy_max_j.is_some_and(f64::is_nan) {
             return Err(SetupError::BadConfig(
                 "watchdog.energy_max_j must not be NaN",
@@ -216,14 +196,7 @@ impl SimConfig {
             None => h.update(&[0]),
             Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
         };
-        h.update(&self.contact.max_contact_pairs.to_le_bytes())
-            .update(&self.contact.max_events_per_tick.to_le_bytes())
-            .update(&self.contact.max_projection.to_bits().to_le_bytes());
-        match self.contact.max_penetration {
-            None => h.update(&[0]),
-            Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
-        };
-        h.update(&self.contact.penetration_ticks.to_le_bytes());
+        h.update(&self.contact.max_contact_pairs.to_le_bytes());
         finish(&h)
     }
 }
@@ -419,11 +392,7 @@ impl SimAppBuilder {
             .register_type::<ContactOverrides>();
         b.world.insert_resource(SimEvents::default());
         b.world.insert_resource(CheckCatalog::default());
-        b.declare_event(CONTACT)
-            .declare_event(CONTACT_END)
-            .declare_event(IMPACT)
-            .declare_event(CONTACT_DEFERRED)
-            .declare_event(CONTACT_PROJECTED);
+        b.declare_event(CONTACT).declare_event(CONTACT_END);
         b.add_systems(SimSet::Environment, clear_events)
             .add_systems(SimSet::Integrate, integrate_system)
             .add_systems(SimSet::Constraints, contact_system)

@@ -1,8 +1,7 @@
 //! Zero allocations after Tick 0 with contact (IB-08 rule 5, physics §9.6, build step 5d): every
 //! shape against a half-space, a height field and a triangle mesh, boxes overlapping each other
 //! (GJK and the reused EPA), gear points and wheels, contacts starting and ending, and again after
-//! a World reset. Part 2: located impacts between bodies and against static colliders, the energy
-//! fallbacks, resting, deferred impacts, projection, and swept `EventOnly` checks.
+//! a World reset.
 
 mod kernel_common;
 
@@ -10,9 +9,8 @@ use glam::{DQuat, DVec3};
 use kernel_common::*;
 use sim_core::integrator::IntegratorKind;
 use sim_core::{
-    CollisionShape, ContactMaterial, ContactModel, ContactPoints, GearPoint, MassProps, Pose,
-    RunSeed, ShapeDesc, ShapePart, SimAppBuilder, SimId, SimWorld, TelemetryLog,
-    UniformEnvironment,
+    CollisionShape, ContactMaterial, ContactPoints, GearPoint, MassProps, Pose, RunSeed, ShapeDesc,
+    ShapePart, SimAppBuilder, SimId, SimWorld, TelemetryLog, UniformEnvironment,
 };
 
 #[global_allocator]
@@ -217,155 +215,6 @@ fn contact_ticks_never_allocate() {
                 contacts >= 15 && ends >= 3,
                 "{contacts} contacts, {ends} ends"
             );
-            sim.reset();
-        }
-    }
-}
-
-fn impulsive(e: f64, mu: f64) -> ContactMaterial {
-    ContactMaterial {
-        model: ContactModel::Impulsive,
-        restitution: e,
-        friction: mu,
-        stiffness: 2e4,
-        damping: 6e3,
-        ..ContactMaterial::default()
-    }
-}
-
-fn impulsive_scenario(sim: &mut SimWorld) {
-    sim.spawn(
-        SimId(1000),
-        CollisionShape {
-            parts: vec![ShapePart::at(
-                ShapeDesc::HalfSpace { normal: DVec3::Z },
-                Pose::at(DVec3::ZERO),
-            )],
-        },
-    );
-    // A thin static plate standing on the ground across +x.
-    sim.spawn(
-        SimId(1001),
-        CollisionShape {
-            parts: vec![ShapePart::at(
-                ShapeDesc::Cuboid {
-                    half_extents: DVec3::new(1e-3, 1.0, 1.0),
-                },
-                Pose::at(DVec3::new(6.0, 0.0, 1.0)),
-            )],
-        },
-    );
-    // Balls and tumbling boxes falling on the ground and on each other.
-    for k in 0..10u32 {
-        let f = f64::from(k);
-        let shape = if k % 2 == 0 {
-            ShapeDesc::Cuboid {
-                half_extents: DVec3::new(0.2, 0.1, 0.06),
-            }
-        } else {
-            ShapeDesc::Ball { radius: 0.12 }
-        };
-        sim.spawn(
-            SimId(k + 1),
-            (
-                rigid(
-                    DVec3::new(0.1 * (f % 3.0), 0.05 * f, 0.3 + 0.3 * f),
-                    DVec3::new(0.2 * f.sin(), 0.1, -0.5),
-                    DQuat::from_rotation_x(0.5 * f) * DQuat::from_rotation_y(0.2),
-                    DVec3::new(2.0 * f.cos(), -3.0, 1.0),
-                ),
-                MassProps::principal(1.0, 0.01, 0.012, 0.015),
-                CollisionShape::single(shape),
-                impulsive(0.9, 0.6),
-            ),
-        );
-    }
-    // Two balls landing in the same tick (the second is deferred with max_events_per_tick = 1).
-    for (k, h) in [(0u32, 0.5), (1, 0.501331)] {
-        sim.spawn(
-            SimId(20 + k),
-            (
-                point(DVec3::new(-3.0 - f64::from(k), 0.0, 0.1 + h), DVec3::ZERO),
-                MassProps::point(1.0),
-                CollisionShape::single(ShapeDesc::Ball { radius: 0.1 }),
-                impulsive(0.5, 0.0),
-            ),
-        );
-    }
-    // A box starting 3 mm into the ground (projected out).
-    sim.spawn(
-        SimId(30),
-        (
-            rigid(
-                DVec3::new(-6.0, 0.0, 0.097),
-                DVec3::ZERO,
-                DQuat::IDENTITY,
-                DVec3::ZERO,
-            ),
-            MassProps::principal(4.0, 0.3, 0.3, 0.6),
-            CollisionShape::single(ShapeDesc::Cuboid {
-                half_extents: DVec3::new(0.5, 0.5, 0.1),
-            }),
-            impulsive(0.3, 0.5),
-        ),
-    );
-    // Fast balls at the plate: one rigid (bounces), one event-only (passes through).
-    for (k, material) in [
-        (0u32, impulsive(0.5, 0.0)),
-        (
-            1,
-            ContactMaterial {
-                model: ContactModel::EventOnly,
-                ..ContactMaterial::default()
-            },
-        ),
-    ] {
-        sim.spawn(
-            SimId(40 + k),
-            (
-                point(
-                    DVec3::new(5.0, -0.5 + f64::from(k), 1.0),
-                    DVec3::new(400.0, 0.0, 0.0),
-                ),
-                MassProps::point(0.05),
-                CollisionShape::single(ShapeDesc::Ball { radius: 0.01 }),
-                material,
-            ),
-        );
-    }
-}
-
-#[test]
-fn impulsive_ticks_never_allocate() {
-    let configs = [
-        config(IntegratorKind::Rk4, 1e-3, 1_000_000),
-        adaptive(IntegratorKind::DormandPrince54, 1e-3, 1_000_000, 1e-8, 1e-8),
-    ];
-    for mut c in configs {
-        c.contact.max_events_per_tick = 1;
-        let kind = c.integrator.kind;
-        let mut b = SimAppBuilder::new(c.clone());
-        b.set_environment(UniformEnvironment::flat_gravity(gravity()));
-        let mut sim = b.build().unwrap();
-        for seed in [1u32, 2] {
-            impulsive_scenario(&mut sim);
-            sim.start(RunSeed::new(seed, seed.into())).unwrap();
-            let n = sim_testkit::count_allocations(|| {
-                for _ in 0..1000 {
-                    assert!(sim.step().is_none(), "{:?}", sim.status());
-                }
-            });
-            assert_eq!(n, 0, "{kind:?} run {seed} allocated");
-            let log = sim.world().resource::<TelemetryLog>();
-            let count = |name: &str| log.events.iter().filter(|e| e.name == name).count();
-            assert!(
-                count(sim_core::IMPACT) >= 20,
-                "{} impacts",
-                count(sim_core::IMPACT)
-            );
-            assert!(count(sim_core::CONTACT_DEFERRED) >= 1);
-            assert!(count(sim_core::CONTACT_PROJECTED) >= 3);
-            assert!(count(sim_core::CONTACT) >= 2);
             sim.reset();
         }
     }

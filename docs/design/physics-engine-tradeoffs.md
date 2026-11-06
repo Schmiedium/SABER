@@ -571,9 +571,9 @@ exactly and is part of `build_id`.
 ### 9.7a As built (step 5d, part 1)
 
 `sim_core::geometry` and `sim_core::contact` (build step 5d-1) implement §9.2–§9.6 for `Compliant` and
-`EventOnly` pairs. `Impulsive` contact, event location, swept `EventOnly` checks and penetration recovery
-followed in step 5d-2 (§9.7b); range sensors and the persistent-penetration watchdog in step 5d-3 (§9.7c).
-Differences from the sketch above:
+`EventOnly` pairs. `Impulsive` contact, event location, swept `EventOnly` casts, penetration recovery and
+the contact watchdog checks are step 5d-2; until then a material with `model: Impulsive` is a
+`SetupError`. Differences from the sketch above:
 
 - **Shapes.** `CollisionShape { parts: Vec<ShapePart> }`, each part a `ShapeDesc` (ball, capsule,
   cuboid, cylinder, convex hull; static only: half-space, height field, triangle mesh) at a `Pose`, so a
@@ -625,103 +625,6 @@ Differences from the sketch above:
   BVH iterator, whose stack is inline for the mesh depths tested. The allocation test covers every shape
   on a half-space, a height field and a mesh, overlapping boxes, gear points and contacts starting and
   ending, under RK4 and adaptive Dormand–Prince (O-P3).
-
-### 9.7b As built (step 5d, part 2)
-
-`sim_core::contact::impact` adds `Impulsive` contact. Differences from §9.4 and the additions:
-
-- **Which pairs.** A pair is `Impulsive` only when every material it has is (`EventOnly` wins over
-  `Compliant`, which wins over `Impulsive`). Two impulsive materials take the geometric mean of their
-  restitution and friction and the larger rest speed; their stiffness and damping (in series) are the
-  compliance the pair rests on, and get the Tick-0 stiffness check like a `Compliant` pair's.
-- **Locating the impact, without dense output.** `Dynamics` integrates the whole tick first. The
-  candidates are the `Impulsive` near pairs overlapping at the end, plus those whose gaps at the two ends
-  add up to less than the distance their surfaces could close in the interval (a speed bound: 1.1 times
-  the relative centre speed plus each body's spin times its reach, plus the change of the relative
-  velocity across the interval), which catches a fast body passing through a thin one. A pair touching
-  and moving apart at the start of the interval (it has just bounced) is not a candidate until the next
-  tick; to come back inside the same tick it would have to part slower than about `a dt / 2`, far under
-  any useful rest speed, and if it does it starts the next tick touching and approaching and is resolved
-  there. For each candidate the search probes times; each probe re-integrates **every body** from the
-  start of the interval to that time (the adaptive controller's memory restored, so every probe and the
-  final re-integration take the same steps), and reads the pair's gap, its rate and the contact normal.
-  While the normals at the two ends of the search agree, a cubic through the two ends and their rates
-  models the gap: if it stays open the pair does not touch, else the next probe is its first root. When
-  they disagree (passing through a thin body) the ends advance conservatively by turns (no contact
-  within `gap / speed` of a sample). Once a probe finds the surfaces overlapping, the Illinois method
-  brackets the root. `t*` is taken on the open side, within 1 nm or 10⁻⁹ of the interval, so bodies never
-  overlap after an impact. Every body is then re-integrated to `t*`, the impulses applied, and the rest of
-  the tick integrated from there. Typical cost: two to five probes per impact; a body through a thin
-  plate takes a few dozen. Because the impact restarts integration at `t*` with the selected method, the
-  method's order holds on both sides of the impact and no dense output or Hermite interpolation of the
-  step is needed (§10.4); Parry's `cast_shapes_nonlinear` is not used either, since bodies under forces do
-  not move with constant velocities.
-- **Impulses.** All `Impulsive` pairs within 1 µm of touching and approaching at `t*` are resolved
-  together. Their points (several against a half-space, so a box landing flat has four) get 32 fixed
-  sequential-impulse sweeps in pair order, with accumulated, clamped impulses: the normal impulse never
-  pulls and drives each point's separating speed to `e` times its approach speed (Newton); the friction
-  impulse stops sliding inside the cone `|J_t| ≤ μ J_n`. Newton's rule with friction can add energy (Kane
-  and Levinson's paradox; the tumbling-box test meets it), so when kinetic energy grows the impact is
-  solved again with Poisson's rule (a plastic impact, then `e` times each point's compression impulse),
-  and if that also adds energy, as a plastic impact. Energy still growing after that is a solver fault
-  and ends the run `CrashedEnergy` (`CrashKind::EnergyBound`). Each resolved pair logs `impact` (value:
-  approach speed, with the other entity, the point and the time `t*`).
-- **Resting.** A pair approaching slower than its `rest_speed` (default 0.05 m/s) gets no impulse and
-  rests on its compliance from then on, with forces in every stage like a `Compliant` pair, until it is no
-  longer touching at a tick end. A bouncing ball therefore ends at the static deflection `m g / k`.
-- **Deferred impacts.** `config.contact.max_events_per_tick` (default 4) bounds the impacts located in one
-  tick. Past it, the remaining impacts are resolved at the tick's end, where the bodies overlap, and logged
-  as `contact_deferred` (value: approach speed). Zero resolves every impact at the tick's end.
-- **Penetration recovery.** In `SimSet::Constraints`, after `Contacts` is filled, an `Impulsive` pair
-  still overlapping (a deferred impact, or an overlap in the scenario) is pushed apart along its normal by
-  at most `config.contact.max_projection` per tick (default 1 mm; 0 turns it off), split by inverse mass,
-  positions only, and logged as `contact_projected` (value: the distance). Not at Tick 0, so the recorded
-  Tick-0 state is the scenario's. `Contacts` shows the overlap before the push.
-- **Swept `EventOnly` checks.** The tick's event-only near pairs (from the swept broad phase) that are
-  apart at both ends of the tick are searched along the motion interpolated between the tick's start and
-  end (positions and velocities linear, attitudes by slerp) with the same search, and log `contact` at the
-  time of the first touch (value: approach speed). Such a touch has no `contact_end`.
-- **Events and configuration.** `SimEvent` gains `time: Option<f64>`, used by the event log's `t_s`
-  instead of the tick's end. `max_events_per_tick` and `max_projection` join `sim_config_hash`;
-  `max_projection` must be finite and ≥ 0.
-- **Not built here.** The persistent-penetration watchdog (`max_penetration` for N ticks) and range
-  sensors followed in step 5d-3 (§9.7c). Known limits: a grazing touch shorter than about 10⁻⁶ of the interval can be
-  missed, and when a corner rolls over an edge (the closest feature changes) the cubic model can miss a
-  shallow graze; both leave at most a sub-tick overlap that the next tick resolves or projects.
-- **Allocation.** Every buffer is sized at Tick 0; the reused EPA is warmed up with two overlapping balls,
-  which run its full 100 iterations, so later overlaps never grow it. The allocation test drops tumbling
-  boxes and balls onto the ground and each other, defers an impact, projects an overlap, and fires fast
-  balls at a thin plate (one rigid, one event-only), under RK4 and adaptive Dormand–Prince.
-
-### 9.7c As built (step 5d, part 3)
-
-- **Ray query.** `Dynamics::ray_cast(world, origin, direction, max, exclude) -> Option<RayHit>` returns
-  the first collider the ray meets within `max`: `RayHit { distance, point, normal, sim_id }`, the
-  normal facing back along the ray. Every collider takes part, static ones included, each at its body's
-  pose in the World now; the collider of `exclude` is skipped. A moving collider is first tested against
-  its bounding sphere about the body's centre, a bounded static one against its box, then each part goes through Parry's ray cast inside `sim_core::geometry`. Shapes are solid, so
-  an origin inside a collider reads distance 0. Ties go to the collider first in `SimId` order. The
-  direction is normalised; a zero or non-finite direction, origin or range finds nothing. The query
-  allocates nothing.
-- **Range finders.** `RangeFinder { rate_divider, latency, mount, direction, max_range, noise, range, hit,
-  valid }` is a fourth `SensorPlugin` sensor (model library 0.1.5), on a `RigidBody6` or a `PointMass3`.
-  It samples like the others (divided rate, latency in ticks, its own stream `sensors/range/<SimId>`, the
-  shared `Noise` model): the truth is the ray from `position + attitude · mount` along
-  `attitude · direction` (world axes on a point mass; default `+z`, down in FRD body axes), skipping the
-  body's own collider. With nothing within `max_range` it reads `max_range` with `hit` false, and the
-  noise draws are taken all the same so the stream stays aligned. Noise never makes a range negative.
-  `max_range` must be finite and above 0, the direction non-zero and the mount finite.
-- **Persistent-penetration watchdog.** `config.contact.max_penetration` (m, default off) and
-  `config.contact.penetration_ticks` (default 10, at least 1). At the end of each tick every touching
-  body pair whose deepest point overlaps more than `max_penetration` counts one more tick in a row; a pair
-  that counts more than `penetration_ticks` ends the run `CrashedSolver` with the new
-  `CrashKind::Penetration` (6), naming both `SimId`s, the overlap and the limit. The depth is the one in
-  `Contacts`, before any projection of an impulsive pair. Gear points are not checked: their compression
-  is the strut's. Off by default because a soft material may rest deep on purpose and no one depth suits
-  every scale, from a fragment to an aircraft. Both settings are in `sim_config_hash`;
-  `max_penetration` must be finite and above 0.
-- **Not built here.** Scanning lidar (many rays per sample) and segment queries for fragment impacts
-  (step 7) use the same ray query when they come.
 
 ### 9.8 Effort
 

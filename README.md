@@ -5,22 +5,15 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step 5d. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step 5c, part 1. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
 > centrifugal terms) and a ground-impact stop, plus projectile aerodynamics after McCoy (6DOF, or a 3DOF point mass, with coefficients
 > constant or tabulated over Mach) and fixed-wing aircraft (coefficient buildups from tables or stability
 > derivatives, control surfaces, thrust or the Stevens–Lewis turbofan, air data, trim at Tick 0; the
-> Stevens–Lewis F-16 ships as a reference scenario), multirotors (lumped rotors with motor lag, drag and a
-> mixer), servos (limits, rate limits, lags, backlash), sensors (IMU, GNSS, barometer and range finders that
-> cast rays at the collision geometry, with noise, bias walk and latency) and controllers (PID loops wired by field paths in the scenario file, or native Rust `Controller`s).
-> Bodies collide through Parry: balls, capsules, boxes, cylinders and convex hulls against each other, flat
-> ground, height-field terrain and triangle meshes, with compliant contact (spring–damper normal force and
-> regularised friction inside every integrator stage), landing-gear legs and braked, steerable wheels, rigid
-> impulsive contact (bounces and ricochets at a time of impact located inside the tick, restitution and
-> friction impulses, resting below a rest speed, no tunnelling through thin plates), `contact` and `impact`
-> events, and an optional watchdog that ends a run whose bodies stay sunk into each other. `saber-cli validate` checks a scenario. `sim_verify` evaluates a `.req.ron` requirement set in every run (metrics, `Threshold`,
+> Stevens–Lewis F-16 ships as a reference scenario), servos (limits, rate limits, lags, backlash) and sensors
+> (IMU, GNSS, barometer with noise, bias walk and latency), and `saber-cli validate` checks a scenario. `sim_verify` evaluates a `.req.ron` requirement set in every run (metrics, `Threshold`,
 > `Envelope`, `Never`, `Eventually` and custom checks, early stop) and writes per-run verdicts. `sim_schema`
 > defines every output table and the crash-dump stream, reads and writes them with header and schema checks, and
 > exports the definitions that `saber.schema` uses to read the same files in Python. `sim_hpc --campaign
@@ -34,7 +27,8 @@ aircraft.
 > `saber.campaign.submit` queues it on PBS or Slurm with automatic resubmissions. `saber.analyze` reads a campaign's
 > committed parts with its coverage and uncertainty, `saber.verify` turns per-run verdicts into campaign verdicts
 > with Clopper–Pearson bounds in `verdicts.parquet`, and `saber.report` writes a self-contained `report.html` with
-> the traceability matrix (`python -m saber.verify campaign.toml` does all three). The fragment pool comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> the traceability matrix (`python -m saber.verify campaign.toml` does all three). Impulsive contact (bounces and
+> ricochets at a located time of impact) and the fragment pool come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

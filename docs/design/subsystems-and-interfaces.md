@@ -79,23 +79,6 @@ limit, a first- or second-order lag and backlash; and `Imu`, `Gnss` and `Baromet
 random walk, quantisation, divided rates and latency. In the kernel: `FieldPath::write`, `Environment: Any`
 with `SimEnvironment::downcast_mut`, and `Default` for `RngStreams`. `LIBRARY_VERSION` 0.1.3. The rotorcraft
 and control plugins are part 2 of step 5c.
-v0.23 (2026-11-03, build step 5c, part 2) records the rotorcraft and control plugins as built (§5.2, IB-08):
-`Rotorcraft` with lumped rotors whose speeds are integrated states behind a first-order motor lag, frame and
-rotor drag, spin-up and gyroscopic moments, and `MixerCommand` through the minimum-norm inverse of the
-allocation matrix; `PidControl` loops that read and write fields by path, cascade and wrap angles; and the
-`Controller` trait as built (a component with observation and command components, run by
-`ControllerPlugin<C>`). `LIBRARY_VERSION` 0.1.4.
-v0.24 (2026-11-03, build step 5d, part 1) records geometry and compliant contact as built (§5.1, §6, IB-19):
-`sim_core::geometry` over Parry `=0.31.1` and `sim_core::contact` with its solver inside `Dynamics`;
-`SimEvent` and the event log gain the other entity and a position; `ResolveReport` gains setup warnings;
-`SimConfig` gains `contact.max_contact_pairs`.
-v0.25 (2026-11-03, build step 5d, part 2) records impulsive contact as built (§5.1, §6, IB-19): impacts
-located inside `Integrate`, `impact`, `contact_deferred` and `contact_projected` events, `SimEvent.time`,
-and `contact.max_events_per_tick` and `contact.max_projection` in `SimConfig`.
-v0.26 (2026-11-03, build step 5d, part 3) records the kernel ray query, range finders and the
-persistent-penetration watchdog as built (§5.1, §5.2, IB-19): `Dynamics::ray_cast`, `RangeFinder` in the
-`SensorPlugin`, `contact.max_penetration` and `contact.penetration_ticks` in `SimConfig`, and
-`CrashKind::Penetration`. `LIBRARY_VERSION` 0.1.5.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -372,8 +355,8 @@ flowchart LR
 | `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). As built (step 3b): after the recorder in `SimSet::Record`, `TelemetryLog` copies this tick's events (with the body's position from the frame just recorded) and, every `snapshot_every` ticks from Tick 0, every body's state; buffers are sized at Tick 0 from `TelemetryConfig { max_events, snapshot_every, max_snapshots }` (a campaign setting, not in `sim_config_hash`), so overflow is counted, never allocated, and `RunOutput` adds the final state when it was off the cadence. Adaptive snapshot ramp-up is not built yet. As built (step 5d, part 1): `SimEvent` also carries `other` (the second entity of a contact) and `pos` (where it happened; when absent the log uses the body's position), and the log row fills `other_sim_id`. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
 | `FieldPath`, `CheckCatalog` | Kernel support for verification that model plugins can reach without depending on `sim_verify` (§4): `FieldPath` reads a number or `bool` from `Component.field.path` through a path parsed once (no allocation per read); `CheckCatalog` holds the named custom requirement checks plugins register with `SimAppBuilder::register_check` (step 2). | `FieldPath`, `FieldReadError`, `CustomCheck`, `CheckState`, `CheckCatalog` |
 | `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). | `FlightRecorder` |
-| `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). As built (step 5d, part 1): the module is `sim_core::geometry`; shapes are `CollisionShape { parts }` of `ShapePart { shape: ShapeDesc, pose: Pose }`, built into Parry shapes at Tick 0 (meshes and height fields with their BVH); the broad phase lives in `ContactSolver`. Ray queries serve gear points; from step 5d-3 `Dynamics::ray_cast` also serves range sensors (first collider along a ray, skipping one `SimId`, `RayHit { distance, point, normal, sim_id }`). | `CollisionShape`, `ShapePart`, `ShapeDesc`, `Pose` |
-| `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. As built (step 5d, part 1): `sim_core::contact`, owned by `Dynamics`; `Compliant` and `EventOnly` (at tick ends) only, `Impulsive` arrived in 5d-2 (`sim_core::contact::impact`): impacts located inside `Integrate` by re-integrating every body, Newton impulses with Coulomb friction (Poisson and plastic fallbacks when Newton would add energy), the resting switch, deferred impacts, penetration recovery, swept `EventOnly` checks. Forces are added after the force models in every stage; `SimSet::Constraints` fills `Contacts` and emits `contact` and `contact_end`. Details in `physics-engine-tradeoffs.md` §9.7a and §9.7b. | `ContactMaterial`, `DampingLaw`, `ContactPoints`, `GearPoint`, `ContactOverrides`, `ContactConfig`, `Contacts`, `ContactPoint` |
+| `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). As built (step 5d, part 1): the module is `sim_core::geometry`; shapes are `CollisionShape { parts }` of `ShapePart { shape: ShapeDesc, pose: Pose }`, built into Parry shapes at Tick 0 (meshes and height fields with their BVH); the broad phase lives in `ContactSolver`. Ray queries serve gear points now and range sensors in 5d-2. | `CollisionShape`, `ShapePart`, `ShapeDesc`, `Pose` |
+| `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. As built (step 5d, part 1): `sim_core::contact`, owned by `Dynamics`; `Compliant` and `EventOnly` (at tick ends) only, `Impulsive` arrives in 5d-2. Forces are added after the force models in every stage; `SimSet::Constraints` fills `Contacts` and emits `contact` and `contact_end`. Details in `physics-engine-tradeoffs.md` §9.7a. | `ContactMaterial`, `DampingLaw`, `ContactPoints`, `GearPoint`, `ContactOverrides`, `ContactConfig`, `Contacts`, `ContactPoint` |
 | `FragmentPool` | Fixed-capacity store of dormant 3DOF fragment slots, sized from the scenario and allocated at Tick 0 so fragmentation never allocates mid-run (IB-16). Absent when a scenario declares no fragmentation. | `FragmentPool`, `FragmentSlot` |
 | `Core.Watchdog` | Detects divergence, sets `SimStatus::Crashed*`, tags `FLAG_NAN_ORIGIN`. Checks every body's state is finite, then (when set) that total mechanical energy (translational, rotational and the environment's gravity potential) stays at or below `energy_max_j`. Names the first non-finite body in `SimId` order, or the body with the most energy. | `WatchdogConfig { energy_max_j: Option<f64> }`, `RunStatus` |
 | `TerminationPolicy` | Ends the run: tick budget, model-declared stop conditions (impact, landing, goal reached), crash. Stop conditions call `StopRequests::request(name)`; the run ends as `Terminated` at the end of that tick. At `max_ticks` the run ends with `at_max_ticks`, `Completed` by default (D19). | `SimStatus`, `StopRequests`, `MaxTicksOutcome` |
@@ -441,9 +424,120 @@ at or below that altitude; the plugin lists the watched bodies at Tick 0, so a s
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
 `sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
-0.1.1 from step 5a, 0.1.2 from step 5b, 0.1.3 from step 5c, 0.1.4 from step 5c part 2, 0.1.5 from step 5d
-part 3) is the version
-scenarios check against (IB-01).
+0.1.1 from step 5a, 0.1.2 from step 5b, 0.1.3 from step 5c) is the version scenarios check against (IB-01).
+
+**As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
+`SetupError` names the body that breaks a rule:
+
+- `ProjectileAero { diameter, cd0, cd2, cla, cla2, cma, cma2, cmq, clp, cnpa, cmpa, cl0 }` on a `RigidBody6`
+  whose body `x` axis is the axis of symmetry, nose forward. Each coefficient is a `Coef`: `Constant(f64)` or
+  `Mach(AeroTable)` with one axis named `mach`, looked up at the Mach number of the air-relative velocity.
+  Every coefficient defaults to zero, so a scenario names only those it uses.
+- `PointMassAero { diameter, cd0 }` on a `PointMass3`: drag only (the 3DOF option of D2).
+
+With `v_b = q⁻¹(V − wind)`, `v = |v_b|`, `x̂` the body axis, `q_s = ½ρ·πd²/4`, `sin²δ = (v_y² + v_z²)/v²` and
+`(p, q, r)` the body rates relative to the world frame, the force and moment in body axes are:
+
+| Term | Body-axis form | Sign convention |
+|---|---|---|
+| Drag | `−q_s (C_D0 + C_D2 sin²δ) v v_b` | |
+| Lift | `q_s (C_Lα + C_Lα2 sin²δ) [v_b × (x̂ × v_b)]` | toward the nose for `C_Lα > 0` |
+| Magnus force | `q_s d p C_Npα (x̂ × v_b)` | |
+| Overturning moment | `q_s d v (C_Mα + C_Mα2 sin²δ) (v_b × x̂)` | `C_Mα > 0` is statically unstable, as in McCoy |
+| Pitch damping | `q_s d² v C_Mq (0, q, r)` | `C_Mq` stands for `C_Mq + C_Mα̇` |
+| Spin damping | `q_s d² v C_lp p x̂` | |
+| Magnus moment | `q_s d² p C_Mpα [x̂ × (v_b × x̂)]` | |
+| Roll drive (fin cant) | `q_s d v² C_l0 x̂` | |
+
+Linearised for small yaw, and dropping the Magnus force and products of small terms as McCoy does, these give
+his yaw equation `ξ'' + (H − iP)ξ' − (M + iPT)ξ = 0` per calibre with his `H`, `P`, `M` and `T` (verification
+§6.2). A body carries one of the two components; either on a body of the other kind
+or on an entity without a body, a non-finite coefficient, a non-positive diameter or a table that is invalid
+or not over `mach` is a `SetupError`. The force model copies each body's coefficients at Tick 0, after the
+Resolver, so a coefficient can be swept (`ProjectileAero.cla.0` targets a `Constant`). It skips a body with no
+air or no airspeed. The plugin inserts `AeroState { mach, dynamic_pressure, total_yaw, spin_rate,
+gyro_stability }` on each such body at Tick 0 and updates it in `SimSet::Telemetry` from a list built at Tick 0,
+so metrics can read it (`entity(1).AeroState.mach`). `gyro_stability` is McCoy's
+`S_g = I_x² p² / (2ρ I_y S d v² C_Mα)`. `AeroState` is run output: the plugin overwrites it at every Tick 0, so a
+scenario file need not carry it.
+
+`EnvironmentPlugin` also reads an optional `EarthRotation` (`None`, `Ecef`, or `Local { latitude_deg }` for an
+ENU or NED frame whose origin is at that geodetic latitude). The frame then turns at the WGS 84 rate
+`ω_E = 7.292115e-5 rad/s`: about `+z` in ECEF, `(0, cos φ, sin φ)` in ENU, `(cos φ, 0, −sin φ)` in NED. The
+kernel adds the Coriolis and centrifugal terms (§10.3). Without the component no frame rotates, ECEF
+included, so scenarios written before step 5a run unchanged. `Ecef` with J2 gravity gives WGS 84 normal
+gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
+origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
+origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
+
+**As built (step 5b).** `FixedWingPlugin` (`ModelId` namespace `fixedwing/`) acts on a `RigidBody6` whose body
+axes are forward, right, down. Its components, each checked at Tick 0 with a `SetupError` naming the body:
+
+- `FixedWingAero { area, span, chord, moment_reference, cx, cy, cz, lift, drag, roll, pitch, yaw }`. Each of the
+  eight coefficients is a list of `AeroTerm { value, factors }`, summed. A value is `Constant(f64)` or
+  `Table(AeroTable)` whose axes are named after inputs; a factor is `Input(i)`, `Sign(i)` (−1 below zero, else
+  +1, for data tabulated over `|β|`) or `Poly(i, [c₀, c₁, …])`. The 21 inputs (`AeroInput`) are α and β in
+  radians or degrees, `|β|`, Mach, altitude, airspeed, each control surface in radians or degrees, the
+  normalised rates `p̂ = pb/2V`, `q̂ = qc̄/2V`, `r̂ = rb/2V`, and throttle. So a table buildup (Stevens and
+  Lewis's F-16), stability derivatives (`C_mq · q̂`) or a mix are all data, not code.
+- `ControlSurfaces { elevator, aileron, rudder, flap, throttle }`, radians and 0–1, read once per tick (IB-08),
+  so a controller, an actuator model (5c), a scenario or a sweep can set them. The sign convention (positive
+  elevator trailing edge down, positive aileron rolls left, positive rudder yaws left) is the data's.
+- `Propulsion { engine, thrust_point }`: `Thrust(Vec<AeroTerm>)` in newtons, or `Turbofan { idle, military,
+  maximum, angular_momentum }`, Stevens and Lewis's F-16 engine: throttle gearing to a commanded power, a power
+  lag whose rate depends on the change asked for, thrust interpolated between the tables by power, and the
+  rotor's gyroscopic moment `−ω × h_e`.
+- `EngineState { power }`: the turbofan's lag, an integrated state the force model owns (IB-08), inserted at
+  Tick 0 at the commanded power unless the scenario gives one.
+- `AirData { airspeed, alpha, beta, mach, dynamic_pressure, load_factor, thrust }`: telemetry at the end of
+  every tick (`entity(1).AirData.alpha`).
+- `TrimCondition { airspeed, flight_path_angle, heading }`: the plugin trims the aircraft for steady straight
+  wings-level flight at Tick 0, in `after_setup`: Levenberg–Marquardt over throttle, elevator, aileron, rudder,
+  α and β on the World's full right-hand side (`sim_core::dynamics::derivatives`), to residuals below 1e-9.
+  The position stays as authored, so altitude and airspeed can be swept. A trim that fails, needs a throttle
+  outside 0–1, or runs in ECEF or a rotating frame is a `SetupError`.
+
+Force `F = q̄S[(C_X, C_Y, C_Z) + C_L (sin α, 0, −cos α) − C_D (cos α, 0, sin α)]` (lift and drag in stability
+axes) and moment `q̄S(b C_l, c̄ C_m, b C_n) + r_ref × F` about the centre of mass, where `r_ref` is the point the
+moment data refer to; then thrust along body `x` at `thrust_point`. `FixedWingAero` and `ProjectileAero` on one
+body is a `SetupError` (D9). Coefficients are copied at Tick 0 after the Resolver, so any term can be swept.
+The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lewis/f16/`) as a scenario file.
+
+**As built (step 5c, part 1).** Turbulence, servos and sensors; rotorcraft and control follow in part 2.
+
+- `Wind::Dryden { mean, airspeed, heading, intensity, scale }` (local ENU or NED frames only): the MIL-F-8785C
+  spectra `Φ_u = σ_u² (2L_u/π) / (1 + (L_uΩ)²)` and `Φ_v = σ_v² (L_v/π)(1 + 3(L_vΩ)²) / (1 + (L_vΩ)²)²` (`w`
+  likewise), which are MIL-HDBK-1797's with its lateral and vertical lengths doubled. The field is frozen and
+  traversed at `airspeed`, the same everywhere at a given time, along world-fixed axes: `u` horizontal along
+  `heading`, `v` to its right, `w` down. Each component is the exact discretisation of its shaping filter
+  under continuous white noise, so its samples on the tick grid have exactly the Dryden autocorrelation for
+  any tick length; the state starts from the stationary distribution. The plugin draws five normals a tick
+  from the `environment/dryden` stream in `SimSet::Environment`, and the wind is interpolated linearly within
+  the tick, so every integrator stage sees a continuous wind. A trim at Tick 0 trims into the gust at `t = 0`.
+- `Actuators { channels }`: each `Actuator { output, command, hold_start, min, max, rate_limit, lag, backlash,
+  position }` drives an `f64` (or `f32`) field of a component on the same entity, named by its path
+  (`ControlSurfaces.elevator`, later `Rotorcraft.rotors[2].command`). In `SimSet::Actuation` it clamps the
+  command, moves the lag toward it (`None`; `FirstOrder { time_constant }` with the rate limit solved in
+  closed form; `SecondOrder { natural_frequency, damping }` by the matrix exponential of the error dynamics,
+  with the rate limit capping the tick's change), applies backlash of total width `backlash`, clamps to the
+  limits, and writes the position at the end of the tick to the field and to `position`. Channels are set up
+  in `after_setup`, after every other plugin and any trim: they start at rest at the field's value, which
+  must lie within the limits, and `hold_start` commands that value, so servos hold a trimmed aircraft as it
+  was. Unknown or non-float fields, a second channel on one field, a channel driving `Actuators`, and bad
+  parameters are `SetupError`s. A scenario file need give only `output`; the rest default to no limits, no
+  rate limit, no lag and no backlash.
+- `Imu`, `Gnss` and `Barometer` components, each with `rate_divider`, `latency` (ticks), a `Noise { white,
+  bias, bias_walk, resolution }` per measured quantity (applied to each axis independently) and its outputs
+  plus `valid`. In `SimSet::Sensors` a sensor samples the state the tick starts from when the tick is a
+  multiple of its divider, and publishes the newest sample at least `latency` ticks old, so a controller in
+  the same tick sees it exactly `latency` ticks late. The `Imu` (on a `RigidBody6`, at the centre of mass,
+  body axes) reads the inertial rate and the specific force averaged over its sample period, with gravity and
+  a turning frame's terms removed; the `Gnss` reads world-frame position and velocity; the `Barometer` reads
+  the environment's static pressure and the 1976 standard's pressure altitude of what it measured. The bias
+  starts at `bias` and walks by `bias_walk·√T·η` per sample period `T`. Each sensor draws two normals per axis
+  per sample from its own stream `sensors/<kind>/<SimId>`, so adding or retuning one sensor never changes
+  another's draws. Every sensor field may be left out of a scenario file (a sample every tick, no latency,
+  no noise).
 
 **As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
 `SetupError` names the body that breaks a rule:
@@ -1215,9 +1309,7 @@ Notes:
   run in `Constraints`. See `physics-engine-tradeoffs.md` §9.4. As built (step 5d, part 1): the solver is a
   kernel part of `Dynamics` rather than a `trait ContactForces` implementation, and runs after the force
   models in every stage of every substep; its end-of-tick pass is the first system of `Constraints`, so
-  plugin systems there already see this tick's `Contacts`. As built (step 5d, part 2): impacts are located
-  inside `Integrate` as sketched, by re-integrating every body to probed times (no dense output); the
-  penetration push and the swept `EventOnly` checks run at the end of that same `Constraints` pass.
+  plugin systems there already see this tick's `Contacts`.
 
 ---
 
@@ -1697,7 +1789,6 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
 | As built (step 5b) | A force model may own integrated states: `ForceModel::state_len` (read after `setup`, fixed for the run), `read_states`/`write_states` (World to packed vector at the start of each tick and back at its end) and `state_rhs(stage, dxdt)`, pure like `eval`, which sees its states as `Stage::model_states()`. They are packed after the bodies, one `StateClass::Model` error group per model, so every integrator crosses them (D14); a solver failure on them names no body. `SimPlugin::after_setup` runs at Tick 0 after the body table, integrator and force models are set up and before the first frame is recorded, for initial-condition solvers. `sim_core::dynamics::derivatives(world)` (and `SimWorld::derivatives`) evaluates the right-hand side once at the current state: each body's `ṗ`, `v̇`, `q̇`, `ω̇` and net applied wrench, and each model's states and rates; it runs every model's `prepare` first and allocates, so it belongs to Tick 0 and tests, not to the tick loop. `FixedWingPlugin` uses all three (engine power lag, trim). |
 | As built (step 5c) | `FieldPath::write(world, entity, value)` writes an `f64` or `f32` field through the same pre-parsed path as `read`, without allocating, so a model can drive another plugin's inputs by name (actuators). `Environment` has `Any` as a supertrait and `SimEnvironment::downcast_mut::<T>()` reaches the concrete model, so a system in `SimSet::Environment` can advance per-tick state such as turbulence; within the tick `sample` stays a fixed function of position and time. `RngStreams` implements `Default` (an empty placeholder) so tick systems take it out of the World with `sim_core::with_resource`: `World::resource_scope` allocated on the first ticks of each run in the allocation tests. |
-| As built (step 5c, part 2) | Systems added to one `SimSet` run in the order their plugins were added, and `sim_models::add_library` fixes that order: Environment, AeroBallistics, FixedWing, Rotorcraft, Actuator, Sensor, Control. So in `SimSet::Actuation` the rotorcraft mixer runs before the servo channels, and in `SimSet::Control` the PID loops run before any `ControllerPlugin<C>` added after the library. A plugin that inserts components other plugins look for does so in `start`; plugins that build per-run tables over such components (the mixer) do so in `after_setup`. |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 
@@ -1868,8 +1959,6 @@ sequenceDiagram
 | Validation | `Core.Resolver` at Tick 0: shapes valid and non-degenerate, `max_contact_pairs` sized, compliant stability `ω·dt ≤ 2.0` (else `SetupError`, warning above 0.5), `0 ≤ e ≤ 1`, `μ ≥ 0`. |
 | Errors | Pair buffer overflow → `CrashedSolver(ContactCapacity)`; persistent penetration above `max_penetration` or energy gain across an impulse → watchdog crash; more than `max_events_per_tick` impacts → deferred and logged, run continues. |
 | As built (step 5d, part 1) | `CollisionShape { parts: Vec<ShapePart { shape, pose }> }` (several parts instead of `Compound`; `HalfSpace`, `HeightField { rows, cols, size_x, size_y, heights }` and `TriMesh { vertices, indices }` inline rather than in a sidecar, static only). `ContactMaterial` adds `damping_law` (`HuntCrossley` or `Linear`) and `slip_speed`. `ContactPoints { points: Vec<GearPoint> }`, each `GearPoint { attach, axis, stroke, material, rolling, forward, steer, rolling_resistance, brake, brake_friction }` with its own material only. Per-pair materials are `ContactOverrides { pairs: [ContactOverride { other, material }] }` on either entity; without one, two materials combine (series stiffness and damping, geometric-mean friction) and must share exponent and damping law. No `trait ContactForces`: the kernel's solver adds the forces. Events are the declared names `contact` (value: approach speed, with `other` and the point) and `contact_end` (value: peak normal force). `config.contact.max_contact_pairs` (default 1024) is in `sim_config_hash`. Stiffness warnings go to `ResolveReport.warnings`. `Impulsive`, `ContactDeferred`, `max_penetration` and the impulse energy check arrive with 5d-2. |
-| As built (step 5d, part 2) | `Impulsive` pairs (every material impulsive; geometric-mean restitution and friction, the larger rest speed) have impacts located inside the tick and resolved with Newton impulses and Coulomb friction in 32 fixed sweeps, falling back to Poisson's rule, then a plastic impact, when Newton would add energy; below `rest_speed` they rest on their compliance. Events: `impact` (value: approach speed, with the time of impact, the point and the other entity), `contact_deferred` (past `config.contact.max_events_per_tick`, default 4), `contact_projected` (overlap pushed out, at most `config.contact.max_projection` per tick, default 1 mm), and `contact` with its time for an `EventOnly` touch inside a tick. `SimEvent` gains `time`. Energy growth after the fallbacks ends the run `CrashedEnergy`. The persistent-penetration watchdog and range sensors are step 5d-3. Details in `physics-engine-tradeoffs.md` §9.7b. |
-| As built (step 5d, part 3) | `Dynamics::ray_cast(world, origin, direction, max, exclude) -> Option<RayHit { distance, point, normal, sim_id }>`: the first collider along a ray, statics included, skipping one `SimId`, without allocating; the `SensorPlugin`'s `RangeFinder` uses it. The persistent-penetration watchdog: `config.contact.max_penetration` (m, `None` by default, so off) and `config.contact.penetration_ticks` (default 10), both in `sim_config_hash`; a body pair overlapping deeper than the limit at the end of more than that many ticks in a row ends the run `CrashedSolver(Penetration)`. Gear points are not checked. Details in `physics-engine-tradeoffs.md` §9.7c. |
 
 ### IB-20 · 3D model assets (model files → sim_assets → Studio.Assets, new, D17)
 
