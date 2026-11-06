@@ -107,6 +107,11 @@ shorthand), the dropped-fragments `Inconclusive` rule, fragment clouds in record
 with an upgrader for 1.x) and Tier 3 snapshots (`ch_frag_*`), the summaries' `fragments_*` family (summaries
 1.1), `*_impacts.parquet` from `sim_hpc` with `[output] fragment_impacts`, and
 `sim_models::import::fragment_drag`.
+v0.29 (2026-11-03, build step S1) records the studio's frame as built (§5.5): kit, states, workspaces, starter
+packs, Launcher and shell; details in `sim_studio_ux.md` §6.3. It also records D21 (was O9): `Probability`
+requirements are judged pooled by default and per parameter set on request, as step 4c built them.
+v0.30 (2026-11-03, build step S2-1) records the Builder's document as built (§5.5) and the kernel API it uses
+(§5.1): `Scenario::from_parts`, `Scenario::meta` and `SceneEntity::try_clone`.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -730,6 +735,10 @@ stateDiagram-v2
 | `Studio.Assets` | `VisualModelPlugin`: resolves each entity's `VisualModel` through the `sim_assets` catalogue, loads glTF through Bevy's `AssetServer` (cached per content hash, cameras and lights skipped), spawns a `ModelRoot` under the body's render proxy, handles placeholders, LOD and far markers (moving-part bindings later, D17), and hosts the Import dialog and Derive collision (§5.10, `sim_studio_ux.md` §7.11). |
 | `Studio.UiKit` | `sim_studio_ui`: Feathers facade plus own widgets (`StudioDock`, `DataTable`, `PlotCanvas`, `TreeView`, `EntityPicker`, `QuantityInput`, `CodeEditor`). Detail and risk register in `sim_studio_ux.md` §6.1. |
 
+**As built (step S1).** The frame only: `Studio.UiKit` has the theme (every `sim_studio_ux.md` §10.1 token as a Feathers token), `StudioDock` with fixed regions, toasts and the widget facade; `sim_studio` has the six `AppState`s, the activity rail, workspaces (`saber.workspace.ron`, schema in `sim_studio_ux.md` §6.3) with starter packs, the per-user recent list (`~/.saber/studio/recent.ron`), the Launcher and the shell. `Studio.Replay` opens a crash stream's index (dumps listed; scrubbing is S6). `Studio.Handoff` is not built: Results says the explorer arrives with step 6b. The studio's logic (`StudioCorePlugin`) runs on `MinimalPlugins`, so tests drive it without a window. Details in `sim_studio_ux.md` §6.3.
+
+**As built (step S2-1).** `Studio.Builder`'s document: `sim_studio::builder::ScenarioDoc` keeps a reflected copy of the open scenario's entities (`SceneEntity::try_clone`) and rebuilds a validated, hashed `Scenario` from them on demand with `Scenario::from_parts(entities, meta, visual, registry)`, which keeps file keys, component order and the `visual:` section, so an untouched scene exports with its `scene_hash`. Fields are edited by reflection path as text; every edit is undoable and saved to `<file>~autosave`, and Export writes the canonical `.scn.ron` (refused while Lint has errors). Lint runs the scene's validation and Tick 0's setup in a World built with the standard library, so setup errors and `ResolveReport.warnings` show while editing. Parameters (bind menu) and requirements are S2-2 and S2-3; the viewport is S3. Details in `sim_studio_ux.md` §7.2.
+
 ### 5.6 `sim_hpc` — headless cluster runner
 
 ```mermaid
@@ -892,7 +901,7 @@ the one-sided Clopper–Pearson lower bound, with the inconclusive runs as failu
 upper bound with them as passes is below it, and otherwise reports how many all-passing runs would show it;
 `Quantile` takes the empirical quantile (inverted CDF) with the unknown values on the failing side for `Pass` and
 on the passing side for `Fail`. Rules judge every counted run together by default; `by_param_set=True` judges
-each parameter set on its own and reports the worst (O9). `envelope` keeps runs whose parameters lie in given
+each parameter set on its own and reports the worst (D21). `envelope` keeps runs whose parameters lie in given
 ranges. A partial campaign is judged on what committed and says so. The bounds come from a regularized incomplete
 beta in the standard library (no scipy), checked against scipy and the binomial tails in tests.
 `Verification.write()` writes `verdicts.parquet` next to the parts, with the campaign's hashes in its header and
@@ -2032,13 +2041,13 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | D18 | Project name | The project is SABER (was SABERS), and identifiers follow: Python package `saber`, `saber-cli`, `~/.saber/`, `saber://` deep links, `saber.workspace.ron`, `FileHeader.saber_version` (Alex, 2026-11-02). | Renamed across all design docs; the code uses the new names from the first commit. |
 | D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy was O8, decided as D20. |
 | D20 | `Timeout` and the crash policy | A run that ends `Timeout` counts toward the campaign's crash-storm rule, and is `Inconclusive`, not a failure, in `saber.verify`'s statistics (Alex, 2026-11-03; was O8). | `sim_hpc::protocol::counts_toward_storm` (§5.6, step 4a); seq §8.2 and §11; `saber.verify` (step 4c). |
+| D21 | Pooled or per-set `Probability` | A `Probability` requirement is judged over all of a campaign's counted runs pooled (the chance over the sweep's sampled inputs) by default; judging each parameter set on its own and reporting the worst (an operating envelope) is available on request (Alex, 2026-11-03; was O9). | `saber.verify` default `by_param_set=False`, `by_param_set=True` per set (§5.7, step 4c, unchanged); seq §11. |
 
 ### Still open
 
 | # | Question | Where |
 |---|---|---|
 | O1 | Fragmentation physics: trigger criteria, fragment mass and velocity distributions, fragment lifetime when nothing is hit. | IB-16 (designed separately) |
-| O9 | Should a `Probability` requirement be judged over all of a campaign's runs pooled (the chance over the sweep's sampled inputs), or on each parameter set, failing if the worst set falls short (an operating envelope)? Step 4c pools by default and judges per set with `by_param_set=True`. | §5.7, seq §11 |
 
 ---
 

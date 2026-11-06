@@ -1,0 +1,260 @@
+//! The screens themselves, headless (verification §8.3): the full UI stack without a window or a
+//! GPU, driven by activating buttons the way a click does. Checks that the Launcher and the shell
+//! spawn, that their buttons are wired to the commands they name, that the shell fills its
+//! regions, and that the Builder's panels edit, undo and export the scenario.
+
+use std::path::{Path, PathBuf};
+
+use bevy::ecs::system::RunSystemOnce;
+use bevy::prelude::*;
+use bevy::render::RenderPlugin;
+use bevy::render::settings::{RenderCreation, WgpuSettings};
+use bevy::text::EditableText;
+use bevy::ui_widgets::Activate;
+use bevy::window::ExitCondition;
+use bevy::winit::WinitPlugin;
+use sim_studio::actions::{BuilderDoc, CurrentWorkspace, StudioCommand};
+use sim_studio::state::AppState;
+use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
+use sim_studio::ui::launcher::{LauncherRoot, field};
+use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
+use sim_studio::workspace::{Pack, Workspace};
+use sim_studio::{StudioCorePlugin, StudioUiPlugin};
+use sim_studio_ui::KitPlugin;
+use sim_studio_ui::widgets::Fields;
+use sim_studio_ui::widgets::KitSubmit;
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("studio-ui-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The studio's plugins on `DefaultPlugins` without winit and without a GPU backend.
+fn headless(recent: &Path) -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        DefaultPlugins
+            .build()
+            .disable::<WinitPlugin>()
+            .set(WindowPlugin {
+                primary_window: Some(Window::default()),
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+                    backends: None,
+                    ..default()
+                })),
+                ..default()
+            }),
+        KitPlugin,
+        StudioCorePlugin {
+            recent_path: Some(recent.to_owned()),
+        },
+        StudioUiPlugin,
+    ));
+    for _ in 0..3 {
+        app.update();
+    }
+    app
+}
+
+/// The entity whose accessible label is `text`.
+fn labelled(app: &mut App, text: &str) -> Entity {
+    let mut q = app.world_mut().query::<(Entity, &AccessibleLabel)>();
+    let found: Vec<_> = q
+        .iter(app.world())
+        .filter(|(_, l)| l.0 == text)
+        .map(|(e, _)| e)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "one control labelled {text:?}, found {}",
+        found.len()
+    );
+    found[0]
+}
+
+/// Activate a control the way a click or Enter does.
+fn press(app: &mut App, text: &str) {
+    let entity = labelled(app, text);
+    app.world_mut().trigger(Activate { entity });
+    for _ in 0..3 {
+        app.update();
+    }
+}
+
+fn count<C: Component>(app: &mut App) -> usize {
+    let mut q = app.world_mut().query_filtered::<(), With<C>>();
+    q.iter(app.world()).count()
+}
+
+fn state(app: &App) -> AppState {
+    *app.world().resource::<State<AppState>>().get()
+}
+
+/// From the Launcher, typing a name and folder and pressing a pack makes the workspace and opens
+/// the shell with filled regions; the rail and the close button work from there.
+#[test]
+fn the_launcher_starts_a_workspace_and_the_shell_opens() {
+    let dir = scratch("launch");
+    let mut app = headless(&dir.join("recent.ron"));
+    assert_eq!(state(&app), AppState::Launcher);
+    assert_eq!(count::<LauncherRoot>(&mut app), 1);
+
+    // An empty path gives a hint rather than an error.
+    press(&mut app, "Open workspace");
+    assert_eq!(state(&app), AppState::Launcher);
+
+    app.world_mut()
+        .run_system_once(move |mut f: Fields| {
+            f.set(field::NAME, "ui_ws");
+            f.set(field::LOCATION, &dir.display().to_string());
+        })
+        .unwrap();
+    app.update();
+    press(&mut app, "Drone (multirotor)");
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+    assert_eq!(count::<LauncherRoot>(&mut app), 0, "the Launcher is gone");
+    assert_eq!(count::<ShellRoot>(&mut app), 1);
+    assert_eq!(
+        count::<PendingRegions>(&mut app),
+        0,
+        "the regions are filled"
+    );
+    assert_eq!(count::<ConsoleList>(&mut app), 1);
+    let ws = app
+        .world()
+        .resource::<CurrentWorkspace>()
+        .0
+        .clone()
+        .unwrap();
+    assert_eq!(ws.file.name, "ui_ws");
+
+    // The rail switches screens; each screen rebuilds the shell once.
+    press(&mut app, "Campaign Setup (C)");
+    assert_eq!(state(&app), AppState::CampaignSetup);
+    assert_eq!(count::<ShellRoot>(&mut app), 1);
+    press(&mut app, "Close workspace");
+    assert_eq!(state(&app), AppState::Launcher);
+    assert_eq!(count::<ShellRoot>(&mut app), 0);
+    assert_eq!(count::<LauncherRoot>(&mut app), 1);
+
+    // The new workspace is now the first recent one, and opening it from there works.
+    press(&mut app, "Open workspace ui_ws");
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+}
+
+/// The value field editing `component` `path`, and its text input.
+fn inspector_field(app: &mut App, component: &str, path: &str) -> (Entity, Entity) {
+    let mut q = app
+        .world_mut()
+        .query::<(Entity, &InspectorField, &Children)>();
+    let (e, _, children) = q
+        .iter(app.world())
+        .find(|(_, f, _)| f.component == component && f.path == path)
+        .unwrap_or_else(|| panic!("no Inspector field {component} {path}"));
+    (e, children[0])
+}
+
+fn input_text(app: &App, input: Entity) -> String {
+    app.world()
+        .get::<EditableText>(input)
+        .unwrap()
+        .value()
+        .to_string()
+}
+
+fn mass(app: &App) -> f64 {
+    let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+    let slot = doc.slot_of(1).unwrap();
+    doc.components(slot)
+        .into_iter()
+        .find(|c| c.name == "MassProps")
+        .unwrap()
+        .fields[0]
+        .text
+        .parse()
+        .unwrap()
+}
+
+/// The Builder opens on the first entity; typing a value and pressing Enter edits the scenario
+/// (marked unsaved), Undo puts the old value back into the same field, Export writes the file,
+/// and the Outliner moves the Inspector to another entity.
+#[test]
+fn the_builder_edits_undoes_and_exports_a_scenario() {
+    let dir = scratch("builder");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::ScenarioBuilder);
+    let mut q = app.world_mut().query::<&InspectorOf>();
+    assert_eq!(
+        q.iter(app.world()).next(),
+        Some(&InspectorOf(Some(1))),
+        "slot 1 is #1"
+    );
+
+    let (_, input) = inspector_field(&mut app, "sim_core::body::MassProps", ".mass");
+    assert_eq!(input_text(&app, input), "1.2");
+    app.world_mut().trigger(KitSubmit {
+        entity: input,
+        value: "1.5".into(),
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(mass(&app), 1.5);
+    let mut crumbs = app.world_mut().query_filtered::<&Text, With<Breadcrumb>>();
+    assert!(
+        crumbs.single(app.world()).unwrap().0.starts_with("● "),
+        "unsaved"
+    );
+    // The same field is still there (the Inspector is updated in place, not rebuilt).
+    assert_eq!(
+        inspector_field(&mut app, "sim_core::body::MassProps", ".mass").1,
+        input
+    );
+
+    press(&mut app, "Undo");
+    assert_eq!(mass(&app), 1.2);
+    assert_eq!(
+        input_text(&app, input),
+        "1.2",
+        "the field shows the undone value"
+    );
+    press(&mut app, "Redo");
+    assert_eq!(input_text(&app, input), "1.5");
+    press(&mut app, "Export .scn.ron");
+    let file = std::fs::read_to_string(ws.root.join("scenarios/quad.scn.ron")).unwrap();
+    assert!(file.contains("mass: 1.5"), "exported");
+    assert!(
+        !crumbs.single(app.world()).unwrap().0.starts_with("● "),
+        "saved"
+    );
+
+    // A refused value is reported and the field shows the scenario's value again.
+    app.world_mut().trigger(KitSubmit {
+        entity: input,
+        value: "heavy".into(),
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(mass(&app), 1.5);
+    assert_eq!(input_text(&app, input), "1.5");
+
+    press(&mut app, "Select #100 Gravity · Atmosphere · Wind");
+    let mut q = app.world_mut().query::<&InspectorOf>();
+    assert_eq!(q.iter(app.world()).next(), Some(&InspectorOf(Some(0))));
+    inspector_field(&mut app, "sim_models::environment::Gravity", ".g");
+}
