@@ -1,0 +1,18 @@
+// Multirotor starter requirements (studio template) for `quad.scn.ron`: the quad ends within
+// 0.5 m of its 10 m hold altitude and never touches the ground (NED: z is down, so altitude is −z).
+// The values are illustrative; set them from the system's specification.
+RequirementSet(
+    header: (magic: "SABER", format: "requirements", schema_version: "1.0.0"),
+    id: "QUAD-START", version: "0.1.0", scenario_hint: "quad.scn.ron",
+    metrics: {
+        "z_final_m": (signal: "entity(1).RigidBody6.position.z", reduce: Final),
+    },
+    requirements: [
+        (id: "R-hold-low", text: "Ends above 9.5 m",
+         kind: Threshold(metric: "z_final_m", op: Le, value: -9.5)),
+        (id: "R-hold-high", text: "Ends below 10.5 m",
+         kind: Threshold(metric: "z_final_m", op: Ge, value: -10.5)),
+        (id: "R-no-ground", text: "Never touches the ground",
+         kind: Never(signal: "entity(1).RigidBody6.position.z", op: Ge, value: 0.0)),
+    ],
+)

@@ -144,3 +144,126 @@ def test_a_crash_storm_is_aborted(tmp_path, scene):
     assert set(schema.enum_name("SimStatus", v) for v in t.column("status").to_pylist()) == {"CrashedEnergy"}
     with pytest.raises(CampaignError, match="crash policy"):
         run.check()
+    # Reported with its crash histogram, never judged (IB-11).
+    with pytest.raises(CampaignError) as e:
+        verify.verify(toml)
+    assert e.value.status is Status.ABORTED
+    page = report.write_report(toml).read_text(encoding="utf-8")
+    assert 'class="badge aborted"' in page and "CrashStorm" in page and "CrashedEnergy" in page
+
+
+def test_resume_finishes_a_campaign_that_lost_parts_or_drained(tmp_path, scene):
+    """Step 4b from Python (R6): a campaign that lost committed parts, or drained before its
+    walltime, is finished by `resume=True` with every run once and the same results."""
+    s = sweep.generate(scene, {"muzzle_vz": sweep.Uniform(30, 90)}, sweep.LatinHypercube(8), replicates=2, seed=3)
+    toml = make(tmp_path, "resume", s, checkpoint=campaign.Checkpoint(checkpoint_interval_s=0.0))
+    first = campaign.run_local(toml, threads=2).check()
+    full = first.read("summaries").sort_by("run_id")
+    first.files("summaries")[0].unlink()
+    (first.shared_out / "_MANIFEST.json").unlink()
+
+    with pytest.raises(CampaignError) as e:
+        campaign.preflight(toml)
+    assert (e.value.status, e.value.kind) == (Status.INVALID, "OutputExists")
+    pf = campaign.preflight(toml, resume=True)
+    assert pf.attempt == 1 and 0 < pf.missing_runs < 16
+    run = campaign.run_local(toml, resume=True, threads=2).check()
+    assert (run.report["attempt"], run.report["runs"]) == (1, pf.missing_runs)
+    t = run.read("summaries").sort_by("run_id")
+    assert t.column("run_id").to_pylist() == list(range(16))
+    assert t.column("final_state_hash").to_pylist() == full.column("final_state_hash").to_pylist()
+    assert [a["attempt"] for a in run.manifest["attempts"]] == [0, 1]
+    assert run.manifest["attempts"][0]["rebuilt_from_footers"] is True
+
+    # A deadline already inside drain_margin_s: nothing is dispatched, the attempt is partial.
+    drained = make(tmp_path, "drain", s)
+    run = campaign.run_local(drained, deadline=time.time())
+    assert run.status is Status.PARTIAL and run.status.resumable
+    assert (run.report["stopped"], run.report["runs"], run.report["missing_runs"]) == ("walltime", 0, 16)
+    assert campaign.run_local(drained, resume=True).check().report["runs"] == 16
+
+
+def _binom_tail_ge(k: int, n: int, p: float) -> float:
+    return sum(math.comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(k, n + 1))
+
+
+def test_verdicts_match_a_hand_computed_expectation(tmp_path, scene, capsys):
+    """Build step 4c exit test: `verdicts.parquet` of a real campaign equals verdicts worked out by hand.
+
+    muzzle_vz in {20, 30, 40, 60, 160} m/s, 4 replicates each: apogee vz^2 / 2g = 20.4, 45.9, 81.6,
+    183.5 m and flight time 2 vz / g = 4.1, 6.1, 8.2, 12.2 s; at 160 m/s the shot would fly 32.6 s
+    and the scenario stops at 30 s, so those 4 runs time out and count as inconclusive (D20).
+    """
+    levels = [20.0, 30.0, 40.0, 60.0, 160.0]
+    s = sweep.generate(scene, {"muzzle_vz": sweep.Levels(levels)}, sweep.Grid(), replicates=4, seed=2)
+    toml = campaign.prepare(tmp_path / "verify", id="proj-verify", scene=SCENE, requirements=VERIFY_REQ, sweep=s,
+                            scratch_dir="scratch", execution=Execution(chunk_size=4),
+                            checkpoint=campaign.Checkpoint(checkpoint_interval_s=0.0))  # a part per chunk
+    run = campaign.run_local(toml, threads=2).check()
+    assert run.report["runs"] == 20 and len(run.files("summaries")) > 1
+    c = analyze.open_campaign(toml)
+    t = c.summaries()
+    vz = t.column("param_muzzle_vz").to_pylist()
+    status = [schema.enum_name("SimStatus", x) for x in t.column("status").to_pylist()]
+    assert sorted(vz) == sorted(levels * 4) and c.coverage().complete
+    assert {st for st, v in zip(status, vz) if v == 160.0} == {"Timeout"}
+    assert {st for st, v in zip(status, vz) if v != 160.0} == {"Terminated"}
+
+    v = verify.verify(toml)  # the campaign's archived requirement set, through saber-cli
+    assert (v.runs_judged, v.excluded, v.partial, v.warnings) == (20, [], False, [])
+    path = v.write()
+    f = schema.read_table(path, "verdicts")
+    assert (f.header["campaign_id"], f.header["req_set_hash"]) == ("proj-verify", v.requirements.req_set_hash)
+    got = {r["req_id"]: r for r in f.table.to_pylist()}
+    verdict = {name: schema.enum_value("Verdict", name) for name in ("Pass", "Fail", "Inconclusive")}
+    P, F, I = verdict["Pass"], verdict["Fail"], verdict["Inconclusive"]
+    # (aggregation, n_runs, n_pass, n_fail, n_inconclusive, estimate, lower_bound, confidence, verdict, trace_ids)
+    expected = {
+        # 16 pass, the 4 timeouts could hide a failure.
+        "R-apogee": ("AllPass", 20, 16, 0, 4, 1.0, None, None, I, ["SYS-12"]),
+        # Known apogees 4 x {20.4, 45.9, 81.6, 183.5}: their median (8th of 16) is 45.9; with the 4
+        # timeouts as +inf the median (10th of 20) is 81.6 <= 100 still, so Pass.
+        "R-apogee-median": ("Quantile(q: 0.5, op: Le, value: 100.0)", 20, 12, 4, 4, 45.887, None, None, P, ["SYS-12"]),
+        # 16 of 20 (timeouts as failures): lower 0.6393 < 0.8; as passes, 20 of 20: upper 1. Inconclusive.
+        "R-lands": ("Probability(min_p: 0.8, confidence: 0.9)", 20, 16, 0, 4, 1.0, 0.6393, 0.9, I, ["SYS-13"]),
+        # The 60 m/s shots take 12.2 s.
+        "R-quick": ("AllPass", 20, 12, 4, 4, 0.75, None, None, F, ["SYS-14"]),
+        # Even with the timeouts as passes, 16 of 20 is below 0.95: P(X <= 16 | 0.95, 20) = 0.016 < 0.1.
+        "R-quick-p95": ("Probability(min_p: 0.95, confidence: 0.9)", 20, 12, 4, 4, 0.75, 0.4327, 0.9, F,
+                        ["SYS-14", "SYS-15"]),
+    }
+    assert list(got) == sorted(expected)
+    for req_id, (agg, n, n_pass, n_fail, n_inc, est, lower, conf, ver, trace) in expected.items():
+        r = got[req_id]
+        assert (r["campaign_id"], r["aggregation"], r["n_runs"], r["n_pass"], r["n_fail"], r["n_inconclusive"],
+                r["confidence"], r["verdict"], r["trace_ids"]) == \
+            ("proj-verify", agg, n, n_pass, n_fail, n_inc, conf, ver, trace), req_id
+        assert r["estimate"] == pytest.approx(est, abs=0.01), req_id
+        if lower is None:
+            assert r["lower_bound"] is None, req_id
+        else:
+            assert r["lower_bound"] == pytest.approx(lower, abs=1e-4), req_id
+    # Each lower bound solves its binomial tail: P(X >= k | p = lower) = 1 - confidence.
+    assert _binom_tail_ge(16, 20, got["R-lands"]["lower_bound"]) == pytest.approx(0.1, rel=1e-6)
+    assert _binom_tail_ge(12, 20, got["R-quick-p95"]["lower_bound"]) == pytest.approx(0.1, rel=1e-6)
+    assert _binom_tail_ge(17, 20, 0.95) > 0.9  # so P(X <= 16 | 0.95) < 0.1: R-quick-p95 fails
+
+    html = report.write_report(c, v)
+    page = html.read_text(encoding="utf-8")
+    assert 'class="badge complete"' in page and all(k in page for k in expected) and "<script" not in page
+
+    # The command line, inside the envelope vz <= 100: the timeouts drop out, R-apogee passes and
+    # 16 of 16 shows P(land) >= 0.8 (lower 0.1^(1/16) = 0.866).
+    out = tmp_path / "envelope.parquet"
+    assert verify.main([str(toml), "--envelope", "muzzle_vz=0:100", "--out", str(out), "--no-report", "--check"]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert [ln.split()[:2] for ln in lines[:5]] == [["R-apogee", "Pass"], ["R-apogee-median", "Pass"],
+                                                  ["R-lands", "Pass"], ["R-quick", "Fail"], ["R-quick-p95", "Fail"]]
+    e = {r["req_id"]: r for r in schema.read_table(out, "verdicts").table.to_pylist()}
+    assert e["R-lands"]["n_runs"] == 16 and e["R-lands"]["lower_bound"] == pytest.approx(0.1 ** (1 / 16))
+
+    # A campaign that lost a part is judged on what committed and stamped partial.
+    c.files("summaries")[0].unlink()
+    p = verify.verify(toml)
+    assert p.partial and p.runs_judged < 20 and p.missing
+    assert 'class="badge partial"' in report.write_report(toml, p).read_text(encoding="utf-8")

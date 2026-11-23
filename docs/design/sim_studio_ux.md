@@ -1,6 +1,6 @@
 # SABER `sim_studio`: UX and UI Design
 
-**Status:** Draft v0.5 (2026-11-02: entities can show 3D models from a built-in library, the workspace or a team library; glTF/GLB import, linking to entities, alignment, collision derived on request, OBJ conversion as a stretch goal (§7.11, subsystems D17, IB-20). v0.4, 2026-11-01: campaign monitoring, results and queries move to a separate egui window, `sim_explorer`, linked to the studio by explicit handoffs (§6.2, subsystems D12, IB-18). v0.3, 2026-10-31: UI toolkit is Bevy Feathers instead of `bevy_egui` (§6.1, subsystems D11); new viewport tools: camera focus dropdown, state HUD, graph-paper ground grid (§7.10). v0.2: Results Explorer queries through `sim_query` / DataFusion, subsystems D10) · **Builds on:** `Architecture.md` (§2, §4, §6.4) · **Companion docs:** [subsystems-and-interfaces.md](subsystems-and-interfaces.md) (crate and file names follow it), [sequence-diagrams.md](sequence-diagrams.md)
+**Status:** Draft v0.13 (2026-11-04: Crash Replay as built in step S4-1: the scrubber over a crash's recorded frames, jumps, energy and event tracks, growth inspector, NaN-origin ring, and the viewport shared with Preview (§7.9.1); a held camera focus resumes when its target is finite again (§7.10.1). v0.12, 2026-11-04: a bundled symbol font behind Fira as built in step S3-3, so the studio's symbols draw (§10.2, §7.10.4). v0.11, 2026-11-04: the Preview Run's 3D viewport as built in step S3-2: camera focus, State HUD, ground grid and labels (§7.10), and the Preview's controls named in words (§7.5). v0.10, 2026-11-04: the Preview Run as built in step S3-1, without its viewport (§7.5). v0.9, 2026-11-03: the Requirements tab as built in step S2-3 (§7.4). v0.8, 2026-11-03: the bind menu, the Parameters list and adding or removing components as built in step S2-2 (§7.2, §7.3). v0.7, 2026-11-03: the Scenario Builder's document, Outliner, Inspector and Lint as built in step S2-1 (§7.2). v0.6, 2026-11-03: as built through step S1, the studio's frame: states, kit, shell, Launcher, workspaces and starter packs (§6.3). v0.5, 2026-11-02: entities can show 3D models from a built-in library, the workspace or a team library; glTF/GLB import, linking to entities, alignment, collision derived on request, OBJ conversion as a stretch goal (§7.11, subsystems D17, IB-20). v0.4, 2026-11-01: campaign monitoring, results and queries move to a separate egui window, `sim_explorer`, linked to the studio by explicit handoffs (§6.2, subsystems D12, IB-18). v0.3, 2026-10-31: UI toolkit is Bevy Feathers instead of `bevy_egui` (§6.1, subsystems D11); new viewport tools: camera focus dropdown, state HUD, graph-paper ground grid (§7.10). v0.2: Results Explorer queries through `sim_query` / DataFusion, subsystems D10) · **Builds on:** `Architecture.md` (§2, §4, §6.4) · **Companion docs:** [subsystems-and-interfaces.md](subsystems-and-interfaces.md) (crate and file names follow it), [sequence-diagrams.md](sequence-diagrams.md)
 
 > Scope: everything a person sees and touches in `sim_studio`, the Bevy desktop binary, with its UI built on Bevy UI and Bevy Feathers through the `sim_studio_ui` widget kit (§6.1). Campaign monitoring, results and queries live in a separate window, `sim_explorer`, built with egui (§6.2). `Architecture.md` still says `bevy_egui` for the studio; this document supersedes that. `sim_hpc` and the Python scripts have no UI of their own; the studio drives them and reads their output. Names that already exist in `Architecture.md` are used verbatim. Names this document introduces are marked **(new)** and collected in §12 so the sibling design docs can adopt or rename them in one place.
 
@@ -16,6 +16,7 @@
 6. Shell layout and global UI
    - 6.1 UI toolkit: Bevy Feathers (maturity, gaps, widget kit, risks)
    - 6.2 Two applications: `sim_studio` and `sim_explorer` (handoff, IB-18)
+   - 6.3 As built (step S1)
 7. Workspaces (screen by screen)
    - 7.1 Launcher
    - 7.2 Scenario Builder (system / digital-twin model)
@@ -174,7 +175,7 @@ flowchart TD
 `Architecture.md` defines `AppState::ScenarioBuilder` and `AppState::CrashReplay`. The studio needs more modes; they are proposed as variants of the same enum so Bevy run conditions (`in_state(...)`) gate systems exactly as in the draft.
 
 ```rust
-// crates/sim_studio/src/main.rs  (proposed)
+// crates/sim_studio/src/state.rs  (as built, step S1; see §6.3)
 #[derive(States, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum AppState {
     #[default]
@@ -484,6 +485,50 @@ The studio no longer needs the 500 k-row runs table, the SQL editor or the analy
 
 The explorer keeps the layouts in §7.7 and §7.8 and the theme tokens in §10.1, so the two windows read as one product. Tokens are defined once in `theme.toml` and compiled into both apps (Feathers semantic tokens in the studio, `egui::Visuals` in the explorer). Units, number formatting (§9.3), keyboard conventions and the cluster profiles in `saber.workspace.ron` are shared. Accessibility in the explorer comes from egui's AccessKit support.
 
+### 6.3 As built (step S1)
+
+Step S1 builds the frame the screens live in. The screens themselves (Builder, Preview, Campaign Setup, Replay) arrive in S2 to S6; until then each shell state shows its title and the build step that fills it. Where this table and the sections above differ, the table is what the code does.
+
+| Design | As built (S1) | Where |
+|---|---|---|
+| §5.2 `AppState` | The six variants as designed, `Launcher` first. Every screen entity carries `DespawnOnExit(state)`, so leaving a state removes its UI. | `crates/sim_studio/src/state.rs` |
+| §5.4 Activity rail | Four items, B C R P, also on keys 1 to 4 (not while a text field has focus). B opens the Builder, C Campaign Setup, P Crash Replay when a dump is open (Run Replay once runs open in S6). R is the explorer handoff: until step 6b it says so in a toast. A disabled item is muted, and its reason ("No workspace open", "No run or crash dump open") is in its accessible label and in a warning toast on click. A hover tooltip comes with the kit's `Tooltip`. | `state.rs` `Rail`, `ui/shell.rs` |
+| §5.4 Breadcrumb | Workspace name ▸ open scenario ▸ state (▸ dump path in Crash Replay). Segments are not yet clickable. | `ui/shell.rs` |
+| §6 Shell | Title bar (wordmark, breadcrumb, Dark and Light buttons, Close workspace), rail, `StudioDock`, status bar. The status bar shows `f64 sim ✓`, integrator and dt from the open scenario (for example `Rk4 fixed, 8 substeps │ dt = 1e-3 s`), `tick 0`, entity count, frame, units, `cluster: none`, `jobs 0`. A scenario that does not load says so in the status bar and the Console. | `ui/shell.rs`, `actions.rs` `ScenarioInfo` |
+| §6 Notifications | `Toast` messages: info, success, warning, error, each with a mark (ℹ ✓ ⚠ ✖) as well as a color, 4 to 10 s on screen, at most 4 at once, lower right. Every toast goes to `ToastLog` (last 500) and the log, and the Console tab lists the last 50 and appends new ones. No modal dialogs yet (nothing irreversible exists yet). | `sim_studio_ui::toast` |
+| §6.1.3 Kit | `sim_studio_ui` is the only crate that names Feathers types. Facade: `heading`, `title`, `label`, `muted`, `mono`, `status_text`, `button`, `primary_button`, `plain_button`, `plain_row`, `text_field` (with `Fields` to read and set by id), `panel`, `row`, `column`, `spacer`; events `KitActivated`, `KitChanged`. `KitCorePlugin` holds the logic that runs without a window; `KitPlugin` adds Feathers and the systems that draw. `widget_gallery` and screenshot diffs are not built yet (S2). | `crates/sim_studio_ui` |
+| §6.1.5 `StudioDock` | Fixed regions left, center, right, bottom with 4 px `Splitter`s: drag to resize, double-click to collapse or restore, dragging a collapsed splitter restores it. Sizes are clamped (regions at least 120 px, center at least 200 px) and refit when the window shrinks. Defaults 280, 320 and 200 px. Sizes and collapsed flags save to `saber.workspace.ron` at the end of a drag. Tab groups per region are not built yet; each region holds one panel. | `sim_studio_ui::dock` |
+| §7.1 Launcher | Recent workspaces (up to 12, "2h ago" style), Start new (name, parent folder, one button per pack with its one-line description), Recent campaigns (id, crash count, heartbeat state: running N %, done, aborted with its reason, stale when the heartbeat is more than 3 intervals old), and Open by path. Paths are typed or pasted: there is no native file dialog yet. A campaign row shows progress from `campaign_status.json`, not verdicts (`R: 3/4 passing` needs `sim_query`, step 6a). Opening a campaign adds it to the list and says that the explorer opens it from step 6b. | `ui/launcher.rs`, `campaign.rs` |
+| §7.9 Crash Replay | Opening a `.zst` crash stream (by path, `sim_studio PATH.zst`, or the Launcher) reads its index and lists the dumps (run, set, seed, status, kind, tick; first 200). A stream from another build gets a warning toast (D15). A summary Parquet path is refused with a clear message. The scrubber is step S6. | `crash.rs`, `ui/shell.rs` |
+| §8 Domain packs | Three starter packs: Aero-ballistics (the McCoy shell, RK4 with 8 substeps at 1 ms, requirements: apogee ≤ 1500 m, range ≥ 8000 m with P ≥ 0.9 at 90 % confidence, ground impact within 40 s), Drone (the quad X climbing to a 10 m hold, requirements: final altitude within 0.5 m, never below ground) and Blank (environment only, ENU, 1000 ticks). Robotics is deferred (D13). There is no fixed-wing pack yet (the F-16 test scenario has no environment entity). A pack writes `scenarios/`, `requirements/`, `campaigns/`, `scripts/` and its starter files, and never overwrites a file that exists. | `workspace.rs`, `crates/sim_studio/templates/` |
+| §9.4 Workspace file | See the schema below. Written atomically (temporary file, then rename). | `workspace.rs` |
+| §10.1 Theme | Dark (default) and Light, switched from the title bar and saved per workspace. Every §10.1 token is a Feathers token named `saber.<token>` with the documented color. The kit also defines what §10.1 leaves open: `bg.chrome` (title, rail and status bars) `#111317` / `#ECEEF2`, `border` `#30363D` / `#D0D7DE`, control fills `#2D333B` / `#E3E7EC`, field fill `#22272E` / `#F0F2F5`, raised surfaces `#252A33` / `#EEF0F3`. Text on the accent (primary buttons) is `#15171C` in Dark, `#FFFFFF` in Light, so it reaches 4.5:1. Control text uses `fg.text`, not Feathers' text-on-accent. | `sim_studio_ui::theme` |
+| §11 Accessibility | Every button and row sets an `AccessibleLabel`; status always carries a mark; a test checks 16 text and background pairs reach WCAG AA (4.5:1) in both themes. Keyboard focus rings and Tab order are Feathers' own; a screen-reader audit is still to do (U5). | `crates/sim_studio_ui/tests/kit.rs` |
+| Rust toolchain | Bevy 0.20.1 needs rustc 1.97.1, now pinned (step S1-0). The studio uses Bevy with only the features it draws with: UI, picking, Feathers, scenes, state, a window on X11 (loaded at run time, so CI needs no system packages). No audio, gamepads or Wayland yet. | `Cargo.toml`, `rust-toolchain.toml` |
+
+**`saber.workspace.ron`** (format `workspace`, schema 1.0.0). Readers refuse another format or a newer major, and ignore fields they do not know from a newer minor. A missing field takes its default; a non-finite or too-small dock size falls back to the default layout.
+
+```ron
+(
+    header: (magic: "SABER", format: "workspace", schema_version: "1.0.0",
+             saber_version: "0.1.0", build_id: "…"),
+    name: "quad_gust_rejection",
+    pack: Multirotor,                 // Blank | AeroBallistics | Multirotor
+    units: Drone,                     // Si | Ballistics | Drone (display profile, §9.3)
+    theme: Dark,                      // Dark | Light
+    layout: (left: 280.0, right: 320.0, bottom: 200.0,
+             left_collapsed: false, right_collapsed: false, bottom_collapsed: false),
+    model_roots: [],                  // team model libraries, read in place (D17, O6)
+    open_scenario: Some("scenarios/quad.scn.ron"),
+)
+```
+
+**Recent list** `~/.saber/studio/recent.ron` (or `$SABER_HOME/studio/recent.ron`), format `studio-recent`: workspaces and campaigns, most recent first, one entry per folder, 12 each. A missing or unreadable file reads as empty. It is per user and never part of a workspace.
+
+**Command line:** `sim_studio [PATH]` opens a workspace folder, its `saber.workspace.ron`, or a crash stream (`.zst`); `--version` prints the `build_id`.
+
+**Tests (verification §8.3):** headless, on synthetic data. The kit's theme, contrast, dock arithmetic and toast log; every pack's workspace and its starter scenario running to its end with every requirement passing; the workspace file and recent list round trips and refusals; state changes driven by commands (open, new, close, rail, crash dump, campaign folder, errors as toasts); and the full UI stack without a window or GPU, driven by activating buttons as a click does.
+
 ---
 
 ## 7. Workspaces
@@ -509,6 +554,8 @@ The explorer keeps the layouts in §7.7 and §7.8 and the theme tokens in §10.1
 ```
 
 Templates come from Domain Packs (§8). A template pre-populates the scenario, a starter parameter set, a starter requirement set and a default camera/units profile.
+
+> **As built (S1):** the Launcher as listed in §6.3: typed paths instead of file dialogs, heartbeat progress instead of verdicts on campaign rows until step 6a, and no Robotics button (D13).
 
 ### 7.2 Scenario Builder (system and digital-twin model)
 
@@ -564,6 +611,21 @@ This is `AppState::ScenarioBuilder` from the draft, expanded.
 ```
 
 > Interface note: the draft has one bind component per property (`BindStiffnessParam`). The subsystems doc replaces this with generic `ParamBindings(Vec<ParamBinding { param_key, target, default, bounds }>)` and `Uncertainties(Vec<(path, Distribution, rng_stream)>)`, so one entity can carry several. In the UI each item is a "binding" (⚙) or "stochastic" (●) field.
+
+**As built (steps S2-1, S2-2).** The document, the Outliner, the Inspector, Lint, the bind menu and the Parameters list; the viewport is S3, the Library with domain assets later. The Requirements tab (S2-3) is in §7.4.
+
+| Part | As built |
+|---|---|
+| Document | `sim_studio::builder::ScenarioDoc`: a reflected copy of the open scenario's entities. Export rebuilds the scenario with `Scenario::from_parts` (subsystems §5.5), keeping file keys, component order and the `visual:` section, so an untouched scene exports with its `scene_hash`. File comments are not kept: Export writes the canonical file. |
+| Outliner (left) | Entities in `SimId` order: `#id`, the components' short names (`SimId` and the binding components left out), badges ⚙ (swept parameters), ● (uncertain values) and the worst lint mark on that entity. A click selects; the selected row reads ▸. No tree, drag, filter or multi-select yet (no hierarchy in scenarios yet). |
+| Inspector (right) | Every component of the selection, a row per field, flattened by reflection path (`rotors[0].time_constant`, `loops[1].kp`, `position.x`). Numbers are SI and shown in their shortest round-trip form, so the shown text is exact. Floats (finite only), integers (range checked), booleans, text, and enums whose variants carry no data (choices listed) are edited as text; Enter or leaving a field applies it. Enums with data show their variant and their fields (switching such a variant, and adding or removing list items or components, is S2-2). Values update in place after an edit or undo; the Inspector is rebuilt only when the selection moves, so clicking into the next field is not lost. No units on fields yet (§9.3). |
+| Center | Until the viewport: file, frame, tick and its end, integrator, library version, `scene_hash`, and whether the document matches the file. |
+| Undo (§9.2) | Every applied edit, Undo and Redo in the title bar, Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y (not while typing in a field). A new edit drops the redo history. |
+| Saving (§9.4) | Every edit writes `<file>~autosave` (when the scene validates). Opening restores a sidecar newer than the file, with a notice, and the document starts unsaved. Export (button, Ctrl+E or Ctrl+S) writes the `.scn.ron` atomically and drops the sidecar. Closing a workspace with unsaved edits says they stay in the autosave. The breadcrumb shows ● while unsaved. |
+| Bind menu (S2-2) | A ⚙ button on every number of the Inspector opens it at the top of the Inspector: what varies the field now (constant, ⚙ swept as `key` with default and bounds, ● drawn per replicate) with Unbind and Remove draw; **Sweep** with a name (default: the field's last name), lower and upper bound (both or neither), the field's value as the default; **per-replicate draw** as Normal, Uniform, Triangular or LogNormal from comma-separated numbers, replacing the value, or added to it when the field is swept ("Both"). Field labels carry ⚙ and ●. Truncation and stream names other than `<SimId>.<target>` are file-only for now. |
+| Parameters list (S2-2, §7.3) | Under the Outliner: every swept parameter (⚙ `#id target key = default in [lo, hi]`) then every draw (● `#id target distribution`), with the manifest columns the scene needs. A row opens the bind menu on its field. Not yet a table with units, correlations or previews (§7.3). |
+| Components (S2-2) | Each component heading has **Remove** (not `SimId`; refused while a binding or draw targets it). **Add component** lists the registered SABER components the entity lacks that have a starting value (their `Default`, or every field defaulted) and adds one. |
+| Lint (§9.5, bottom, above the Console) | After every edit: ✖ the scene's validation (`SimId`s, bindings, uncertainties); ✖ Tick 0's setup in a World with the standard library (a PID loop reading a missing field, for example); ⚠ every `ResolveReport` warning (contact stiffness); ⚠ a fixed integration step longer than 0.2 × a field named `time_constant` or `tau`, with the `dt` or substeps to use; ℹ counts. A click on an item with an entity selects it. Errors refuse Export, not editing. The other §9.5 rules arrive with their features. |
 
 ### 7.3 Parameters and Uncertainty panel
 
@@ -625,6 +687,18 @@ Requirements are authored against **metrics**. A metric is something the kernel 
 
 > Interface note: requirements decide which Tier 1 reductions and Tier 2 triggers run. `sim_verify` compiles a `VerifyPlan` from the `.req.ron` at load time (Rank 0 broadcasts the requirements blob alongside the scene), so one scenario can be checked against several requirement sets without re-export. Campaign Setup shows the derived plan read-only (section 3, Telemetry).
 
+**As built (step S2-3).** A Requirements tab in the Builder. Where this table and the sections above differ, the table is what the code does.
+
+| Part | As built |
+|---|---|
+| Where | **Scene** and **Requirements** tabs at the top of the Builder's left dock (the design's [Requirements] button). In the Requirements tab the left dock lists the set, its metrics and its requirements; the right dock edits the selection (the metric builder); the center shows the set's summary (`req_set_hash`, its `metric_*` and `req_*` summary columns); its lint joins the scene's at the bottom. Undo, Redo and Ctrl+S act on the set while this tab shows. |
+| Which set | The workspace's `requirements/<name>.req.ron` for the open `scenarios/<name>.scn.ron`, else the first set in `requirements/` whose `scenario_hint` names the scenario. Other sets open from the list. **New requirement set** writes an empty set under that name, written for the open scenario; a file that exists is never overwritten. |
+| Document | `sim_studio::builder::RequirementDoc` edits the IB-03 `RequirementSet` field by field. An edit is refused, with the reason, when the set would not validate on its own (ids, metric references, reducers that fit their source, the shape of a signal, numbers, campaign rules). Undo and redo; every edit saved to `<file>~autosave` and restored on open when newer. **Save .req.ron** writes the canonical file with this build's header (comments are not kept) and is refused while the set has lint errors. |
+| List (left) | The set (`id vversion · for scenario`), then the metrics (`key  Final of entity(1).RigidBody6.position.z`) with **+ Signal metric** and **+ Event metric**, then the requirements (`id  statement`, then what each run checks and the campaign rule, for example `range_m ≥ 8000.0 · P ≥ 0.9 at 90 % confidence`) with **+ Requirement**. Each row carries its worst lint mark; a click selects it. |
+| Editor (right) | The selected item's fields. Typed fields apply on Enter or when left; choices are buttons, ● marking the current one. Metric: key (renaming it updates the requirements that read it), source Signal or Event, the signal path or the event name (the declared events are listed), a reducer that fits the source, TimeAbove's threshold. Requirement: id, statement, kind (Threshold, Envelope, Never, Eventually, Custom) and its fields, the campaign rule (AllPass; Probability with p and confidence; Quantile with q, comparison, value and the per-run switch), stop a failing run, traces. Switching kind keeps what the requirement watches: `apogee_m ≤ 1500` becomes the envelope `[-inf, 1500]` on the metric's signal, `never z > 1500` or `eventually z ≤ 1500`, and back. New metrics and requirements start on the first entity's `position.z`. Custom is offered only when a plugin registers a check (the standard library registers none yet). |
+| Lint (§9.5) | Each metric and requirement is compiled against the open scenario's Tick 0 the way a run compiles it (`sim_verify::VerifyState::compile`, one item at a time so every error shows): ✖ no entity with that `SimId`, a field that is not there or not a number, an event no plugin declares, an unregistered check. ⚠ the set was written for another scenario; ⚠ the scenario does not set up, so nothing is compiled. ℹ counts and summary columns. Every scene edit lints the set again, so renumbering an entity shows the requirements it breaks. |
+| Not yet | The Preview column (Preview Run shows each requirement live in its own right dock since S3-1), Import CSV and Baseline, "Crashed runs count as" (the §8.2 verdict rules decide; IB-03 has no such field), Derived and Status metric sources (Derived needs `sim_query`, step 6a), pickers for signals and events (typed for now). |
+
 ### 7.5 Preview Run
 
 `AppState::LocalRun` runs the exact `build_sim_schedule()` in-process for one `(param_set_id, replicate_seed)`. It is the edit-run-inspect loop.
@@ -654,6 +728,22 @@ Requirements are authored against **metrics**. A metric is something the kernel 
 - **Speed**: x1 (real time), x10, max (no render throttling). Rendering is decoupled: the sim advances N ticks per frame; the viewport samples state. Changing speed never changes results.
 - **Perf readout** (µs per tick, s per run) feeds the cost estimator in Campaign Setup.
 - If `physics_watchdog_system` sets `SimStatus::Crashed`, the studio transitions to `CrashReplay` with the in-memory `FlightRecorder`, no file round-trip. A toast says "Crashed at tick 128 401: NaN in Quad_A.lin_vel. Opened in Crash Replay."
+
+**As built (step S3-1, controls renamed in S3-2).** The Preview Run; its 3D viewport is in §7.10's as-built table (step S3-2). Where this table and the sections above differ, the table is what the code does. Since S3-2 the controls are words, not icons: the bundled Fira fonts have no ▶ ⏸ ⏭ ⟲ ■ glyphs (§7.10, as built).
+
+| Part | As built |
+|---|---|
+| Start | **Preview (F5)** in the Builder's title bar, or F5. It runs the open scenario as it is now, unsaved edits included, with the open requirement set when that set lints clean (otherwise a toast says the preview checks no requirements). A scenario that does not validate or set up stays in the Builder with the reason. |
+| The run | `sim_studio::preview::PreviewRun` builds the World the way `sim_hpc` builds a run: the standard model library, the set's `VerifyPlugin`, the scenario, then Tick 0 with the parameters and `RunSeed { param_set_id: 0, replicate_seed }`. So a preview's `final_state_hash`, status, ticks, metrics and verdicts equal `sim_hpc --local`'s for the same row (R7). Stepping is in whole ticks; grouping ticks into frames never changes results. |
+| Toolbar (center) | **Params: Nominal / Min corner / Max corner** (every swept parameter at its default, or each bounded one at its lower or upper bound; the current one is the primary button); **Seed** with **Use seed** and **Next seed**; **Play**, **Pause**, **Step** (one tick, pauses); **Speed x1 / x10 / max** (x1 follows wall time, x10 ten times faster, max as many ticks as fit in 12 ms per frame; a speed that falls behind drops the backlog instead of catching up); **Reset** (Tick 0 again, same parameters and seed); **Stop** (back to the Builder). Changing parameters or seed rebuilds the run from Tick 0. **Play** on an ended run starts it again. |
+| Viewport (center) | Below the toolbar: the 3D viewport (§7.10, as built), its focus line, and a help line. |
+| Live state (center) | `t`, tick of `max_ticks`, running x1/x10/max, paused, or ended with its status, the parameter choice and seed; then every body's position, velocity and speed from the flight recorder's latest frame. Rewritten every frame, read from the World without changing it. |
+| Outliner (left) | The scenario's entities, read-only. |
+| Live requirements (right) | Every requirement of the set: PASS or FAIL once no later tick can change it, … while open (? when the run ended without a verdict), and its value so far (a Threshold's metric, the signal an Envelope, Never or Eventually watches). From `sim_verify::VerifyState::progress`; after the run, the run's own verdicts. |
+| Perf (right) | Wall time per tick so far, and the run time it implies at `max_ticks` (the number Campaign Setup's estimate will take). |
+| Plots (bottom) | Total energy, then every signal the requirement set watches, then channels added by signal path (`entity(SimId).Component.field`, **+ Channel**, at most 8) and removed with **Remove ⟨signal⟩**. One line per channel with its latest value; drawn on the CPU into an image, redrawn when it changes. Each channel keeps at most 2048 samples, halving its rate when full. The Console stays below. |
+| End | A run that ends normally pauses with a toast: its status, tick and how many requirements pass. A crash goes to Crash Replay with the flight recorder's last 600 frames kept in memory (no file), a toast "Crashed at tick N (status): reason. Opened in Crash Replay.", the breadcrumb "preview, seed N", the status and reason, and the bodies of the last three frames. The rail's Replay item opens it again; opening a crash file replaces it. |
+| Not yet | A specific manifest row or a run pinned from Results as the parameters (needs a campaign, S6 and 6b); a dice for a random seed; the Crash Replay scrubber over the kept frames (S4). |
 
 ### 7.6 Campaign Setup
 
@@ -828,6 +918,26 @@ Both share one layout; Crash Replay is Run Replay plus forensic tools. Crash Rep
 
 **Run Replay** (completed runs) shows Tier 3 snapshots at their recorded cadence, or a full-rate re-simulation, and adds **requirement overlays**: the threshold drawn in the plot track and in 3D where meaningful (cross-track corridor tube, tilt cone, impact circle).
 
+#### 7.9.1 As built (step S4-1)
+
+Crash Replay over recorded frames. Run Replay, re-simulation, the ghost run and Open in Builder are step S4-2. Where this table and the section above differ, the table is what the code does.
+
+| Part | As built |
+|---|---|
+| Where | The Crash Replay state's dock: entities on the left, the viewport, transport, jumps and tracks in the center, the snapshot and growth inspector on the right, the Console at the bottom. `sim_studio::replay` holds the logic (no UI, unit tested); `sim_studio::ui::replay` draws it. One `ReplayState` resource holds the open replay, the playhead, the selected body and the energy scale. |
+| What opens | A crash stream (`*_crashes.zst`) lists its dumps, each with **Open run N**; a stream of one dump opens it at once; **Back to the dump list** returns. A preview that crashes opens its in-memory frames straight away. Every state shown is a recorded `TickFrame`, exactly as written (D15): nothing is re-simulated, and a dump from another build is still exact (the screen says a re-run would be approximate). |
+| Scenario | A dump is matched to a scenario by `scene_hash` among the open workspace's `scenarios/` and the `.scn.ron` files next to the stream and one folder up. A match gives the world frame and the watchdog's energy bound; without one the positions are shown as recorded, as if in ENU, with a warning. Not loaded: the Tick-0 resolver and `Transform` driving of `Architecture.md` §6.4; the viewport draws the snapshots directly, as Preview does. |
+| Opening state | The last frame (the crashed state), paused, with the crash's origin selected and followed by the camera. The origin is the reason's `SimId`, else the body flagged `FLAG_NAN_ORIGIN`. A body that is no longer finite leaves the camera where it was last finite. |
+| Timeline | Words, not icons: **First**, **Back**, **Play**, **Pause**, **Step**, **Last**, then **1 / 2 / 5 / 25 fps** (5 by default, the current one primary). Playback runs on wall time, stops at the last frame and starts over when played from there. A loop is set with **Loop from here** and **Loop to here** (both frames included) and cleared with **No loop**, instead of dragging in and out points. Keys while no text field is being edited: **←** / **→** step, **Home** / **End**, **Space** play or pause. A position line reads "tick 88 102 · frame 600 of 600 · t = … s · energy … J", with the loop and the speed while playing. |
+| Jumps | **First contact** (any `FLAG_COLLIDING`), **First ×10 growth** (the growth inspector's first flagged row), **First non-finite** (energy or any body value), **Energy over bound** (total energy above `watchdog.energy_max_j`). A jump with no matching frame says "(none)" on its button and explains in a toast. |
+| Tracks | Two CPU-drawn images under the timeline, 720 px wide, one column per frame: total energy (linear J, or signed log10(1 + \|E\|) with **Log scale** / **Linear scale**; the log scale is on when any energy is not finite or above 1e6 J), with the bound dashed in red; and events, three rows marking contact (blue), clamped (amber) and non-finite (red). A white line is the playhead and short ticks the loop. Clicking or dragging on either track moves the playhead. User-added channels and Tier 2 event markers are not tracks yet. |
+| Entities | The bodies of the frame shown, the origin first, then non-finite, then in contact or clamped, then by `SimId`, each with its flags in words (NaN origin, non-finite, contact, clamped) and "!" when flagged. **Show #id** buttons (at most 16) pick the body for the snapshot and the camera. Bodies are named by `SimId` only. No filter. |
+| Snapshot | The selected body at the frame shown, as recorded: position, quaternion, velocity, \|v\|, ω, force magnitude, flags and Δpos since the frame before; values to six decimals without trailing zeros, very large or small ones in scientific notation. No Copy row or Plot channel yet. |
+| Growth inspector | For every body: speed \|v\|, body rate \|ω\|, force and step (distance moved) against the frame before (the step against the step before), as a ratio. Flagged "!" above ×10 or when not finite; growth from exactly zero (a body starting to move, a first contact) is not flagged, and channels that stay at zero are left out. Flagged rows first, then by ratio; at most 12 rows. |
+| NaN origin | A red gizmo sphere, three marker radii across, rings each body flagged `FLAG_NAN_ORIGIN` or not finite, at its last finite position up to the frame shown. |
+| Viewport | The Preview's viewport (§7.10.4) with its toolbar, focus modes, HUD (which reads "frame 53 of 60"), grid and keys. Both screens feed it through one `ViewSource` resource. When the focus target is not finite the camera is Held; scrubbing back to a finite frame glides to it again. |
+| Not yet (S4-2 and later) | Run Replay of completed runs from Tier 3 snapshots; full-rate re-simulation; the ghost run; Open in Builder at these params (Fix in Builder); gizmo scale with dashed capped arrows (the recorder keeps only force magnitude); entity names; an entity filter; hover frame numbers on the timeline; channel tracks. |
+
 ### 7.10 3D viewport tools: camera focus, state HUD, ground grid
 
 These three tools live in the shared viewport (Builder, Preview, Run Replay, Crash Replay, and the 3D views of Results). They all read **f64 sim state** and only convert to f32 at the last step, through the `RenderBridge` floating origin (subsystems §5.5, G7).
@@ -884,6 +994,7 @@ stateDiagram-v2
     Locked --> Free: Esc, or user pans (orbit and zoom keep the lock)
     Locked --> Held: target despawned (fragment expired, crash)
     Held --> Free: Esc / pick another target
+    Held --> Transition: target finite again (replay scrubbed back)
     note right of Transition
         critically damped spring in f64, about 0.4 s,
         instant when reduce-motion is on
@@ -1002,6 +1113,27 @@ Labels are pooled UI text nodes positioned by projecting f64 world points throug
 **Settings (Grid ▾):** show grid, style (graph paper, blueprint, minimal), labels (coordinates, range rings, off), ring reference, datum altitude, opacity, follow terrain. **Snap: grid** snaps placements to the minor spacing visible under the cursor, so snapping matches what you see.
 
 **Budget:** the grid pass is under 0.3 ms GPU at 2560×1440; labels add at most 64 UI nodes.
+
+#### 7.10.4 As built (step S3-2)
+
+The Preview Run's viewport. Crash Replay shares it from step S4-1 (§7.9.1); the Builder and Run Replay get it in later steps (S4-2 and a Builder follow-up). Where this table and the sections above differ, the table is what the code does.
+
+| Part | As built |
+|---|---|
+| Where | The center region of Preview Run, under the run's toolbar: a viewport toolbar, a 420 px high 3D view, a focus line ("Focus #12 · Follow · locked · frame ENU") and a help line. `sim_studio::viewport` holds the f64 logic (no rendering, unit tested); `sim_studio::ui::viewport` draws it. One `ViewportState` resource per window holds the frame, camera, focus and toggles. |
+| Rendering | A `Camera3d` renders into the image of a Bevy `ViewportNode`, which also turns pointer input in the view into camera moves. Everything in the view (bodies, ground, gizmo lines) is on render layer 1 so the UI camera does not draw it again. Unlit materials, no lights, no tonemapping. The camera is spawned on entering Preview and despawned on leaving it. |
+| Display frame | Always east, north, up (ENU). A scenario in NED is turned to ENU; a scenario in ECEF is shown in the local ENU of the WGS 84 tangent plane through the first body's Tick-0 position. The focus line and HUD name it: "ENU", "ENU (scenario in NED)" or "local ENU (scenario in ECEF)". Render space is east = x, up = y, north = −z. |
+| Precision | The floating origin is the camera pivot, re-anchored every frame. Positions are subtracted in f64 and only the difference becomes f32, so a body 100 km down range is drawn to well under a millimetre while the camera looks at it (tested). The rig's pivot, yaw, pitch and distance are f64. |
+| Camera | Orbit camera around a pivot: left drag orbits (pitch held within ±89°), right or middle drag pans and drops the focus lock, the wheel zooms by 0.85 per notch. A new run follows its first body; a run rebuilt with other parameters or seed keeps the target if it still exists. |
+| Focus | Toolbar buttons **Focus #id** for each body (at most 12, then "… N more"; no dropdown, groups, points or bookmarks yet) and **Mode: Frame / Follow / Chase / Track from here** (the current one is the primary button). Moves use a critically damped spring in f64 (ω = 15/s, about 0.4 s); the spring closes the pivot's offset from the target, so a fast target is caught without lag. Frame also springs the distance to 5 m and then frees the camera; Follow locks the pivot; Chase also turns the camera behind the horizontal velocity; Track from here keeps the eye where it was and turns to the target. A target that is gone, NaN or infinite leaves the camera Held where it was; once it is finite again (a replay scrubbed back, step S4-1) the camera glides back to it. Keys while no text field is being edited: **F** frame, **Shift+F** follow, **Esc** free, **H** HUD. Ctrl+F and Alt+Enter are not bound. |
+| State HUD | A monospace panel over the view's top-left corner, toggled with **HUD** or H: the target's E, N, U position and vE, vN, vU velocity from the frame's origin, range and \|v\|, heading (clockwise from north) and flight-path angle γ, then `t`, tick and live, paused or ended. Thousands grouped by spaces, a real minus sign (−), `NaN!` or `inf!` for bad values. Refreshed ten times a second while running, every frame while paused. Range-rate against another body is computed and tested but has no control to pick that body yet. |
+| Ground grid | Drawn with gizmo lines on a paper-colored ground plane (theme tokens `grid.paper`, `grid.minor`, `grid.major`, `grid.axis_x`, `grid.axis_y`), not the analytic shader of §7.10.3. The finest spacing is the power of ten whose lines are at least 8 px apart at the pivot; it is drawn with the next two decades, 25 lines each side per decade, each line drawn once at its coarsest decade (minor, then major). The x axis (red) and y axis (green) are drawn through the frame origin. The ground hides when the camera goes under it. **Grid** toggles it. |
+| Distance labels | Coordinates mode only (§7.10.3, Q8): labels sit where the grid's lines cross the lines through the pivot, at multiples of 10 m, never finer, and at least 120 px apart on screen. When 10 m labels would crowd they thin to 100 m, 1 km and so on, the step growing as they get farther from the camera. Text like "20 m", "1.25 km", "−300 m". At most 64, nearest first. |
+| Bodies | Each body is an unlit sphere at its attitude, at least 0.2 m in radius and never under 8 px across. With **Gizmos** on, each gets its x, y, z axes (red, green, grey, three marker radii long) and a velocity arrow 30 px long per doubling of speed, capped at 160 px. |
+| Theme | Grid, ground, body and clear colors follow the theme's tokens and change with light or dark mode (`sim_studio_ui::ThemeColors` gives screens the colors without naming Feathers types). |
+| Words, not icons | The bundled Fira Sans and Fira Mono have no ▶ ⏸ ⏭ ⟲ ■ ◫ ⌖ ● glyphs, which drew as empty boxes in a real render, so this step's buttons and the Preview's controls are words. The kit's ✓ ✖ ⚠ ◐ status marks, the ☰ menu and the ▸ breadcrumb had the same problem since S1; step S3-3 fixed those with a symbol font behind Fira (§10.2). The buttons stay words: they read better, and ⏸ ⏭ ⌖ are in no bundled font. |
+| Checks | Unit tests in `crates/sim_studio/tests/viewport.rs` (frames, f32 precision 100 km out, spring, the four focus modes, rig, HUD, grid lines, labels, markers, rebuilds) and a headless UI test that starts a preview, follows a body, checks the labels and presses F, H and Esc. CI has no GPU; the view was also rendered locally on a software Vulkan driver to check that the grid, labels, bodies, arrows and HUD all show. |
+| Not yet | The analytic full-screen grid with horizon fade, terrain drape and the round-Earth ellipsoid; range rings; the focus dropdown with groups, points, bookmarks and deep links; HUD sizes, corners, pin and relative-to; copy and Plot actions on HUD values; Mach and other domain rows; force arrows (the flight recorder keeps only force magnitude); the Builder's viewport; models instead of spheres (S5). |
 
 ### 7.11 3D models: library, import and linking to entities (new, subsystems D17)
 
@@ -1358,11 +1490,14 @@ Defined once in `StudioTheme` (`sim_studio_ui`), which maps each token onto Feat
 | `grid.axis_x` / `grid.axis_y` | `#E5534B` / `#57AB5A` | `#CF222E` / `#1A7F37` | Scenario x and y axes on the ground |
 | `grid.label` | `#C9D7E8` | `#3D5A55` | Distance markings |
 
+> **As built (S1):** every token above, plus the chrome, border, fill and on-accent colors the kit needed, is listed in §6.3.
+
 Status is never conveyed by color alone: PASS ✓, FAIL ✖, INCONCLUSIVE ◐, warning ⚠ always accompany the color. Sequential maps (param maps) use a perceptually uniform, colorblind-safe map (viridis/cividis); diverging maps (margin) are centered on the threshold.
 
 ### 10.2 Typography and density
 
 - UI font: Inter (or the Feathers default) at 13 px; numbers in a tabular monospace (JetBrains Mono) so columns align.
+- **As built (step S3-3).** The Feathers defaults: Fira Sans (regular and bold) and Fira Mono Medium for numbers and paths. Fira has no glyphs for most symbols the studio writes (✓ ✖ ⚠ ◐ ☰ ▸ ⚙ ℹ ● ≤ …), so `sim_studio_ui::fonts` bundles a 160 KB cut of DejaVu Sans 2.37 (its letterlike, arrow, math, technical, box, block, geometric, symbol and dingbat blocks; `scripts/make_symbol_font.sh`, license beside the file) and puts it behind every text's font: a character Fira lacks comes from it, everything else from Fira. A test lays out every non-ASCII character in the studio's string literals and fails on any empty box, and every screen test checks the same. ⏸ ⏭ ⌖ are in neither font, so the studio does not use them.
 - Two density modes: **Compact** (default, 22 px rows) and **Comfortable** (28 px rows) for touch screens and presentations. UI scale 75–200 %.
 
 ### 10.3 Viewport conventions
@@ -1456,12 +1591,4 @@ Names introduced here, so the subsystems and sequence-diagram docs can adopt or 
 
 1. **Requirements format ownership.** Should `.req.ron` be the source of truth, or should SABER import from an external requirements tool (DOORS, Jama, ReqIF) and treat `.req.ron` as a cache?
 2. **Who generates the manifest?** The design uses `saber sweep` (Python). Calling Python from the studio needs a managed Python env; a Rust Sobol/LHS generator in `sim_core` would remove that dependency but duplicate logic.
-3. **Cluster access model.** *Decided for results (2026-10-31, subsystems D10):* job control and the Campaign Monitor stay on plain SSH; result queries go to an on-demand `sim_query serve` job through an SSH tunnel, so no persistent login-node service is needed. Still open: whether the Monitor should also move onto that service later.
-4. **Re-simulation fidelity across machines.** Bit-identity holds for the same build and target; is the desktop the same CPU architecture and float flags as the cluster? If not, "re-simulate" should be labeled "reproduce (approximate)" or run on the cluster.
-5. **Controllers and software-in-the-loop.** Drone and robotics users will want to plug in real flight-controller or ROS code. Does the GUI need a SIL configuration screen in v1?
-6. **Multi-user review.** Is the Evidence Report enough for reviewers, or is a read-only web viewer for campaigns wanted later?
-7. **Bevy upgrades and old campaigns.** *Decided 2026-11-02 (subsystems D15):* campaigns from an older build are replayed from their recorded frames and snapshots only; no archived binaries. To reproduce a study, re-run it on the current build, expecting the same physics and statistically similar results. When `build_id` differs, the studio greys out bit-identical **Re-simulate** and offers **Re-run on current build (approximate)**, compared by metrics instead of `final_state_hash`.
-8. **Ground grid defaults.** *Decided 2026-11-02:* label the ground every 10 m (thinning to 100 m, 1 km … only when labels would overlap on screen). Flat datum plane by default and ellipsoid only when the environment is round-Earth; coordinate labels by default and range rings (also at 10 m multiples) for ballistics templates.
-9. **Archive 3D models with campaigns.** *Decided 2026-11-02 (subsystems D17):* campaigns keep a copy of the workspace and library models they use, up to 2 GB; built-ins are referenced by id and version.
-10. **Team model libraries.** *Decided 2026-11-02 (subsystems D17):* extra library folders (`model_roots`) are allowed and read in place; Import copies into the workspace by default.
-11. **Moving parts in v1.** *Decided 2026-11-02 (subsystems D17):* not in v1. Models are rigid; spinning rotors and moving control surfaces come later.
+3. **Cluster access model.** *Decided for results (2026-10-31, subsystems D10):* job control and the Campaign Monitor stay on plain SSH; result queries go to an on-demand `sim_query serve` job through an SSH tunnel, so no persistent login-node service is needed. Still open: whether the

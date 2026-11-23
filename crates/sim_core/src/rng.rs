@@ -130,6 +130,15 @@ pub struct RngStreams {
     by_id: Vec<usize>,
 }
 
+/// An empty placeholder with an all-zero root (not a run's root: the kernel installs one at every
+/// Tick 0). It exists so a system can take the streams out of the World with
+/// `sim_core::with_resource`, which, unlike `World::resource_scope`, never allocates.
+impl Default for RngStreams {
+    fn default() -> Self {
+        Self::new(SimRng { seed: [0; 32] })
+    }
+}
+
 impl RngStreams {
     /// Streams for a run with this root.
     pub fn new(root: SimRng) -> Self {

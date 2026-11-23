@@ -48,6 +48,17 @@ fn the_ballistic_shell_scenario_validates() {
     assert!(out.contains("param cla"), "{out}");
 }
 
+/// The step 5b F-16: a table-built airframe with a turbofan, from the reference store.
+#[test]
+fn the_f16_scenario_validates() {
+    let f16 = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/reference/stevens_lewis/f16/f16.scn.ron"
+    );
+    let (code, _out, err) = cli(&["validate", f16]);
+    assert_eq!(code, 0, "{err}");
+}
+
 #[test]
 fn broken_scenarios_exit_2_with_the_error_kind() {
     let dir = std::env::temp_dir().join(format!("saber-cli-test-{}", std::process::id()));

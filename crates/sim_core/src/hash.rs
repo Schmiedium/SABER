@@ -77,6 +77,10 @@ pub fn state_hash(world: &World) -> u64 {
             }
         }
     }
+    // Fragments (step 5e), only once a breakup has claimed slots, so runs without one hash as before.
+    if let Some(pool) = world.get_resource::<crate::fragments::FragmentPool>() {
+        pool.hash_into(&mut h);
+    }
     h.update(&world.resource::<SimClock>().tick.to_le_bytes());
     for s in world.resource::<RngStreams>().drawn() {
         h.update(&s.id().to_le_bytes());

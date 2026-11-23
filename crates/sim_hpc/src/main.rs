@@ -1,10 +1,17 @@
-//! `sim_hpc --campaign campaign.toml [--local | --validate-only] [--threads N] [--json]` (IB-04).
+//! `sim_hpc --campaign campaign.toml [--local | --validate-only] [--resume
+//! [--override-crash-policy]] [--deadline UNIX_S] [--threads N] [--json]` (IB-04).
 //!
 //! Without `--local` or `--validate-only` it is one rank of an MPI job (`mpiexec -n N sim_hpc
-//! --campaign ...`; needs the `mpi` feature). Exit codes: `0` ok, `2` configuration or validation
-//! error, `3` build mismatch, `4` I/O or stage-out failure, `5` partial, `6` aborted by the crash
-//! policy, `64` usage, `70` internal. Every rank of a job exits with the same code; only rank 0
-//! prints.
+//! --campaign ...`; needs the `mpi` feature). Exit codes: `0` ok (or nothing left to resume), `2`
+//! configuration or validation error (an output directory that already holds a campaign without
+//! `--resume`, a resume mismatch), `3` build mismatch, `4` I/O or stage-out failure, `5` partial
+//! (drained before walltime, stopped by SIGTERM, or runs missing), `6` aborted by the crash policy,
+//! `64` usage, `70` internal. Every rank of a job exits with the same code; only rank 0 prints.
+//!
+//! The walltime deadline is `--deadline`, else `SABER_WALLTIME_END`, else `SLURM_JOB_END_TIME`
+//! (Unix seconds); rank 0 stops dispatch `checkpoint.drain_margin_s` before it. The first SIGTERM
+//! or SIGINT abandons in-flight runs and commits what finished; a second one ends the process at
+//! once (exit 128 + signal).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use sim_hpc::protocol::Refusal;
+use sim_hpc::resume::{Mode, Prior, prepare};
 #[cfg(feature = "mpi")]
 use sim_hpc::transport::Transport;
 use sim_hpc::{Campaign, ExitCode, RunOptions, RunReport, run_local, standard_library};
@@ -27,8 +35,29 @@ struct Args {
     json: bool,
 }
 
-const USAGE: &str = "usage: sim_hpc --campaign <campaign.toml> [--local | --validate-only] [--threads N] [--json]\n\
+const USAGE: &str = "usage: sim_hpc --campaign <campaign.toml> [--local | --validate-only] [--resume [--override-crash-policy]]\n\
+    \x20             [--deadline <unix seconds>] [--threads N] [--json]\n\
     without --local or --validate-only, run as one rank of an MPI job (mpiexec -n N sim_hpc ...)";
+
+/// Unix seconds as a time.
+fn unix_time(s: &str) -> Option<SystemTime> {
+    let secs: f64 = s.trim().parse().ok()?;
+    (secs.is_finite() && secs >= 0.0).then(|| UNIX_EPOCH + Duration::from_secs_f64(secs))
+}
+
+/// The walltime end from the environment, if a scheduler gave one.
+fn deadline_from_env() -> Option<SystemTime> {
+    ["SABER_WALLTIME_END", "SLURM_JOB_END_TIME"]
+        .iter()
+        .find_map(|var| {
+            let v = std::env::var(var).ok()?;
+            let t = unix_time(&v);
+            if t.is_none() {
+                eprintln!("sim_hpc: warning: ignoring {var}={v:?}, not Unix seconds");
+            }
+            t
+        })
+}
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let mut campaign = None;
@@ -71,6 +100,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
         }
     }
     out.campaign = campaign.ok_or("--campaign <campaign.toml> is required")?;
+    out.mode = match (resume, override_policy) {
+        (false, false) => Mode::Fresh,
+        (true, false) => Mode::Resume,
+        (true, true) => Mode::ResumeOverride,
+        (false, true) => return Err("--override-crash-policy needs --resume".into()),
+    };
     if !out.local && !out.validate_only && !cfg!(feature = "mpi") {
         return Err(
             "this sim_hpc is built without MPI (cargo build --features mpi); pass --local to run on this machine"
@@ -160,16 +195,43 @@ fn main() -> std::process::ExitCode {
         }
         return exit(ExitCode::Ok);
     }
-    let r = run_local(&campaign, &options(&args));
+    let r = run_local(&campaign, &options(&args, prior, stop_flag()));
     print_report(&args, &campaign, &r);
     exit(r.exit)
 }
 
-fn options(args: &Args) -> RunOptions {
+fn options(args: &Args, prior: Prior, stop: Option<Arc<AtomicBool>>) -> RunOptions {
     RunOptions {
         threads: args.threads,
+        attempt: prior.attempt,
+        prior: Some(prior),
+        deadline: args.deadline.or_else(deadline_from_env),
+        stop,
         ..RunOptions::default()
     }
+}
+
+/// A flag the first SIGTERM or SIGINT sets; a second one ends the process at once with 128 +
+/// signal, the code a shell reports for a kill.
+#[cfg(unix)]
+fn stop_flag() -> Option<Arc<AtomicBool>> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::flag;
+    let stop = Arc::new(AtomicBool::new(false));
+    for sig in [SIGTERM, SIGINT] {
+        let installed = flag::register_conditional_shutdown(sig, 128 + sig, Arc::clone(&stop))
+            .and_then(|_| flag::register(sig, Arc::clone(&stop)));
+        if let Err(e) = installed {
+            eprintln!("sim_hpc: warning: cannot handle signal {sig}: {e}");
+            return None;
+        }
+    }
+    Some(stop)
+}
+
+#[cfg(not(unix))]
+fn stop_flag() -> Option<Arc<AtomicBool>> {
+    None
 }
 
 #[cfg(feature = "mpi")]
@@ -178,26 +240,28 @@ fn run_mpi(args: &Args) -> ExitCode {
         eprintln!("sim_hpc: MPI could not be initialized with funneled threading");
         return ExitCode::Internal;
     };
-    let (campaign, attempt) =
-        match sim_hpc::start(&t, &args.campaign, standard_library, 0, args.threads) {
-            Ok(c) => c,
-            Err(r) => {
-                if t.rank() == 0 {
-                    refused(args, &r);
-                }
-                return ExitCode::from_code(r.exit);
+    let stop = stop_flag();
+    let (campaign, prior) = match sim_hpc::start(
+        &t,
+        &args.campaign,
+        standard_library,
+        args.mode,
+        args.threads,
+    ) {
+        Ok(c) => c,
+        Err(r) => {
+            if t.rank() == 0 {
+                refused(args, &r);
             }
-        };
+            return ExitCode::from_code(r.exit);
+        }
+    };
     if t.rank() == 0 && !args.json {
         for w in &campaign.warnings {
             eprintln!("sim_hpc: warning: {w}");
         }
     }
-    let opts = RunOptions {
-        attempt,
-        ..options(args)
-    };
-    let r = sim_hpc::run_rank(&t, &campaign, &opts);
+    let r = sim_hpc::run_rank(&t, &campaign, &options(args, prior, stop));
     if t.rank() == 0 {
         print_report(args, &campaign, &r);
     }
@@ -221,6 +285,7 @@ fn refused(args: &Args, r: &Refusal) {
 }
 
 fn print_report(args: &Args, campaign: &Campaign, r: &RunReport) {
+    let n = campaign.manifest.rows.len() as u64;
     if args.json {
         println!(
             "{}",
@@ -228,6 +293,7 @@ fn print_report(args: &Args, campaign: &Campaign, r: &RunReport) {
                 "ok": r.exit == ExitCode::Ok,
                 "exit": r.exit.code(),
                 "campaign_id": campaign.config.campaign.id,
+                "attempt": r.attempt,
                 "ranks": r.ranks,
                 "threads": r.threads,
                 "runs": r.runs,
@@ -264,9 +330,25 @@ fn print_report(args: &Args, campaign: &Campaign, r: &RunReport) {
             a.detail
         );
     }
+    match r.stopped {
+        Some(sim_hpc::Stop::Walltime) => {
+            eprintln!("sim_hpc: stopped dispatch before the walltime deadline")
+        }
+        Some(sim_hpc::Stop::Signal) => {
+            eprintln!("sim_hpc: stopped by a signal; in-flight runs abandoned")
+        }
+        None => {}
+    }
+    if r.committed_runs.len() < n && r.exit != ExitCode::CrashPolicy {
+        eprintln!(
+            "sim_hpc: {} of {n} runs not committed; run again with --resume",
+            n - r.committed_runs.len()
+        );
+    }
     println!(
-        "campaign {}: {} runs on {} ranks, {} crashed ({} dumps kept), {} setup errors, {} parts committed; {}",
+        "campaign {} attempt {}: {} runs on {} ranks, {} crashed ({} dumps kept), {} setup errors, {} parts committed; {}",
         campaign.config.campaign.id,
+        r.attempt,
         r.runs,
         r.ranks,
         r.crashes,

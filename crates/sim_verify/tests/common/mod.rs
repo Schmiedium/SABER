@@ -92,11 +92,7 @@ fn script_system(world: &mut World) {
     }
     let mut events = world.resource_mut::<SimEvents>();
     for _ in 0..pings {
-        events.emit(SimEvent {
-            name: PING,
-            sim_id: Some(SimId(1)),
-            value: x,
-        });
+        events.emit(SimEvent::new(PING, Some(SimId(1)), x));
     }
 }
 

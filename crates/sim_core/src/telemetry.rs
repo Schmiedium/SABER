@@ -6,7 +6,7 @@
 //! past `max_snapshots` are counted, not stored.
 
 use bevy_ecs::prelude::*;
-use sim_schema::BodySnapshot;
+use sim_schema::{BodySnapshot, FragmentCloudSnapshot, TickFrame};
 
 use crate::body::SimId;
 use crate::clock::SimClock;
@@ -155,18 +155,22 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// One logged event (Tier 2): a [`crate::SimEvent`] with its tick, time and the body's position.
+/// One logged event (Tier 2): a [`crate::SimEvent`] with its tick, time and position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoggedEvent {
     /// The tick it was emitted in.
     pub tick: u64,
-    /// Simulation time at the end of that tick, s.
+    /// When it happened, s: the event's own time when it has one (a located impact), else the end
+    /// of the tick.
     pub t_s: f64,
     /// The declared event name.
     pub name: &'static str,
     /// The body it happened to.
     pub sim_id: Option<SimId>,
-    /// That body's position at the end of the tick, world frame, m.
+    /// The other entity, for a contact.
+    pub other: Option<SimId>,
+    /// Where it happened, world frame, m: the event's own position when it has one, else the
+    /// body's position at the end of the tick.
     pub pos: Option<[f64; 3]>,
     /// The value that goes with it.
     pub value: f64,
@@ -181,6 +185,22 @@ pub struct SnapshotSample {
     pub t_s: f64,
     /// The body's state, as the flight recorder holds it.
     pub body: BodySnapshot,
+    /// Its fragments, summed up, when it is a `Fragmentable` body (IB-16).
+    pub fragments: Option<FragmentCloudSnapshot>,
+}
+
+/// Every body of a frame as snapshot samples.
+fn samples(frame: &TickFrame) -> impl Iterator<Item = SnapshotSample> + '_ {
+    frame.bodies.iter().map(|b| SnapshotSample {
+        tick: frame.tick,
+        t_s: frame.t_s,
+        body: *b,
+        fragments: frame
+            .fragments
+            .iter()
+            .find(|c| c.parent_sim_id == b.sim_id)
+            .copied(),
+    })
 }
 
 /// The run's events and snapshots.
@@ -227,12 +247,7 @@ impl TelemetryLog {
         }
         self.snapshot_ticks += 1;
         self.last_snapshot_tick = Some(frame.tick);
-        self.snapshots
-            .extend(frame.bodies.iter().map(|b| SnapshotSample {
-                tick: frame.tick,
-                t_s: frame.t_s,
-                body: *b,
-            }));
+        self.snapshots.extend(samples(frame));
     }
 
     /// The snapshots plus the final state when snapshots are on and the final tick was not on the
@@ -247,11 +262,7 @@ impl TelemetryLog {
             && let Some(frame) = recorder.latest()
             && self.last_snapshot_tick != Some(frame.tick)
         {
-            out.extend(frame.bodies.iter().map(|b| SnapshotSample {
-                tick: frame.tick,
-                t_s: frame.t_s,
-                body: *b,
-            }));
+            out.extend(samples(frame));
         }
         out
     }
@@ -272,18 +283,21 @@ pub(crate) fn log_tick(world: &mut World) {
                 log.events_dropped += 1;
                 continue;
             }
-            let pos = e.sim_id.and_then(|id| {
-                frame?
-                    .bodies
-                    .iter()
-                    .find(|b| b.sim_id == id.0)
-                    .map(|b| b.pos)
+            let pos = e.pos.map(|p| p.to_array()).or_else(|| {
+                e.sim_id.and_then(|id| {
+                    frame?
+                        .bodies
+                        .iter()
+                        .find(|b| b.sim_id == id.0)
+                        .map(|b| b.pos)
+                })
             });
             log.events.push(LoggedEvent {
                 tick: clock.tick,
-                t_s: clock.time(),
+                t_s: e.time.unwrap_or_else(|| clock.time()),
                 name: e.name,
                 sim_id: e.sim_id,
+                other: e.other,
                 pos,
                 value: e.value,
             });

@@ -1,13 +1,14 @@
-//! `FieldPath`: read a numeric field of an entity's component by its `Component.field.path`
-//! (verification probes, IB-09).
+//! `FieldPath`: read or write a numeric field of an entity's component by its
+//! `Component.field.path` (verification probes, IB-09; actuator outputs, step 5c).
 //!
 //! The path is parsed once (the component's `ReflectComponent` and a parsed `bevy_reflect`
-//! field path, the same syntax the Resolver's targets use, §7); every read after that is a
-//! reflection lookup with no string parsing and no allocation. `f64`, `f32`, the integer types
-//! and `bool` (`1.0` or `0.0`) read as `f64`.
+//! field path, the same syntax the Resolver's targets use, §7); every read or write after that is
+//! a reflection lookup with no string parsing and no allocation. `f64`, `f32`, the integer types
+//! and `bool` (`1.0` or `0.0`) read as `f64`; only `f64` and `f32` fields can be written.
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::reflect::ReflectComponent;
+use bevy_ecs::world::EntityMut;
 use bevy_reflect::{GetPath, ParsedPath, PartialReflect, TypeRegistry};
 
 use crate::parametric::parse_target;
@@ -37,6 +38,8 @@ pub enum FieldReadError {
     NoField,
     /// The field is not a number or a `bool`; holds its type path when known.
     NotNumeric(&'static str),
+    /// A write to a field that is not an `f64` or an `f32`; holds its type path when known.
+    NotFloat(&'static str),
 }
 
 impl std::fmt::Display for FieldReadError {
@@ -46,6 +49,12 @@ impl std::fmt::Display for FieldReadError {
             FieldReadError::NoComponent(c) => write!(f, "the entity has no {c}"),
             FieldReadError::NoField => write!(f, "the component has no such field"),
             FieldReadError::NotNumeric(t) => write!(f, "the field is a {t}, not a number"),
+            FieldReadError::NotFloat(t) => {
+                write!(
+                    f,
+                    "the field is a {t}; only f64 and f32 fields can be written"
+                )
+            }
         }
     }
 }
@@ -90,6 +99,38 @@ impl FieldPath {
             .reflect_path(&self.field)
             .map_err(|_| FieldReadError::NoField)?;
         as_f64(value)
+    }
+
+    /// Write `value` into the field, which must be an `f64` or an `f32` (rounded).
+    pub fn write(
+        &self,
+        world: &mut World,
+        entity: Entity,
+        value: f64,
+    ) -> Result<(), FieldReadError> {
+        let mut entity = world
+            .get_entity_mut(entity)
+            .map_err(|_| FieldReadError::NoEntity)?;
+        let mut component = self
+            .component
+            .reflect_mut(EntityMut::from(&mut entity))
+            .ok_or(FieldReadError::NoComponent(self.component_name))?;
+        let field = component
+            .reflect_path_mut(&self.field)
+            .map_err(|_| FieldReadError::NoField)?;
+        if let Some(v) = field.try_downcast_mut::<f64>() {
+            *v = value;
+            return Ok(());
+        }
+        if let Some(v) = field.try_downcast_mut::<f32>() {
+            *v = value as f32;
+            return Ok(());
+        }
+        Err(FieldReadError::NotFloat(
+            field
+                .get_represented_type_info()
+                .map_or("value of unknown type", |i| i.type_path()),
+        ))
     }
 }
 

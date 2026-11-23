@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sim_core::{Scenario, SetupError, SimAppBuilder, SimWorld, TelemetryConfig};
+use sim_core::{FragmentPool, Scenario, SetupError, SimAppBuilder, SimWorld, TelemetryConfig};
 use sim_schema::io::Table;
-use sim_schema::{FileHeader, build_git_sha, build_id};
+use sim_schema::{FileHeader, FragmentCloudSnapshot, SummaryRow, build_git_sha, build_id};
 use sim_verify::{RequirementSet, VerifyPlugin, VerifyState};
 
 use crate::ExitCode;
@@ -97,8 +97,15 @@ pub struct Campaign {
     pub library: Library,
     /// Tier 2 and 3 limits for every run.
     pub telemetry: TelemetryConfig,
-    /// Dynamic summary columns: `param_*`, `metric_*`, `req_*`.
+    /// Dynamic summary columns: `param_*`, `metric_*`, `req_*`, and `fragments_*` when the
+    /// scenario fragments.
     pub summary_columns: Vec<String>,
+    /// Dynamic snapshot columns: the fragment channels (`ch_frag_*`) when the scenario fragments.
+    pub snapshot_columns: Vec<String>,
+    /// The scenario has a `Fragmentable` body (IB-16).
+    pub fragments: bool,
+    /// Runs write their fragment impacts (`[output] fragment_impacts`, default: `fragments`).
+    pub fragment_impacts: bool,
     /// Non-fatal findings (unbound manifest columns, adaptive snapshots not yet implemented).
     pub warnings: Vec<String>,
     /// This binary's `build_id`.
@@ -307,7 +314,7 @@ impl Campaign {
             .arrow_schema(&summary_columns)
             .map_err(|e| PreflightError::Requirements(e.to_string()))?;
 
-        let campaign = Self {
+        let mut campaign = Self {
             config,
             base,
             scenario,
@@ -316,6 +323,9 @@ impl Campaign {
             library,
             telemetry,
             summary_columns,
+            snapshot_columns: Vec::new(),
+            fragments: false,
+            fragment_impacts: false,
             warnings,
             build_id: found,
         };
@@ -330,6 +340,25 @@ impl Campaign {
         if let Some(set) = &campaign.requirements {
             VerifyState::compile(set, sim.world())
                 .map_err(|e| PreflightError::Requirements(e.to_string()))?;
+        }
+        // A Fragmentable body adds the fragment columns and, unless switched off, the impacts.
+        campaign.fragments = sim.world().resource::<FragmentPool>().parent_count() > 0;
+        if campaign.fragments {
+            campaign
+                .summary_columns
+                .extend(SummaryRow::FRAGMENT_COLUMNS.map(str::to_owned));
+            campaign.snapshot_columns = FragmentCloudSnapshot::CHANNELS.map(str::to_owned).into();
+        }
+        campaign.fragment_impacts = campaign
+            .config
+            .output
+            .fragment_impacts
+            .unwrap_or(campaign.fragments);
+        if campaign.fragment_impacts && !campaign.fragments {
+            campaign.warnings.push(
+                "output.fragment_impacts is on but the scenario has no Fragmentable body: no impacts will be written"
+                    .to_owned(),
+            );
         }
         Ok(campaign)
     }

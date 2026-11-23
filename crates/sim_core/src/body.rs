@@ -194,10 +194,15 @@ pub struct BodyEntry {
 /// The authored bodies of a run in `SimId` order, fixed at Tick 0. Index `i` is the body's slot in
 /// every per-body buffer (stage states, wrenches, energies) and its group in the integrator's
 /// error norm.
+///
+/// A body that broke up into fragments (IB-16, step 5e) is *retired*: it keeps its slot and its
+/// `SimId`, but from the next tick its state is frozen (zero derivatives), and its colliders and
+/// gear points leave contact and ray queries.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BodyTable {
     entries: Vec<BodyEntry>,
     by_entity: Vec<(Entity, usize)>,
+    retired: Vec<bool>,
     dim: usize,
 }
 
@@ -220,6 +225,16 @@ impl BodyTable {
     /// Length of the packed state.
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Whether the body in slot `i` has been retired (it fragmented).
+    pub fn is_retired(&self, i: usize) -> bool {
+        self.retired.get(i).copied().unwrap_or(false)
+    }
+
+    /// Retire the body in slot `i`.
+    pub(crate) fn retire(&mut self, i: usize) {
+        self.retired[i] = true;
     }
 
     /// The slot of a body by id.
@@ -338,6 +353,7 @@ impl BodyTable {
             .map(|(i, e)| (e.entity, i))
             .collect();
         table.by_entity.sort_unstable_by_key(|(e, _)| *e);
+        table.retired = vec![false; table.entries.len()];
         Ok(table)
     }
 }

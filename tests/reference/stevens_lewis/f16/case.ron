@@ -1,0 +1,49 @@
+// Stevens and Lewis's F-16 model test case: the state and controls the book gives and the state
+// derivative it prints (Table 3.5-2). Read by crates/sim_models/tests/fixedwing.rs, which also
+// checks the book's trims (Tables 3.6-2 and 3.6-3) against the same scenario.
+RefCase(
+    id: "stevens_lewis/f16",
+    kind: Verification,
+    provenance: Published(
+        source: "B. L. Stevens, F. L. Lewis and E. N. Johnson, Aircraft Control and Simulation, 3rd ed., Wiley, 2015: Appendix A (F-16 aerodynamic, engine and air-data model) and Table 3.5-2 (model test case)",
+        transcription: "Tables as typed in the Archimedes F-16 tutorial (github.com/PineTreeLabs/archimedes, docs/source/tutorials/f16/aero.py and engine.py), which marks its rolling-moment table as the textbook data, compared cell by cell with AeroBenchVVPython (github.com/stanleybak/AeroBenchVVPython, code/aerobench/lowlevel/*.py); both read as data only. They differ in 23 cells. The model test case settles the rolling-moment rows at alpha 15-25 deg in Archimedes' favour (AeroBench's modified rows give P-dot 12.83 instead of 12.62679); trim Table 3.6-3 settles C_Z(alpha) at 5 deg. Still to check against the printed book (T5): C_Z at 20 deg (-1.366 vs -1.355), C_Xq at -5 deg (0.110 vs -0.110), C_Yr at 40 deg (0.493 vs -0.493), idle thrust at Mach 0.6 and 10,000 ft (-710 vs -170 lbf), and C_mq at -5 deg (-0.540 in both, a tenth of its neighbours). f16.scn.ron and crates/sim_models/tests/f16_port/tables.rs are written by a script from the adopted transcription.",
+    ),
+    scenario: "f16.scn.ron",
+    point: (
+        state: (
+            vt_fps: 500.0,
+            alpha_rad: 0.5,
+            beta_rad: -0.2,
+            phi_rad: -1.0,
+            theta_rad: 1.0,
+            psi_rad: -1.0,
+            p_rps: 0.7,
+            q_rps: -0.8,
+            r_rps: 0.9,
+            north_ft: 1000.0,
+            east_ft: 900.0,
+            alt_ft: 10000.0,
+            power_pct: 90.0,
+        ),
+        controls: (throttle: 0.9, elevator_deg: 20.0, aileron_deg: -15.0, rudder_deg: -20.0),
+        xcg: 0.4,
+    ),
+    // `tol`: the book's own arithmetic (the port with c1..c9 and 57.29578 deg/rad) against the
+    // printed value. `plugin_tol`: SABER (exact inertia, exact degrees) against the printed value.
+    compare: [
+        (quantity: "vt_dot", unit: "ft/s^2", expected: -75.23724, tol: 2e-5, plugin_tol: 2e-5),
+        (quantity: "alpha_dot", unit: "rad/s", expected: -0.8813491, tol: 2e-7, plugin_tol: 2e-7),
+        (quantity: "beta_dot", unit: "rad/s", expected: -0.4759990, tol: 2e-7, plugin_tol: 2e-7),
+        (quantity: "phi_dot", unit: "rad/s", expected: 2.505734, tol: 2e-6, plugin_tol: 2e-6),
+        (quantity: "theta_dot", unit: "rad/s", expected: 0.3250820, tol: 2e-7, plugin_tol: 2e-7),
+        (quantity: "psi_dot", unit: "rad/s", expected: 2.145926, tol: 2e-6, plugin_tol: 2e-6),
+        (quantity: "p_dot", unit: "rad/s^2", expected: 12.62679, tol: 2e-5, plugin_tol: 3e-3),
+        (quantity: "q_dot", unit: "rad/s^2", expected: 0.9649671, tol: 2e-7, plugin_tol: 1e-4),
+        (quantity: "r_dot", unit: "rad/s^2", expected: 0.5809759, tol: 2e-7, plugin_tol: 1e-4),
+        (quantity: "north_dot", unit: "ft/s", expected: 342.4439, tol: 2e-4, plugin_tol: 2e-4),
+        (quantity: "east_dot", unit: "ft/s", expected: -266.7707, tol: 2e-4, plugin_tol: 2e-4),
+        (quantity: "alt_dot", unit: "ft/s", expected: 248.1241, tol: 2e-4, plugin_tol: 2e-4),
+        (quantity: "power_dot", unit: "percent/s", expected: -58.68999, tol: 2e-5, plugin_tol: 2e-5),
+    ],
+    tol_derivation: "tol = 2 units in the last printed figure: half a unit for the printing, and up to 1.5 units for the book's single-precision arithmetic (float32 rounds the operands to ~6e-8 relative; POW-dot = 5 (78.262 - 90) prints as -58.68999 against -58.69 exactly). The port, in double precision with the book's constants, lands within this for all 13 quantities. plugin_tol: the same for every quantity but P-dot, Q-dot and R-dot, where SABER solves Euler's equations with the exact inertia tensor while the book uses c1..c9 printed to four figures (relative rounding up to 5e-4 each); the port run both ways at this state moves P-dot by 2.5e-3, Q-dot by 6.2e-5 and R-dot by 6.0e-5, so plugin_tol is that difference rounded up. SABER against the port with exact inertia is held to 1e-9 separately.",
+)

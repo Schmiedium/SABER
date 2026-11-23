@@ -178,6 +178,57 @@ fn export_import_round_trip_is_exact() {
     assert_eq!(third.to_ron(&reg.read()), text);
 }
 
+/// The studio's Builder edits a copy of a scene's entities and rebuilds it from those parts: with
+/// nothing changed it is the same scene (same hash, same file, keys, component order and the
+/// visual section kept; the header is this build's); a broken edit is refused as a parsed file
+/// would be.
+#[test]
+fn a_scene_rebuilt_from_its_parts_is_the_same_scene() {
+    let reg = registry();
+    let reg = reg.read();
+    let text = BASE.replacen("    scene: (", "    visual: (models: {}),\n    scene: (", 1);
+    let first = Scenario::from_ron(&text, &reg, LIB).unwrap();
+    let copy: Vec<_> = first
+        .entities()
+        .iter()
+        .map(|e| e.try_clone(&reg).unwrap())
+        .collect();
+    let rebuilt = Scenario::from_parts(copy, first.meta(), first.visual(), &reg).unwrap();
+    assert_eq!(rebuilt.scene_hash(), first.scene_hash());
+    assert_eq!(rebuilt.visual_hash(), first.visual_hash());
+    // The same file below the header, which is this build's.
+    let body = |s: &Scenario| {
+        s.to_ron(&reg)
+            .split_once("    units:")
+            .unwrap()
+            .1
+            .to_owned()
+    };
+    assert_eq!(body(&rebuilt), body(&first));
+    assert_eq!(rebuilt.header().saber_version, env!("CARGO_PKG_VERSION"));
+    let again = Scenario::from_ron(&rebuilt.to_ron(&reg), &reg, LIB).unwrap();
+    assert_eq!(again.to_ron(&reg), rebuilt.to_ron(&reg));
+    let keys = |s: &Scenario| s.entities().iter().map(|e| e.key).collect::<Vec<_>>();
+    assert_eq!(keys(&rebuilt), keys(&first));
+
+    // Two entities with one SimId are refused, as in a file.
+    let mut dup: Vec<_> = first
+        .entities()
+        .iter()
+        .map(|e| e.try_clone(&reg).unwrap())
+        .collect();
+    let id = dup[0].sim_id().unwrap();
+    for c in &mut dup[1].components {
+        if let Some(s) = c.as_mut().downcast_mut::<SimId>() {
+            *s = id;
+        }
+    }
+    assert!(matches!(
+        Scenario::from_parts(dup, first.meta(), None, &reg),
+        Err(SceneError::DuplicateSimId { .. })
+    ));
+}
+
 #[test]
 fn scene_hash_covers_content_not_layout() {
     let base = parse(BASE).unwrap();

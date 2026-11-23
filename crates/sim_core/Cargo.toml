@@ -20,6 +20,7 @@ rand_chacha.workspace = true
 bevy_ecs.workspace = true
 bevy_reflect.workspace = true
 glam.workspace = true
+parry3d-f64.workspace = true
 ron.workspace = true
 libm.workspace = true
 

@@ -29,10 +29,27 @@ pub enum Dispatch {
 
 /// Chunks of `0..n` of `size` runs: `(chunk_id, start, end)`, half-open.
 pub fn chunks(n: u64, size: u32) -> Vec<(u32, u64, u64)> {
+    let mut all = RangeSet::new();
+    if n > 0 {
+        all.insert_range(0, n - 1);
+    }
+    chunks_over(&all, size)
+}
+
+/// Chunks of the runs in `todo` (a resumed attempt's missing runs): each range cut into slices of
+/// at most `size` runs, numbered from 0 in run order.
+pub fn chunks_over(todo: &RangeSet, size: u32) -> Vec<(u32, u64, u64)> {
     let size = u64::from(size.max(1));
-    (0..n.div_ceil(size))
-        .map(|i| (i as u32, i * size, ((i + 1) * size).min(n)))
-        .collect()
+    let mut out = Vec::new();
+    for &[first, last] in todo.ranges() {
+        let mut start = first;
+        while start <= last {
+            let end = (start + size).min(last + 1);
+            out.push((out.len() as u32, start, end));
+            start = end;
+        }
+    }
+    out
 }
 
 /// The dispatch order of `n` chunks: the first `canary` of them spread across the manifest in
@@ -108,6 +125,13 @@ pub struct Dispatcher {
     assigned: BTreeMap<u32, u32>,
     completed: BTreeSet<u32>,
     abort: Option<AbortMsg>,
+    /// The abort rules apply (off for `--override-crash-policy`).
+    policy_enabled: bool,
+    /// Dispatch stopped before walltime or on SIGTERM.
+    draining: bool,
+    /// Counts and runs restored from earlier attempts.
+    restored: Tally,
+    restored_committed: RangeSet,
 }
 
 impl Dispatcher {
@@ -119,7 +143,22 @@ impl Dispatcher {
         policy: CrashPolicy,
         ranks: u32,
     ) -> Self {
-        let chunks = chunks(runs, chunk_size);
+        let mut all = RangeSet::new();
+        if runs > 0 {
+            all.insert_range(0, runs - 1);
+        }
+        Self::over(&all, chunk_size, dispatch, policy, ranks)
+    }
+
+    /// A dispatcher for the runs in `todo` only (a resumed attempt's missing runs).
+    pub fn over(
+        todo: &RangeSet,
+        chunk_size: u32,
+        dispatch: Dispatch,
+        policy: CrashPolicy,
+        ranks: u32,
+    ) -> Self {
+        let chunks = chunks_over(todo, chunk_size);
         let order = match dispatch {
             Dispatch::Canary => canary_order(chunks.len(), policy.canary_chunks as usize),
             Dispatch::Shuffled(seed) => shuffled_order(chunks.len(), seed),
@@ -141,7 +180,35 @@ impl Dispatcher {
             assigned: BTreeMap::new(),
             completed: BTreeSet::new(),
             abort: None,
+            policy_enabled: true,
+            draining: false,
+            restored: Tally::default(),
+            restored_committed: RangeSet::new(),
         }
+    }
+
+    /// Start from the counts and committed runs of earlier attempts (resume, seq §12), so the crash
+    /// policy and the dump quota stay campaign-wide.
+    pub fn restore(&mut self, tally: &Tally, committed: &RangeSet) {
+        self.totals.add(tally);
+        self.committed.extend(committed);
+        self.restored = tally.clone();
+        self.restored_committed = committed.clone();
+    }
+
+    /// Turn the abort rules off (`--override-crash-policy`); the dump quota still applies.
+    pub fn disable_policy(&mut self) {
+        self.policy_enabled = false;
+    }
+
+    /// Stop handing out chunks (walltime drain, SIGTERM): every later request gets `Terminate`.
+    pub fn drain(&mut self) {
+        self.draining = true;
+    }
+
+    /// Dispatch has stopped before every chunk went out.
+    pub fn draining(&self) -> bool {
+        self.draining
     }
 
     /// Count a request's deltas, evaluate the crash policy and answer it. When the request trips
@@ -155,11 +222,11 @@ impl Dispatcher {
             rank.tally.add(&req.delta);
             rank.last_seen_utc = Some(utc_now());
         }
-        if self.abort.is_none() {
+        if self.abort.is_none() && self.policy_enabled {
             self.abort = self.check();
         }
         let active = self.ranks.get(r).is_some_and(|s| s.active);
-        if !active || req.done || self.abort.is_some() || self.next >= self.order.len() {
+        if !active || req.done || self.abort.is_some() || self.exhausted() {
             if let Some(rank) = self.ranks.get_mut(r) {
                 rank.active = false;
             }
@@ -257,8 +324,8 @@ impl Dispatcher {
     /// Replace the counts with the ranks' final reports (requests carry counts only up to each
     /// rank's last request), for the last heartbeat.
     pub fn settle(&mut self, nodes: &[NodeReport]) {
-        self.totals = Tally::default();
-        self.committed = RangeSet::new();
+        self.totals = self.restored.clone();
+        self.committed = self.restored_committed.clone();
         for nr in nodes {
             self.totals.add(&nr.tally);
             for p in &nr.committed {
@@ -278,7 +345,7 @@ impl Dispatcher {
 
     /// Every chunk has been handed out.
     pub fn exhausted(&self) -> bool {
-        self.next >= self.order.len()
+        self.draining || self.next >= self.order.len()
     }
 
     /// Counts reported so far, campaign-wide.
@@ -411,6 +478,69 @@ mod tests {
         assert_eq!(chunks(10, 4), vec![(0, 0, 4), (1, 4, 8), (2, 8, 10)]);
         assert_eq!(chunks(0, 4), vec![]);
         assert_eq!(chunks(3, 256), vec![(0, 0, 3)]);
+    }
+
+    #[test]
+    fn a_resumed_attempt_chunks_only_the_missing_runs() {
+        let missing = RangeSet::from(vec![[3, 9], [20, 20], [30, 33]]);
+        assert_eq!(
+            chunks_over(&missing, 4),
+            vec![(0, 3, 7), (1, 7, 10), (2, 20, 21), (3, 30, 34)]
+        );
+        assert_eq!(chunks_over(&RangeSet::new(), 4), vec![]);
+        let mut d = Dispatcher::over(&missing, 4, Dispatch::Canary, policy(), 1);
+        let mut runs = 0;
+        while let Reply::Assign(a) = d.on_request(&request(0, &[])) {
+            runs += a.end - a.start;
+        }
+        assert_eq!(runs, missing.len());
+    }
+
+    #[test]
+    fn drain_stops_dispatch_and_restore_keeps_the_policy_campaign_wide() {
+        let mut d = Dispatcher::new(100, 4, Dispatch::Canary, policy(), 2);
+        assign(d.on_request(&request(1, &[])));
+        d.drain();
+        assert!(d.exhausted() && d.draining());
+        assert_eq!(
+            d.on_request(&request(1, &[])),
+            Reply::Terminate(Terminate { abort: None })
+        );
+        let head = StatusHead {
+            campaign_id: "c",
+            attempt: 1,
+            started_utc: "2026-11-03T00:00:00Z",
+            heartbeat_s: 15.0,
+            runs_total: 100,
+            req_ids: &[],
+            finished: None,
+        };
+        assert_eq!(
+            d.status(head, &RangeSet::new()).state,
+            CampaignState::Draining
+        );
+
+        // Earlier attempts' crashes count: 3 of 4 already failed, so the first request trips.
+        let mut earlier = Tally::default();
+        for p in 0..3 {
+            earlier.record_run(p, SimStatus::CrashedNaN, &[], false);
+        }
+        earlier.record_run(3, SimStatus::Terminated, &[], false);
+        let committed = RangeSet::from(vec![[0, 3]]);
+        let mut d = Dispatcher::new(100, 4, Dispatch::Canary, policy(), 1);
+        d.restore(&earlier, &committed);
+        assert!(matches!(
+            d.on_request(&request(0, &[])),
+            Reply::Terminate(Terminate { abort: Some(_) })
+        ));
+        // With the policy overridden the same campaign runs, and the restored runs stay counted.
+        let mut d = Dispatcher::new(100, 4, Dispatch::Canary, policy(), 1);
+        d.restore(&earlier, &committed);
+        d.disable_policy();
+        assign(d.on_request(&request(0, &[])));
+        assert_eq!((d.totals().runs, d.committed().len()), (4, 4));
+        d.settle(&[]);
+        assert_eq!((d.totals().runs, d.committed().len()), (4, 4));
     }
 
     #[test]

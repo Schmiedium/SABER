@@ -6,8 +6,10 @@ use crate::{CrashReason, FileHeader, Semver, SimStatus, TickFrame};
 
 /// `FileHeader::format` of a crash-dump stream (`*_crashes.zst`).
 pub const CRASHES_FORMAT: &str = "crashes";
-/// The crash-stream layout this build writes and reads (the `io::crashes` module).
-pub const CRASHES_SCHEMA_VERSION: Semver = Semver::new(1, 0, 0);
+/// The crash-stream layout this build writes and reads (the `io::crashes` module). 2.0 added the
+/// fragment aggregates to every frame (`TickFrame::fragments`, IB-16); 1.x streams still read
+/// through the upgrader in `io::crashes` (§10.4), with no fragments.
+pub const CRASHES_SCHEMA_VERSION: Semver = Semver::new(2, 0, 0);
 
 /// A crashed run: its identity, parameters and the flight recorder's last frames.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

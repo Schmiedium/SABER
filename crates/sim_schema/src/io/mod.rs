@@ -235,24 +235,28 @@ const IMPACTS: &[Column] = &[
     c("tick", U64, "tick it was found in"),
     c("fragment_sim_id", U32, "fragment"),
     c("parent_sim_id", U32, "body it came from"),
-    n("target_sim_id", U32, "body it hit; null for the ground"),
+    n(
+        "target_sim_id",
+        U32,
+        "body or static collider it hit (the ground's own SimId too)",
+    ),
     c("point_world_x", F64, "impact point, world frame, m"),
     c("point_world_y", F64, "impact point, world frame, m"),
     c("point_world_z", F64, "impact point, world frame, m"),
     n(
         "point_target_body_x",
         F64,
-        "impact point, target body frame, m",
+        "impact point, target body frame, m (null for a static collider)",
     ),
     n(
         "point_target_body_y",
         F64,
-        "impact point, target body frame, m",
+        "impact point, target body frame, m (null for a static collider)",
     ),
     n(
         "point_target_body_z",
         F64,
-        "impact point, target body frame, m",
+        "impact point, target body frame, m (null for a static collider)",
     ),
     c(
         "rel_vel_x",
@@ -343,9 +347,13 @@ impl Table {
         }
     }
 
-    /// The schema version this build writes and reads.
+    /// The schema version this build writes and reads. Summaries 1.1 added the `fragments_`
+    /// family (IB-16).
     pub fn schema_version(self) -> Semver {
-        Semver::new(1, 0, 0)
+        match self {
+            Table::Summaries => Semver::new(1, 1, 0),
+            _ => Semver::new(1, 0, 0),
+        }
     }
 
     /// The fixed columns, in order.
@@ -373,6 +381,11 @@ impl Table {
                 prefix: "req_",
                 ty: U8,
                 doc: "per-run Verdict of a requirement",
+            },
+            Dynamic {
+                prefix: "fragments_",
+                ty: U64,
+                doc: "fragment counts of a fragmenting scenario: written, dropped, impacted, expired",
             },
         ];
         const SNAPSHOT_DYNAMIC: &[Dynamic] = &[Dynamic {
@@ -680,13 +693,31 @@ pub struct TableFile {
     pub metadata: Vec<(String, String)>,
 }
 
-/// Read a SABER Parquet file held in memory (a manifest broadcast to every rank, IB-05).
-pub fn read_parquet_bytes(bytes: Vec<u8>, table: Table) -> Result<TableFile, TableError> {
-    read_parquet(bytes::Bytes::from(bytes), table)
+/// A table's footer without its rows: what resume reads from every committed summaries file.
+#[derive(Clone, Debug)]
+pub struct TableFooter {
+    /// Its header.
+    pub header: FileHeader,
+    /// The dynamic column names, in file order.
+    pub dynamic: Vec<String>,
+    /// Rows in the file.
+    pub rows: u64,
+    /// Every footer entry other than the header (and Arrow's own schema).
+    pub metadata: Vec<(String, String)>,
 }
 
-/// Read a SABER Parquet file of a table, checking the header and the columns first.
-pub fn read_parquet<R: ChunkReader + 'static>(
+impl TableFooter {
+    /// The value of a footer entry.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Read only the footer of a SABER Parquet file, checking the header and the columns.
+pub fn read_parquet_footer<R: ChunkReader + 'static>(
     input: R,
     table: Table,
 ) -> Result<TableFooter, TableError> {

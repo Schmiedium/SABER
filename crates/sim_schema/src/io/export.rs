@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::{
     CRASH_COUNTS_KEY, DUMP_COUNTS_KEY, HEADER_KEY, MANIFEST_HASH_KEY, RUN_IDS_KEY, SAMPLER_KEY,
-    STATUS_COUNTS_KEY, Table,
+    STATUS_COUNTS_KEY, Table, VERIFY_KEY,
 };
 use crate::{
     CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashKind, DiskEnum, IntegratorKind, MAGIC, REQ_FORMAT,

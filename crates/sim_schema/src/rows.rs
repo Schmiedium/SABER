@@ -1,9 +1,9 @@
 //! One row of each output table (IB-02, IB-07, IB-12, IB-16). Plain data, so they need no Arrow;
 //! the `io` feature turns slices of them into record batches and back.
 //!
-//! Dynamic columns (`param_*`, `metric_*`, `req_*`, `ch_*`) are held as vectors in the order of the
-//! column names given to the table, which come from the scenario's bindings, the requirement set
-//! and the model's declared channels.
+//! Dynamic columns (`param_*`, `metric_*`, `req_*`, `fragments_*`, `ch_*`) are held as vectors in
+//! the order of the column names given to the table, which come from the scenario's bindings, the
+//! requirement set, whether the scenario fragments (IB-16) and the model's declared channels.
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,20 @@ pub struct SummaryRow {
     pub metrics: Vec<f64>,
     /// `req_*` verdicts.
     pub verdicts: Vec<Verdict>,
+    /// `fragments_*` counts ([`SummaryRow::FRAGMENT_COLUMNS`]), only in a campaign whose scenario
+    /// has a `Fragmentable` body (IB-16); empty otherwise.
+    pub fragments: Vec<u64>,
+}
+
+impl SummaryRow {
+    /// The fragment columns of a fragmenting campaign's summaries (IB-16): fragments written,
+    /// dropped for lack of pool room, that hit something, and whose lifetime ran out.
+    pub const FRAGMENT_COLUMNS: [&'static str; 4] = [
+        "fragments_written",
+        "fragments_dropped",
+        "fragments_impacted",
+        "fragments_expired",
+    ];
 }
 
 /// One event (`*_events.parquet`, Tier 2).
@@ -138,11 +152,12 @@ pub struct ImpactRow {
     pub fragment_sim_id: u32,
     /// The body it came from.
     pub parent_sim_id: u32,
-    /// The body it hit; `None` for the ground.
+    /// The body or static collider it hit (its own `SimId`, the ground's too; IB-16 as built).
+    /// Nullable in the schema, which leaves room for a target without a `SimId`.
     pub target_sim_id: Option<u32>,
     /// Impact point, world frame, m.
     pub point_world: [f64; 3],
-    /// Impact point in the target's body frame, m (`None` for the ground).
+    /// Impact point in the target's body frame, m (`None` for a static collider).
     pub point_target_body: Option<[f64; 3]>,
     /// Fragment velocity relative to the target, world frame, m/s.
     pub rel_vel: [f64; 3],

@@ -161,6 +161,9 @@ pub struct ResolvedValue {
 pub struct ResolveReport {
     /// Bindings in `SimId` order, then draws in `SimId` order.
     pub values: Vec<ResolvedValue>,
+    /// Setup warnings that do not stop the run (for example a contact that is close to the
+    /// stiffness limit), in the order the checks ran.
+    pub warnings: Vec<String>,
 }
 
 /// A parsed target: the component's registration and the field path inside it.
@@ -396,6 +399,9 @@ pub(crate) fn resolve(world: &mut World, params: Option<&ParamValues>) -> Result
             .entity_mut(*entity)
             .remove::<(ParamBindings, Uncertainties)>();
     }
-    world.insert_resource(ResolveReport { values: report });
+    world.insert_resource(ResolveReport {
+        values: report,
+        warnings: Vec::new(),
+    });
     Ok(())
 }

@@ -1,6 +1,7 @@
 //! `Core.Recorder`: the black-box flight recorder (`Architecture.md` §6.1, subsystems §5.1).
 //!
-//! A fixed ring of `K` [`TickFrame`]s, each with room for every authored body, allocated at Tick 0
+//! A fixed ring of `K` [`TickFrame`]s, each with room for every authored body and every fragmenting
+//! body's fragment aggregates (IB-16; individual fragments are never recorded), allocated at Tick 0
 //! and overwritten in place, so recording never allocates. The Tick-0 state is recorded at start,
 //! then one frame per tick in `SimSet::Record`. A frame is committed (the cursor moves) only after
 //! it is fully written, so every frame in the ring is complete.
@@ -11,6 +12,7 @@ use sim_schema::{BodySnapshot, TickFrame};
 use crate::body::{Dof, PointMass3, RigidBody6};
 use crate::clock::SimClock;
 use crate::dynamics::Dynamics;
+use crate::fragments::FragmentPool;
 use crate::telemetry::TickEnergy;
 
 /// Ring buffer of the last `K` tick frames.
@@ -25,19 +27,22 @@ impl FlightRecorder {
     /// A recorder with `capacity` frames of room for `bodies` bodies each.
     pub fn new(capacity: usize, bodies: usize) -> Self {
         let mut r = Self::default();
-        r.ensure(capacity, bodies);
+        r.ensure(capacity, bodies, 0);
         r
     }
 
-    /// Empty the ring and make sure it has `capacity` frames with room for `bodies` bodies each
-    /// (Tick 0). Allocates only when the existing buffers are too small.
-    pub fn ensure(&mut self, capacity: usize, bodies: usize) {
+    /// Empty the ring and make sure it has `capacity` frames with room for `bodies` bodies and
+    /// `parents` fragment clouds each (Tick 0). Allocates only when the existing buffers are too
+    /// small.
+    pub fn ensure(&mut self, capacity: usize, bodies: usize, parents: usize) {
         let capacity = capacity.max(1);
         self.frames.truncate(capacity);
         self.frames.resize_with(capacity, TickFrame::default);
         for f in &mut self.frames {
             f.bodies.clear();
             f.bodies.reserve(bodies);
+            f.fragments.clear();
+            f.fragments.reserve(parents);
         }
         self.cursor = 0;
         self.total_recorded = 0;
@@ -68,6 +73,7 @@ impl FlightRecorder {
     pub fn begin_frame(&mut self) -> &mut TickFrame {
         let frame = &mut self.frames[self.cursor];
         frame.bodies.clear();
+        frame.fragments.clear();
         frame
     }
 
@@ -156,6 +162,9 @@ pub(crate) fn record_frame(world: &mut World) {
             }
             frame.bodies.push(snap);
         }
+        world
+            .resource::<FragmentPool>()
+            .snapshot_into(&mut frame.fragments);
         recorder.commit();
     });
 }

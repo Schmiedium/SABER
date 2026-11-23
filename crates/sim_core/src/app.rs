@@ -24,10 +24,21 @@ use sim_schema::SimStatus;
 use crate::body::{MassProps, PointMass3, RigidBody6, SimId};
 use crate::checks::{CheckCatalog, CheckFactory};
 use crate::clock::SimClock;
-use crate::dynamics::{Dynamics, integrate_system};
+use crate::contact::{
+    CONTACT, CONTACT_DEFERRED, CONTACT_END, CONTACT_PROJECTED, ContactConfig, ContactMaterial,
+    ContactModel, ContactOverride, ContactOverrides, ContactPoints, Contacts, DampingLaw,
+    GearPoint, IMPACT,
+};
+use crate::dynamics::{Dynamics, contact_system, integrate_system};
 use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldFrame};
 use crate::events::{SimEvents, clear_events};
 use crate::force::ForceModel;
+use crate::fragments::{
+    Covariance, FRAGMENTATION, FRAGMENTS_DROPPED, FragmentCloud, FragmentConfig, FragmentDrag,
+    FragmentPool, Fragmentable, FragmentationModel, ImpactTally, attach_outputs,
+    fragment_integrate_system, fragment_system,
+};
+use crate::geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
 use crate::hash::{
     CONFIG_CONTEXT, RollingHash, RunIdentity, finish, rolling_hash_system, state_hash,
 };
@@ -66,8 +77,8 @@ impl RunSeed {
     }
 }
 
-/// How a World simulates: tick length, budget, integrator, watchdog, recorder size. Part of the
-/// scenario envelope (IB-01); everything except `recorder_frames` is hashed into
+/// How a World simulates: tick length, budget, integrator, watchdog, contact capacity, recorder
+/// size. Part of the scenario envelope (IB-01); everything except `recorder_frames` is hashed into
 /// `sim_config_hash`, because it changes results (physics §10.5).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +99,12 @@ pub struct SimConfig {
     /// Watchdog bounds.
     #[serde(default)]
     pub watchdog: WatchdogConfig,
+    /// Contact settings (step 5d).
+    #[serde(default)]
+    pub contact: ContactConfig,
+    /// Fragment pool settings (step 5e, IB-16).
+    #[serde(default)]
+    pub fragments: FragmentConfig,
     /// Flight-recorder frames `K`.
     #[serde(default = "default_recorder_frames")]
     pub recorder_frames: u32,
@@ -108,6 +125,8 @@ impl SimConfig {
             at_max_ticks: MaxTicksOutcome::default(),
             integrator: IntegratorConfig::default(),
             watchdog: WatchdogConfig::default(),
+            contact: ContactConfig::default(),
+            fragments: FragmentConfig::default(),
             recorder_frames: default_recorder_frames(),
         }
     }
@@ -119,6 +138,39 @@ impl SimConfig {
         }
         if self.recorder_frames == 0 {
             return Err(SetupError::BadConfig("recorder_frames must be at least 1"));
+        }
+        if self.contact.max_contact_pairs == 0 {
+            return Err(SetupError::BadConfig(
+                "contact.max_contact_pairs must be at least 1",
+            ));
+        }
+        if !(self.contact.max_projection.is_finite() && self.contact.max_projection >= 0.0) {
+            return Err(SetupError::BadConfig(
+                "contact.max_projection must be finite and at least 0",
+            ));
+        }
+        if self
+            .contact
+            .max_penetration
+            .is_some_and(|m| !(m.is_finite() && m > 0.0))
+        {
+            return Err(SetupError::BadConfig(
+                "contact.max_penetration must be finite and above 0",
+            ));
+        }
+        if self.contact.penetration_ticks == 0 {
+            return Err(SetupError::BadConfig(
+                "contact.penetration_ticks must be at least 1",
+            ));
+        }
+        if self
+            .fragments
+            .lifetime
+            .is_some_and(|l| !(l.is_finite() && l > 0.0))
+        {
+            return Err(SetupError::BadConfig(
+                "fragments.lifetime must be finite and above 0",
+            ));
         }
         if self.watchdog.energy_max_j.is_some_and(f64::is_nan) {
             return Err(SetupError::BadConfig(
@@ -179,6 +231,19 @@ impl SimConfig {
             }
         }
         match self.watchdog.energy_max_j {
+            None => h.update(&[0]),
+            Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
+        };
+        h.update(&self.contact.max_contact_pairs.to_le_bytes())
+            .update(&self.contact.max_events_per_tick.to_le_bytes())
+            .update(&self.contact.max_projection.to_bits().to_le_bytes());
+        match self.contact.max_penetration {
+            None => h.update(&[0]),
+            Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
+        };
+        h.update(&self.contact.penetration_ticks.to_le_bytes());
+        h.update(&self.fragments.capacity.to_le_bytes());
+        match self.fragments.lifetime {
             None => h.update(&[0]),
             Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
         };
@@ -325,6 +390,14 @@ pub trait SimPlugin: Send + Sync + 'static {
     fn start(&self, _world: &mut World) -> Result<(), SetupError> {
         Ok(())
     }
+
+    /// Tick 0 of every run, after the body table, the integrator and the force models are set up
+    /// and before the initial frame is recorded: for initial-condition solvers such as trim, which
+    /// evaluate the equations of motion with [`crate::dynamics::derivatives`] and may change body
+    /// states and inputs. Plugins run in the order added. Allocation is allowed here.
+    fn after_setup(&self, _world: &mut World) -> Result<(), SetupError> {
+        Ok(())
+    }
 }
 
 /// Builds a [`SimWorld`]: the core systems and resources, then each plugin in the order added.
@@ -355,11 +428,39 @@ impl SimAppBuilder {
             .register_type::<PointMass3>()
             .register_type::<MassProps>()
             .register_type::<ParamBindings>()
-            .register_type::<Uncertainties>();
+            .register_type::<Uncertainties>()
+            .register_type::<Pose>()
+            .register_type::<ShapeDesc>()
+            .register_type::<ShapePart>()
+            .register_type::<CollisionShape>()
+            .register_type::<ContactModel>()
+            .register_type::<DampingLaw>()
+            .register_type::<ContactMaterial>()
+            .register_type::<GearPoint>()
+            .register_type::<ContactPoints>()
+            .register_type::<ContactOverride>()
+            .register_type::<ContactOverrides>()
+            .register_type::<Fragmentable>()
+            .register_type::<FragmentDrag>()
+            .register_type::<FragmentCloud>()
+            .register_type::<Covariance>()
+            .register_type::<ImpactTally>();
         b.world.insert_resource(SimEvents::default());
+        b.world.insert_resource(FragmentPool::default());
         b.world.insert_resource(CheckCatalog::default());
+        b.declare_event(CONTACT)
+            .declare_event(CONTACT_END)
+            .declare_event(IMPACT)
+            .declare_event(CONTACT_DEFERRED)
+            .declare_event(CONTACT_PROJECTED)
+            .declare_event(FRAGMENTATION)
+            .declare_event(FRAGMENTS_DROPPED);
         b.add_systems(SimSet::Environment, clear_events)
-            .add_systems(SimSet::Integrate, integrate_system)
+            .add_systems(
+                SimSet::Integrate,
+                (integrate_system, fragment_integrate_system),
+            )
+            .add_systems(SimSet::Constraints, (contact_system, fragment_system))
             .add_systems(SimSet::Telemetry, telemetry_system)
             .add_systems(SimSet::Record, (record_frame, log_tick))
             .add_systems(
@@ -407,6 +508,17 @@ impl SimAppBuilder {
     /// Add a force model. Models are evaluated in the order added.
     pub fn add_force_model(&mut self, model: impl ForceModel) -> &mut Self {
         self.models.push(Box::new(model));
+        self
+    }
+
+    /// Register a fragmentation model (IB-16) under its id, for `Fragmentable` bodies to name.
+    ///
+    /// # Panics
+    /// If a model with the same id is already registered.
+    pub fn add_fragmentation_model(&mut self, model: impl FragmentationModel) -> &mut Self {
+        self.world
+            .resource_mut::<FragmentPool>()
+            .add_model(Box::new(model));
         self
     }
 
@@ -502,6 +614,7 @@ impl SimAppBuilder {
         world.insert_resource(RngStreams::new(SimRng::new(0, 0)));
         world.insert_resource(WorldFrame::default());
         world.insert_resource(ResolveReport::default());
+        world.insert_resource(Contacts::default());
         world.insert_resource(RunIdentity {
             scene_hash: 0,
             sim_config_hash: config.hash(0),
@@ -629,8 +742,8 @@ impl SimWorld {
 
     /// Tick 0 (seq §6): seed the random streams, spawn the scenario if one is set, resolve
     /// parameter bindings from `params` and draw uncertainties (`Core.Resolver`), run each
-    /// plugin's `start`, build the body table and the integrator, set up the force models, size the
-    /// recorder and record the initial frame. Everything that allocates happens here. On error the
+    /// plugin's `start`, build the body table and the integrator, set up the force models, run each
+    /// plugin's `after_setup` (trim), size the recorder and record the initial frame. Everything that allocates happens here. On error the
     /// World must be `reset` before the next attempt.
     pub fn start_with_params(
         &mut self,
@@ -669,11 +782,21 @@ impl SimWorld {
             scenario.spawn(world, &registry.read());
         }
         crate::parametric::resolve(world, params)?;
+        attach_outputs(world);
         for plugin in &self.plugins {
             plugin.start(world)?;
         }
         crate::with_resource(world, |world, d: &mut Dynamics| {
-            d.start(world, &config.integrator, config.dt)
+            d.start(world, &config.integrator, config.contact, config.dt)
+        })?;
+        for plugin in &self.plugins {
+            plugin.after_setup(world)?;
+        }
+        crate::with_resource(world, |world, d: &mut Dynamics| {
+            d.contact_end_of_tick(world)
+        });
+        crate::with_resource(world, |world, pool: &mut FragmentPool| {
+            pool.start(world, config)
         })?;
 
         let n = world.resource::<Dynamics>().bodies().len();
@@ -685,9 +808,10 @@ impl SimWorld {
             stats.energy_initial = e0;
             stats.energy.push(e0);
         }
+        let parents = world.resource::<FragmentPool>().parent_count();
         world
             .resource_mut::<FlightRecorder>()
-            .ensure(config.recorder_frames as usize, n);
+            .ensure(config.recorder_frames as usize, n, parents);
         record_frame(world);
         let telemetry = *world.resource::<TelemetryConfig>();
         world.resource_mut::<TelemetryLog>().start(&telemetry, n);
@@ -744,6 +868,18 @@ impl SimWorld {
     /// The simulation clock.
     pub fn clock(&self) -> SimClock {
         *self.world.resource::<SimClock>()
+    }
+
+    /// The right-hand side of the equations of motion at the current state and time: every body's
+    /// state derivative with the net wrench behind it, and every force model's integrated states
+    /// with their rates. For trim, linearisation and check cases, outside a run's tick sequence:
+    /// each force model's `prepare` runs first (see `dynamics::derivatives`). Allocates.
+    ///
+    /// # Panics
+    /// If the World has not started.
+    pub fn derivatives(&mut self) -> crate::dynamics::Derivatives {
+        assert!(self.started, "SimWorld::derivatives before start");
+        crate::dynamics::derivatives(&mut self.world)
     }
 
     /// The state hash of the current state (verification §4.1).
@@ -814,6 +950,8 @@ impl SimWorld {
             } else {
                 Vec::new()
             },
+            fragments: self.world.resource::<FragmentPool>().totals(),
+            impacts: self.world.resource::<FragmentPool>().impacts().to_vec(),
         }
     }
 
