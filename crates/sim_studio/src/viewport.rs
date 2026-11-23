@@ -868,6 +868,9 @@ pub struct ViewSource {
     /// Where to ring a body in red (Crash Replay's NaN-origin highlight, §7.9): world-frame
     /// positions, each a flagged body's position or, once that is not finite, its last finite one.
     pub alarms: Vec<[f64; 3]>,
+    /// A ghost run's bodies at the same tick (Crash Replay), drawn as grey rings tied to their
+    /// counterparts.
+    pub ghosts: Vec<BodySnapshot>,
 }
 
 /// The viewport's state: camera, focus and what is shown (one per studio window).

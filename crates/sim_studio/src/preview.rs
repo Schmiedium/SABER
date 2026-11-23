@@ -24,6 +24,7 @@ use sim_verify::{
 };
 
 use crate::builder::requirements::describe_kind;
+use crate::rerun::SceneRef;
 
 /// Flight-recorder frames a preview keeps, for Crash Replay.
 pub const RECORDER_FRAMES: u32 = 600;
@@ -183,11 +184,17 @@ pub struct PreviewCrash {
     pub frame: Frame,
     /// The watchdog's energy bound, J, when set.
     pub energy_max_j: Option<f64>,
+    /// The scenario as the preview ran it (unsaved edits included) and its parameter values, so
+    /// Crash Replay can re-simulate it.
+    pub scene: SceneRef,
+    /// The parameter values it ran with, by key.
+    pub params: Vec<(String, f64)>,
 }
 
 /// One run of a scenario in the studio.
 pub struct PreviewRun {
     sim: SimWorld,
+    scenario: Arc<Scenario>,
     requirements: Option<Arc<RequirementSet>>,
     seed: RunSeed,
     params: ParamValues,
@@ -227,10 +234,12 @@ impl PreviewRun {
         }
         let mut sim = b.build().map_err(|e| e.to_string())?;
         let frame = scenario.frame();
-        sim.set_scenario(scenario).map_err(|e| e.to_string())?;
+        sim.set_scenario(scenario.clone())
+            .map_err(|e| e.to_string())?;
         sim.set_recorder_frames(RECORDER_FRAMES);
         let mut run = Self {
             sim,
+            scenario,
             requirements,
             seed,
             params,
@@ -583,6 +592,8 @@ impl PreviewRun {
                 .drain_chronological(),
             frame: self.frame,
             energy_max_j: self.sim.config().watchdog.energy_max_j,
+            scene: SceneRef(self.scenario.clone()),
+            params: self.params.iter().map(|(k, v)| (k.to_owned(), v)).collect(),
         })
     }
 }

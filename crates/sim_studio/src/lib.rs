@@ -20,6 +20,7 @@ pub mod crash;
 pub mod preview;
 pub mod recent;
 pub mod replay;
+pub mod rerun;
 pub mod state;
 pub mod ui;
 pub mod viewport;
@@ -66,6 +67,7 @@ impl Plugin for StudioCorePlugin {
             .init_resource::<viewport::ViewportState>()
             .init_resource::<viewport::ViewSource>()
             .init_resource::<replay::ReplayState>()
+            .init_resource::<replay::ReplayJobs>()
             .insert_resource(Recent::load(self.recent_path.clone()))
             .init_resource::<CurrentWorkspace>()
             .init_resource::<CurrentScenario>()
@@ -79,6 +81,7 @@ impl Plugin for StudioCorePlugin {
                     actions::save_layout,
                     actions::run_preview.run_if(in_state(AppState::LocalRun)),
                     actions::run_replay.run_if(in_state(AppState::CrashReplay)),
+                    actions::run_replay_jobs.run_if(in_state(AppState::CrashReplay)),
                 )
                     .chain(),
             );

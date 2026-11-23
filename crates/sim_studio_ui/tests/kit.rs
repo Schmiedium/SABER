@@ -252,7 +252,9 @@ fn plots_draw_a_series_across_the_image() {
 /// column marks one item of many, the first at the left edge and the last at the right.
 #[test]
 fn tracks_draw_levels_and_columns() {
-    use sim_studio_ui::plot::{PlotColors, column_of, draw_column, draw_in, draw_level, row_of};
+    use sim_studio_ui::plot::{
+        PlotColors, column_of, draw_column, draw_in, draw_level, draw_series, row_of,
+    };
     let colors = PlotColors {
         background: [0, 0, 0, 255],
         line: [255, 0, 0, 255],
@@ -293,6 +295,13 @@ fn tracks_draw_levels_and_columns() {
     assert_eq!(at(&px, 5, 2), colors.line);
     assert_eq!(at(&px, 5, h - 1), colors.line);
     draw_column(&mut px, w, h, w, 0..h, colors.line); // outside: nothing, no panic
+
+    // A second series over the same axes: time span and range given, not its own.
+    draw_in(&mut px, w, h, &low, Some(range), colors);
+    draw_series(&mut px, w, h, &[[1.0, 8.0]], (0.0, 1.0), range, colors.zero);
+    assert_eq!(at(&px, w - 1, row_of(8.0, h, range).unwrap()), colors.zero);
+    assert_eq!(at(&px, 0, row_of(1.0, h, range).unwrap()), colors.line);
+    draw_series(&mut px, w, h, &low, (0.0, 1.0), (1.0, 1.0), colors.zero); // no range: nothing
 
     // No range, or an empty one, leaves the background.
     draw_in(&mut px, w, h, &low, None, colors);

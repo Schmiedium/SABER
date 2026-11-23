@@ -20,7 +20,11 @@ use crate::clock;
 use crate::crash::OpenCrash;
 use crate::preview::{ParamChoice, PreviewCrash, PreviewRun, Speed, params_for, sweeps};
 use crate::recent::RecentList;
-use crate::replay::{FPS, Jump, Replay, ReplaySource, ReplayState, find_scenario};
+use crate::replay::{
+    FPS, Ghost, Jump, Replay, ReplayJobs, ReplaySource, ReplayState, Resimulated, Shown,
+    find_scenario, ghost_job, resim_job,
+};
+use crate::rerun::param_values;
 use crate::state::{AppState, Rail, RailContext, RailTarget};
 use crate::viewport::{FocusMode, ViewToggle, ViewportState};
 use crate::workspace::{Pack, Workspace, WorkspaceError};
@@ -171,6 +175,16 @@ pub enum StudioCommand {
     ReplayLoopTo,
     /// Play through to the end again instead of looping.
     ReplayLoopClear,
+    /// Re-simulate the replayed run from Tick 0 (G9; approximate on another build, D15).
+    ReplayResimulate,
+    /// Show the recorded frames or the re-simulation's.
+    ReplayShow(Shown),
+    /// Lay another replicate of the run's parameter row over it, this seed as typed.
+    ReplayGhost(String),
+    /// Remove the ghost run.
+    ReplayGhostOff,
+    /// Open the run's scenario in the Builder with its parameters and seed pinned for Preview.
+    ReplayOpenInBuilder,
 }
 
 /// The Preview Run screen (`sim_studio_ux.md` §7.5): the run and how it is driven.
@@ -186,6 +200,9 @@ pub struct PreviewState {
     pub speed: Speed,
     /// Whether it is running (else paused).
     pub playing: bool,
+    /// A recorded run's parameters, pinned from Crash Replay (Open in Builder): they replace
+    /// [`PreviewState::choice`] until a parameter choice is picked again.
+    pub pinned: Option<Pinned>,
 }
 
 impl Default for PreviewState {
@@ -196,8 +213,30 @@ impl Default for PreviewState {
             seed: 1,
             speed: Speed::RealTime,
             playing: false,
+            pinned: None,
         }
     }
+}
+
+impl PreviewState {
+    /// What the parameters are called in the toolbar and status line.
+    pub fn params_label(&self) -> String {
+        match &self.pinned {
+            Some(p) => p.label.clone(),
+            None => self.choice.label().to_owned(),
+        }
+    }
+}
+
+/// A recorded run's parameter row, pinned for Preview (`sim_studio_ux.md` §7.9 Open in Builder).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pinned {
+    /// What to call it: "run 9", "the crashed preview".
+    pub label: String,
+    /// Its parameter row, which seeds its random streams with the replicate seed.
+    pub param_set_id: u32,
+    /// Its parameter values, by key.
+    pub params: Vec<(String, f64)>,
 }
 
 /// A preview run that crashed, opened in Crash Replay from memory (§7.5).
@@ -356,6 +395,15 @@ fn opened(ws: Workspace, cx: &mut CommandCx, verb: &str) {
             "The open scenario does not load: {e}"
         )));
     }
+    open_docs(&ws, cx);
+    cx.workspace.0 = Some(ws);
+    cx.next.set(AppState::ScenarioBuilder);
+    cx.toasts
+        .write(Toast::success(format!("{verb} workspace {name}")));
+}
+
+/// Open the workspace's open scenario in the Builder, with its requirement set.
+fn open_docs(ws: &Workspace, cx: &mut CommandCx) {
     cx.doc.0 = match &ws.file.open_scenario {
         Some(rel) => match ScenarioDoc::open(&ws.root, rel) {
             Ok((doc, restored)) => {
@@ -394,10 +442,6 @@ fn opened(ws: Workspace, cx: &mut CommandCx, verb: &str) {
                 None
             }
         });
-    cx.workspace.0 = Some(ws);
-    cx.next.set(AppState::ScenarioBuilder);
-    cx.toasts
-        .write(Toast::success(format!("{verb} workspace {name}")));
 }
 
 fn save_workspace(ws: &Workspace, toasts: &mut MessageWriter<Toast>) {
@@ -427,6 +471,7 @@ pub struct CommandCx<'w> {
     view: ResMut<'w, ViewportState>,
     replay: ResMut<'w, ReplayState>,
     replay_changed: MessageWriter<'w, ReplayChanged>,
+    jobs: ResMut<'w, ReplayJobs>,
 }
 
 /// Carry out the user's commands.
@@ -505,6 +550,7 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                     cx.crash.0 = Some(crash);
                     cx.live_crash.0 = None;
                     cx.replay.replay = None;
+                    *cx.jobs = ReplayJobs::default();
                     if n == 1 {
                         open_dump(0, &mut cx);
                     }
@@ -578,6 +624,7 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             }
             StudioCommand::CloseDump => {
                 cx.replay.replay = None;
+                *cx.jobs = ReplayJobs::default();
                 cx.replay_changed.write(ReplayChanged);
             }
             StudioCommand::ReplaySeek(_)
@@ -590,6 +637,11 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             | StudioCommand::ReplayLoopFrom
             | StudioCommand::ReplayLoopTo
             | StudioCommand::ReplayLoopClear => replay_command(command, &mut cx),
+            StudioCommand::ReplayResimulate
+            | StudioCommand::ReplayShow(_)
+            | StudioCommand::ReplayGhost(_)
+            | StudioCommand::ReplayGhostOff => rerun_command(command, &mut cx),
+            StudioCommand::ReplayOpenInBuilder => open_in_builder(&mut cx),
             StudioCommand::Undo | StudioCommand::Redo if cx.req.tab == BuilderTab::Requirements => {
                 edit_requirements(command, &mut cx);
             }
@@ -841,13 +893,17 @@ fn build_preview(cx: &mut CommandCx) -> Result<PreviewRun, String> {
         Some(r) => Some(Arc::new(r.set().clone())),
         None => None,
     };
-    let params = params_for(cx.preview.choice, &sweeps(&scenario));
-    PreviewRun::new(
-        scenario,
-        requirements,
-        sim_core::RunSeed::new(0, cx.preview.seed),
-        params,
-    )
+    let (params, seed) = match &cx.preview.pinned {
+        Some(p) => (
+            param_values(&p.params),
+            sim_core::RunSeed::new(p.param_set_id, cx.preview.seed),
+        ),
+        None => (
+            params_for(cx.preview.choice, &sweeps(&scenario)),
+            sim_core::RunSeed::new(0, cx.preview.seed),
+        ),
+    };
+    PreviewRun::new(scenario, requirements, seed, params)
 }
 
 /// What a finished preview says: a crash opens Crash Replay from memory, anything else a toast
@@ -856,7 +912,7 @@ fn preview_ended(
     run: &PreviewRun,
     toasts: &mut MessageWriter<Toast>,
     live_crash: &mut LiveCrash,
-    replay: &mut ReplayState,
+    replay: (&mut ReplayState, &mut ReplayJobs),
     view: &mut ViewportState,
     next: &mut NextState<AppState>,
 ) {
@@ -879,7 +935,7 @@ fn preview_ended(
             "Crashed at tick {} ({status:?}){why}. Opened in Crash Replay.",
             crash.tick
         )));
-        show_replay(Replay::from_preview(&crash), replay, view);
+        show_replay(Replay::from_preview(&crash), replay.0, replay.1, view);
         live_crash.0 = Some(crash);
         next.set(AppState::CrashReplay);
         return;
@@ -923,6 +979,7 @@ fn preview_command(command: &StudioCommand, cx: &mut CommandCx) {
         }
         StudioCommand::PreviewParams(choice) => {
             cx.preview.choice = *choice;
+            cx.preview.pinned = None;
             rebuild(cx);
         }
         StudioCommand::PreviewSeed(text) => match text.trim().parse::<u64>() {
@@ -966,7 +1023,7 @@ fn preview_command(command: &StudioCommand, cx: &mut CommandCx) {
                             run,
                             &mut cx.toasts,
                             &mut cx.live_crash,
-                            &mut cx.replay,
+                            (&mut cx.replay, &mut cx.jobs),
                             &mut cx.view,
                             &mut cx.next,
                         );
@@ -1046,11 +1103,17 @@ fn open_dump(i: usize, cx: &mut CommandCx) {
         ));
     }
     let replay = Replay::from_dump(dump, &path, found);
-    show_replay(replay, &mut cx.replay, &mut cx.view);
+    show_replay(replay, &mut cx.replay, &mut cx.jobs, &mut cx.view);
 }
 
 /// Open `replay` at its crashed state with the camera on the body that caused it.
-fn show_replay(replay: Replay, state: &mut ReplayState, view: &mut ViewportState) {
+fn show_replay(
+    replay: Replay,
+    state: &mut ReplayState,
+    jobs: &mut ReplayJobs,
+    view: &mut ViewportState,
+) {
+    *jobs = ReplayJobs::default();
     // The oldest frame anchors the display frame: the crashed one may hold no finite position.
     let first = replay
         .frames
@@ -1136,6 +1199,228 @@ fn replay_command(command: &StudioCommand, cx: &mut CommandCx) {
     }
 }
 
+/// Crash Replay's re-simulation and ghost run (G9, D15).
+fn rerun_command(command: &StudioCommand, cx: &mut CommandCx) {
+    let Some(replay) = &cx.replay.replay else {
+        return;
+    };
+    match command {
+        StudioCommand::ReplayResimulate => {
+            if cx.jobs.resim.is_some() || replay.resim.is_some() {
+                return;
+            }
+            match resim_job(replay) {
+                Ok((stride, run)) => {
+                    cx.toasts.write(Toast::info(format!(
+                        "Re-simulating from Tick 0 to tick {}{}",
+                        run.last(),
+                        if replay.other_build {
+                            " on this build: approximate, since another build recorded it (D15)"
+                        } else {
+                            ""
+                        }
+                    )));
+                    cx.jobs.resim = Some((stride, run));
+                }
+                Err(e) => {
+                    cx.toasts
+                        .write(Toast::warning(format!("Cannot re-simulate: {e}")));
+                }
+            }
+        }
+        StudioCommand::ReplayShow(shown) => {
+            if !cx.replay.show(*shown) {
+                return;
+            }
+            restart_ghost(cx);
+        }
+        StudioCommand::ReplayGhost(text) => match text.trim().parse::<u64>() {
+            Ok(seed) => match ghost_job(replay, seed) {
+                Ok(run) => {
+                    cx.jobs.ghost = Some((seed, run));
+                    if let Some(r) = cx.replay.replay.as_mut() {
+                        r.ghost = None;
+                    }
+                }
+                Err(e) => {
+                    cx.toasts
+                        .write(Toast::warning(format!("Cannot run a ghost: {e}")));
+                }
+            },
+            Err(_) => {
+                cx.toasts.write(Toast::error(format!(
+                    "{text:?} is not a seed: a whole number from 0 to {}",
+                    u64::MAX
+                )));
+                return;
+            }
+        },
+        StudioCommand::ReplayGhostOff => {
+            cx.jobs.ghost = None;
+            if let Some(r) = cx.replay.replay.as_mut() {
+                r.ghost = None;
+            }
+        }
+        _ => return,
+    }
+    cx.replay_changed.write(ReplayChanged);
+}
+
+/// Run the ghost again at the ticks now shown, with the same seed.
+fn restart_ghost(cx: &mut CommandCx) {
+    let seed = cx
+        .jobs
+        .ghost
+        .as_ref()
+        .map(|(s, _)| *s)
+        .or_else(|| cx.replay.replay.as_ref()?.ghost.as_ref().map(|g| g.seed));
+    let (Some(seed), Some(replay)) = (seed, cx.replay.replay.as_mut()) else {
+        return;
+    };
+    replay.ghost = None;
+    cx.jobs.ghost = ghost_job(replay, seed).ok().map(|r| (seed, r));
+}
+
+/// Open the replayed run's scenario in the Builder with its parameters and seed pinned for
+/// Preview (`sim_studio_ux.md` §7.9 "Open in Builder at these params").
+fn open_in_builder(cx: &mut CommandCx) {
+    let Some(replay) = &cx.replay.replay else {
+        return;
+    };
+    let Some(source) = replay.rerun.clone() else {
+        cx.toasts.write(Toast::warning(
+            "No scenario here matches this run's scene_hash, so there is nothing to open",
+        ));
+        return;
+    };
+    let (rel, label) = match &replay.source {
+        ReplaySource::Preview => (
+            cx.doc.0.as_ref().map(|d| d.rel.clone()),
+            "the crashed preview".to_owned(),
+        ),
+        ReplaySource::Dump {
+            run_id, scenario, ..
+        } => (
+            scenario
+                .clone()
+                .filter(|r| r.starts_with("scenarios/") && cx.workspace.0.is_some()),
+            format!("run {run_id}"),
+        ),
+    };
+    let Some(rel) = rel else {
+        cx.toasts.write(Toast::warning(
+            "The run's scenario is not in the open workspace's scenarios/ folder: open that workspace, or copy the scenario there",
+        ));
+        return;
+    };
+    if cx.doc.0.as_ref().is_none_or(|d| d.rel != rel) {
+        if let Some(d) = cx.doc.0.as_ref().filter(|d| d.dirty()) {
+            cx.toasts.write(Toast::warning(format!(
+                "{} has unsaved edits: export or undo them before opening {rel}",
+                d.rel
+            )));
+            return;
+        }
+        let Some(mut ws) = cx.workspace.0.take() else {
+            return;
+        };
+        ws.file.open_scenario = Some(rel.clone());
+        save_workspace(&ws, &mut cx.toasts);
+        cx.scenario.0 = scenario_info(&ws);
+        open_docs(&ws, cx);
+        cx.workspace.0 = Some(ws);
+        cx.changed.write(DocChanged);
+    }
+    cx.preview.pinned = Some(Pinned {
+        label: label.clone(),
+        param_set_id: source.seed.param_set_id,
+        params: source.params,
+    });
+    cx.preview.seed = source.seed.replicate_seed;
+    cx.preview.run = None;
+    cx.preview.playing = false;
+    cx.next.set(AppState::ScenarioBuilder);
+    cx.toasts.write(Toast::success(format!(
+        "Opened {rel} in the Builder: Preview (F5) runs {label} with its parameters and seed"
+    )));
+}
+
+/// Step the replay's re-simulation and ghost a few milliseconds per frame; when one finishes,
+/// show it.
+pub fn run_replay_jobs(
+    mut jobs: ResMut<ReplayJobs>,
+    mut state: ResMut<ReplayState>,
+    mut toasts: MessageWriter<Toast>,
+    mut changed: MessageWriter<ReplayChanged>,
+) {
+    if jobs.resim.is_none() && jobs.ghost.is_none() {
+        return;
+    }
+    let budget = std::time::Duration::from_millis(12);
+    let jobs = &mut *jobs;
+    if let Some((_, run)) = jobs.resim.as_mut()
+        && run.advance(budget)
+        && let Some((stride, run)) = jobs.resim.take()
+        && let Some(replay) = state.replay.as_mut()
+    {
+        let tick = run.tick();
+        let status = run.status();
+        let frames = run.into_frames();
+        let check = crate::rerun::compare(replay.recorded(), &frames);
+        let approximate = replay.other_build;
+        let line = check.describe();
+        let exact = matches!(check, crate::rerun::Check::Exact { .. });
+        // A second re-simulation is refused, so the recorded frames are the ones shown here.
+        replay.other = frames;
+        replay.resim = Some(Resimulated {
+            check,
+            approximate,
+            stride,
+            status,
+            tick,
+        });
+        state.show(Shown::Resimulated);
+        toasts.write(if exact {
+            Toast::success(format!("Re-simulated from Tick 0: {line}"))
+        } else if approximate {
+            Toast::info(format!("Re-run on this build (approximate, D15): {line}"))
+        } else {
+            Toast::warning(format!(
+                "Re-simulated from Tick 0, but it {line}: this build does not reproduce the recording"
+            ))
+        });
+        if let Some(replay) = state.replay.as_ref()
+            && let Some(seed) = jobs
+                .ghost
+                .as_ref()
+                .map(|(s, _)| *s)
+                .or_else(|| replay.ghost.as_ref().map(|g| g.seed))
+        {
+            jobs.ghost = ghost_job(replay, seed).ok().map(|r| (seed, r));
+        }
+        changed.write(ReplayChanged);
+    }
+    if let Some((_, run)) = jobs.ghost.as_mut()
+        && run.advance(budget)
+        && let Some((seed, run)) = jobs.ghost.take()
+        && let Some(replay) = state.replay.as_mut()
+    {
+        let status = run.status();
+        if let Some(s) = status.filter(|s| s.is_crash()) {
+            toasts.write(Toast::warning(format!(
+                "The ghost (seed {seed}) crashed too: {s:?} at tick {}",
+                run.tick()
+            )));
+        }
+        replay.ghost = Some(Ghost {
+            seed,
+            frames: run.into_frames(),
+            status,
+        });
+        changed.write(ReplayChanged);
+    }
+}
+
 /// The viewport's keys in Preview Run (`sim_studio_ux.md` §9.6): F frames the focus target (or
 /// the first body), Shift+F follows it, H shows or hides the HUD, Esc frees the camera.
 pub fn viewport_keys(
@@ -1186,6 +1471,7 @@ pub fn run_preview(
     mut preview: ResMut<PreviewState>,
     mut live_crash: ResMut<LiveCrash>,
     mut replay: ResMut<ReplayState>,
+    mut jobs: ResMut<ReplayJobs>,
     mut view: ResMut<ViewportState>,
     mut next: ResMut<NextState<AppState>>,
     mut toasts: MessageWriter<Toast>,
@@ -1207,7 +1493,7 @@ pub fn run_preview(
             run,
             &mut toasts,
             &mut live_crash,
-            &mut replay,
+            (&mut replay, &mut jobs),
             &mut view,
             &mut next,
         );

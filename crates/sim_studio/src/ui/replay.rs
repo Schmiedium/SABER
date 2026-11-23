@@ -5,13 +5,13 @@
 //! [`ReplayChanged`]; the texts and tracks are rewritten in place when the playhead moves.
 
 use bevy::prelude::*;
-use bevy::scene::bsn;
+use bevy::scene::{CommandsSceneExt, bsn};
 use bevy::ui::UiGlobalTransform;
-use sim_schema::BodySnapshot;
+use sim_schema::{BodySnapshot, TickFrame};
 use sim_studio_ui::dock::DockRegion;
 use sim_studio_ui::plot::{
-    PlotColors, column_of, draw_column, draw_in, draw_level, plot_image, row_of, spawn_plot,
-    value_range,
+    PlotColors, column_of, draw_column, draw_in, draw_level, draw_series, plot_image, row_of,
+    spawn_plot, value_range,
 };
 use sim_studio_ui::prelude::*;
 
@@ -19,9 +19,16 @@ use super::builder::RegionBody;
 use super::{action, child};
 use crate::actions::{CurrentCrash, ReplayChanged, StudioCommand};
 use crate::replay::{
-    FPS, Jump, Replay, ReplaySource, ReplayState, energy_track, entity_order, events, finite_body,
-    flag_words, frame_at, growth,
+    FPS, Jump, Replay, ReplayJobs, ReplaySource, ReplayState, Shown, energy_track, entity_order,
+    events, finite_body, flag_words, frame_at, growth,
 };
+use crate::rerun::Check;
+
+/// Crash Replay's text fields, by id.
+pub mod replay_field {
+    /// The ghost run's replicate seed.
+    pub const GHOST: &str = "replay.ghost";
+}
 use crate::state::AppState;
 use crate::viewport::ViewportState;
 
@@ -38,6 +45,8 @@ pub enum ReplayLive {
     Growth,
     /// The viewport's focus.
     Focus,
+    /// The re-simulation's and the ghost's progress while they run.
+    Jobs,
 }
 
 /// What a track under the timeline draws.
@@ -88,6 +97,8 @@ pub struct TrackColors {
     pub clamped: [u8; 4],
     /// A frame with a non-finite value.
     pub bad: [u8; 4],
+    /// The ghost run's energy.
+    pub ghost: [u8; 4],
 }
 
 /// The tracks' colors in a theme (the §10.1 status colors).
@@ -104,6 +115,7 @@ pub fn track_colors(mode: ThemeMode) -> TrackColors {
             contact: [0x4C, 0x9A, 0xFF, 0xFF],
             clamped: [0xD2, 0x99, 0x22, 0xFF],
             bad: [0xF8, 0x51, 0x49, 0xFF],
+            ghost: [0x8B, 0x94, 0x9E, 0xFF],
         },
         ThemeMode::Light => TrackColors {
             plot: PlotColors {
@@ -116,6 +128,7 @@ pub fn track_colors(mode: ThemeMode) -> TrackColors {
             contact: [0x1F, 0x6F, 0xEB, 0xFF],
             clamped: [0x9A, 0x67, 0x00, 0xFF],
             bad: [0xCF, 0x22, 0x2E, 0xFF],
+            ghost: [0x6E, 0x77, 0x81, 0xFF],
         },
     }
 }
@@ -136,6 +149,8 @@ fn wrap_row() -> impl bevy::scene::Scene {
 pub struct ReplayInputs<'a> {
     /// The open replay and playhead.
     pub replay: &'a ReplayState,
+    /// Its re-simulation and ghost while they run.
+    pub jobs: &'a ReplayJobs,
     /// The open crash stream, for its index.
     pub crash: &'a CurrentCrash,
     /// The viewport.
@@ -331,6 +346,8 @@ fn center(
         );
     }
 
+    rerun_rows(commands, body, inputs, replay);
+
     let ids: Vec<u32> = replay
         .frames
         .last()
@@ -442,6 +459,116 @@ fn center(
     );
 }
 
+/// Re-simulation, ghost run and Open in Builder (G9, D15).
+fn rerun_rows(commands: &mut Commands, body: Entity, inputs: &ReplayInputs, replay: &Replay) {
+    let r = child(commands, body, wrap_row());
+    child(commands, r, muted("Re-simulate"));
+    match (&replay.rerun, &replay.resim) {
+        (None, _) => {
+            child(
+                commands,
+                r,
+                muted("needs the run's scenario: none here matches its scene_hash"),
+            );
+        }
+        (Some(_), None) if inputs.jobs.resim.is_some() => {}
+        (Some(_), None) => {
+            let text = if replay.other_build {
+                "Re-run on this build (approximate)"
+            } else {
+                "Re-simulate from Tick 0"
+            };
+            action(commands, r, button(text), StudioCommand::ReplayResimulate);
+        }
+        (_, Some(res)) => {
+            let ok = matches!(res.check, Check::Exact { .. });
+            let what = if res.approximate {
+                "Re-run on this build, approximate (D15)"
+            } else {
+                "Re-simulated from Tick 0"
+            };
+            let thin = if res.stride > 1 {
+                format!(", a frame every {} ticks before the recording", res.stride)
+            } else {
+                String::new()
+            };
+            let line = format!("{what}{thin}: {}", res.check.describe());
+            let status = if ok { Status::Pass } else { Status::Warning };
+            child(commands, r, status_text(status, line));
+            let (text, shown) = match replay.shown {
+                Shown::Resimulated => ("Show recorded frames", Shown::Recorded),
+                Shown::Recorded => ("Show re-simulated frames", Shown::Resimulated),
+            };
+            action(
+                commands,
+                r,
+                plain_button(text),
+                StudioCommand::ReplayShow(shown),
+            );
+        }
+    }
+    let j = child(commands, body, muted(""));
+    commands.entity(j).insert(ReplayLive::Jobs);
+    let Some(source) = &replay.rerun else {
+        return;
+    };
+
+    let r = child(commands, body, wrap_row());
+    child(commands, r, muted("Ghost seed"));
+    let seed = replay
+        .ghost
+        .as_ref()
+        .map(|g| g.seed)
+        .or_else(|| inputs.jobs.ghost.as_ref().map(|(s, _)| *s))
+        .unwrap_or_else(|| source.seed.replicate_seed.wrapping_add(1));
+    child(
+        commands,
+        r,
+        text_field(replay_field::GHOST, seed.to_string(), "Ghost seed"),
+    );
+    commands
+        .spawn_scene(button("Run ghost"))
+        .insert(ChildOf(r))
+        .observe(
+            |_: On<KitActivated>, fields: Fields, mut out: MessageWriter<StudioCommand>| {
+                out.write(StudioCommand::ReplayGhost(
+                    fields.get(replay_field::GHOST).unwrap_or_default(),
+                ));
+            },
+        );
+    if replay.ghost.is_some() || inputs.jobs.ghost.is_some() {
+        action(
+            commands,
+            r,
+            plain_button("Hide ghost"),
+            StudioCommand::ReplayGhostOff,
+        );
+    }
+    if let Some(g) = &replay.ghost {
+        let ended = match g.status {
+            Some(s) => format!(
+                "; it ended {s:?} at tick {}",
+                g.frames.last().map_or(0, |f| f.tick)
+            ),
+            None => String::new(),
+        };
+        child(
+            commands,
+            body,
+            muted(format!(
+                "Ghost: parameter row {}, seed {}: grey rings in the view, grey line in the energy track{ended}.",
+                source.seed.param_set_id, g.seed
+            )),
+        );
+    }
+    action(
+        commands,
+        body,
+        plain_button("Open in Builder at these params"),
+        StudioCommand::ReplayOpenInBuilder,
+    );
+}
+
 fn track(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -523,7 +650,34 @@ pub fn draw_track(
                 let pad = (hi - lo) * 0.05;
                 range = Some((lo - pad, hi + pad));
             }
+            let ghost: Vec<[f64; 2]> = replay
+                .ghost
+                .as_ref()
+                .map(|g| {
+                    replay
+                        .frames
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, f)| {
+                            let e = g.at(f.tick)?.total_energy;
+                            let v = if state.log_energy {
+                                e.signum() * e.abs().ln_1p() / std::f64::consts::LN_10
+                            } else {
+                                e
+                            };
+                            Some([i as f64, v])
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let (Some((lo, hi)), Some((glo, ghi))) = (range, value_range(&ghost)) {
+                range = Some((lo.min(glo), hi.max(ghi)));
+            }
             draw_in(pixels, TRACK_W, height, &samples, range, colors.plot);
+            if let Some(range) = range {
+                let span = (0.0, n.saturating_sub(1) as f64);
+                draw_series(pixels, TRACK_W, height, &ghost, span, range, colors.ghost);
+            }
             if let (Some(range), Some(b)) = (range, bound)
                 && let Some(y) = row_of(b, height, range)
             {
@@ -617,8 +771,32 @@ fn snapshot(b: &BodySnapshot, before: Option<&BodySnapshot>) -> String {
     lines.join("\n")
 }
 
+/// The ghost's lines in the snapshot: where the same body is in the ghost run at this tick.
+fn ghost_lines(b: &BodySnapshot, ghost: Option<&TickFrame>) -> String {
+    match ghost.and_then(|f| f.bodies.iter().find(|x| x.sim_id == b.sim_id)) {
+        Some(g) => {
+            let d = [
+                b.pos[0] - g.pos[0],
+                b.pos[1] - g.pos[1],
+                b.pos[2] - g.pos[2],
+            ];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            format!("\nghost   {} m\n|Δghost| {} m", vec3(g.pos), num(dist))
+        }
+        None => "\nghost   no frame at this tick".to_owned(),
+    }
+}
+
 /// What a replay text says now.
-pub fn live_text(kind: ReplayLive, state: &ReplayState, view: &ViewportState) -> String {
+pub fn live_text(
+    kind: ReplayLive,
+    state: &ReplayState,
+    jobs: &ReplayJobs,
+    view: &ViewportState,
+) -> String {
+    if kind == ReplayLive::Jobs {
+        return jobs.progress();
+    }
     let (Some(replay), Some(frame)) = (&state.replay, state.frame()) else {
         return String::new();
     };
@@ -629,8 +807,12 @@ pub fn live_text(kind: ReplayLive, state: &ReplayState, view: &ViewportState) ->
                 Some((a, b)) => format!(" · loop frames {}–{}", a + 1, b + 1),
                 None => String::new(),
             };
+            let which = match replay.shown {
+                Shown::Recorded => "",
+                Shown::Resimulated => " re-simulated",
+            };
             format!(
-                "tick {} · frame {} of {} · t = {:.6} s · energy {:.6e} J{}{looped}",
+                "tick {} · frame {} of {}{which} · t = {:.6} s · energy {:.6e} J{}{looped}",
                 frame.tick,
                 i + 1,
                 replay.frames.len(),
@@ -667,6 +849,9 @@ pub fn live_text(kind: ReplayLive, state: &ReplayState, view: &ViewportState) ->
                     if !finite_body(b) {
                         s.push_str("\nNot finite at this frame.");
                     }
+                    if let Some(g) = &replay.ghost {
+                        s.push_str(&ghost_lines(b, g.at(frame.tick)));
+                    }
                     s
                 }
                 None => format!("#{id} is not in this frame."),
@@ -701,25 +886,35 @@ pub fn live_text(kind: ReplayLive, state: &ReplayState, view: &ViewportState) ->
                 .join("\n")
         }
         ReplayLive::Focus => super::viewport::focus_text(view),
+        ReplayLive::Jobs => jobs.progress(),
     }
 }
 
 /// Rewrite the texts and redraw the tracks when the playhead or the view moved.
+#[allow(clippy::too_many_arguments)] // a Bevy system: one parameter per resource it reads
 pub fn display(
     replay: Res<ReplayState>,
+    jobs: Res<ReplayJobs>,
     view: Res<ViewportState>,
     theme: Res<StudioTheme>,
     mut texts: Query<(&ReplayLive, &mut Text)>,
     mut tracks: Query<&mut ReplayTrack>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let fresh =
-        texts.iter().any(|(_, t)| t.0.is_empty()) || tracks.iter().any(|t| t.drawn.is_none());
-    if !(replay.is_changed() || view.is_changed() || theme.is_changed() || fresh) {
+    let fresh = texts
+        .iter()
+        .any(|(k, t)| t.0.is_empty() && *k != ReplayLive::Jobs)
+        || tracks.iter().any(|t| t.drawn.is_none());
+    if !(replay.is_changed()
+        || jobs.is_changed()
+        || view.is_changed()
+        || theme.is_changed()
+        || fresh)
+    {
         return;
     }
     for (kind, mut text) in &mut texts {
-        let t = live_text(*kind, &replay, &view);
+        let t = live_text(*kind, &replay, &jobs, &view);
         if text.0 != t {
             text.0 = t;
         }
@@ -749,6 +944,7 @@ pub fn refresh(
     mut commands: Commands,
     state: Res<State<AppState>>,
     replay: Res<ReplayState>,
+    jobs: Res<ReplayJobs>,
     crash: Res<CurrentCrash>,
     theme: Res<StudioTheme>,
     log: Res<ToastLog>,
@@ -762,6 +958,7 @@ pub fn refresh(
     }
     let inputs = ReplayInputs {
         replay: &replay,
+        jobs: &jobs,
         crash: &crash,
         view: &view,
         camera: camera.as_ref().map(|c| c.0),

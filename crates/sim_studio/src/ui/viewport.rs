@@ -438,6 +438,25 @@ pub fn draw_bodies(
             fail,
         );
     }
+    let muted = colors.color(&token::FG_MUTED);
+    for g in &source.ghosts {
+        let p = frame.position(g.pos);
+        if !p.is_finite() {
+            continue;
+        }
+        let r = 1.5 * marker_radius(projection.pixel_size_at(p));
+        gizmos.sphere(
+            Isometry3d::from_translation(to_render(p, origin)),
+            r as f32,
+            muted,
+        );
+        if let Some(b) = bodies.iter().find(|b| b.sim_id == g.sim_id) {
+            let q = frame.position(b.pos);
+            if q.is_finite() {
+                gizmos.line(to_render(q, origin), to_render(p, origin), muted);
+            }
+        }
+    }
     if !view.gizmos {
         return;
     }
@@ -617,6 +636,7 @@ pub fn preview_source(preview: Res<PreviewState>, mut source: ResMut<ViewSource>
         state,
         moving,
         alarms: Vec::new(),
+        ghosts: Vec::new(),
     };
 }
 
@@ -628,17 +648,33 @@ pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
         }
         return;
     };
+    let resim = replay
+        .replay
+        .as_ref()
+        .is_some_and(|r| r.shown == crate::replay::Shown::Resimulated);
     let state = format!(
-        "frame {} of {}{}",
+        "frame {} of {}{}{}",
         replay.scrub.index + 1,
         replay.len(),
+        if resim { " re-simulated" } else { "" },
         if replay.scrub.playing {
             ", playing"
         } else {
             ""
         }
     );
-    if source.tick == frame.tick && source.state == state && !source.bodies.is_empty() {
+    let ghosts = replay
+        .replay
+        .as_ref()
+        .and_then(|r| r.ghost.as_ref())
+        .and_then(|g| g.at(frame.tick))
+        .map(|f| f.bodies.clone())
+        .unwrap_or_default();
+    if source.tick == frame.tick
+        && source.state == state
+        && !source.bodies.is_empty()
+        && source.ghosts.len() == ghosts.len()
+    {
         return;
     }
     let shown = replay
@@ -658,5 +694,6 @@ pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
         state,
         moving: false,
         alarms,
+        ghosts,
     };
 }

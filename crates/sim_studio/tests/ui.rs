@@ -20,7 +20,10 @@ use sim_studio::actions::{
 };
 use sim_studio::builder::ReqItem;
 use sim_studio::preview::{ParamChoice, Speed};
-use sim_studio::replay::{Jump, ReplaySource, ReplayState, finite_body, last_finite_position};
+use sim_studio::replay::{
+    Jump, ReplayJobs, ReplaySource, ReplayState, finite_body, last_finite_position,
+};
+use sim_studio::rerun::Check;
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
@@ -733,8 +736,39 @@ fn the_preview_runs_steps_plots_and_stops() {
     assert_eq!(replay(&app).log_energy, log);
     assert_eq!(count::<ReplayTrack>(&mut app), 2, "laid out again, once");
     labelled(&mut app, "Replay (P)");
-    press(&mut app, "Scenario Builder (B)");
+
+    // Re-simulate it from Tick 0: the same frames, bit for bit; lay a ghost over it.
+    press(&mut app, "Re-simulate from Tick 0");
+    until(&mut app, 2_000, |app| {
+        app.world().resource::<ReplayJobs>().resim.is_none()
+            && replay(app).replay.as_ref().unwrap().resim.is_some()
+    });
+    let r = replay(&app);
+    let res = r.replay.as_ref().unwrap().resim.clone().unwrap();
+    assert!(matches!(res.check, Check::Exact { .. }), "{:?}", res.check);
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(position.contains("re-simulated"), "{position}");
+    press(&mut app, "Show recorded frames");
+    press(&mut app, "Show re-simulated frames");
+    press(&mut app, "Run ghost");
+    until(&mut app, 2_000, |app| {
+        replay(app).replay.as_ref().unwrap().ghost.is_some()
+    });
+    let snapshot = live_replay(&mut app, ReplayLive::Snapshot);
+    assert!(snapshot.contains("ghost"), "{snapshot}");
+    press(&mut app, "Hide ghost");
+    assert!(replay(&app).replay.as_ref().unwrap().ghost.is_none());
+
+    // Open in Builder pins the crashed preview's parameters and seed.
+    press(&mut app, "Open in Builder at these params");
     assert_eq!(state(&app), AppState::ScenarioBuilder);
+    assert!(preview(&app).pinned.is_some());
+    let note = {
+        let mut q = app.world_mut().query::<&Text>();
+        q.iter(app.world())
+            .any(|t| t.0 == "Preview runs the crashed preview (seed 43)")
+    };
+    assert!(note, "the title bar says what F5 runs");
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
 

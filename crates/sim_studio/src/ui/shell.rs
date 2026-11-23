@@ -110,8 +110,9 @@ pub fn spawn_for(
     Res<CurrentCrash>,
     Res<LiveCrash>,
     Res<BuilderDoc>,
+    Res<PreviewState>,
 ) {
-    move |mut commands, workspace, scenario, crash, live_crash, doc| {
+    move |mut commands, workspace, scenario, crash, live_crash, doc, preview| {
         let root = commands
             .spawn_scene(screen())
             .insert(DespawnOnExit(state))
@@ -143,6 +144,13 @@ pub fn spawn_for(
         if state == AppState::ScenarioBuilder && doc.0.is_some() {
             for (text, command) in [("Undo", StudioCommand::Undo), ("Redo", StudioCommand::Redo)] {
                 action(&mut commands, title_bar, plain_button(text), command);
+            }
+            if let Some(p) = &preview.pinned {
+                child(
+                    &mut commands,
+                    title_bar,
+                    muted(format!("Preview runs {} (seed {})", p.label, preview.seed)),
+                );
             }
             action(
                 &mut commands,
@@ -247,6 +255,7 @@ pub fn fill_regions(
     parents: Query<&ChildOf>,
     crash: Res<CurrentCrash>,
     replay: Res<crate::replay::ReplayState>,
+    jobs: Res<crate::replay::ReplayJobs>,
     scenario: Res<CurrentScenario>,
     log: Res<ToastLog>,
     docs: Res<BuilderDoc>,
@@ -296,6 +305,7 @@ pub fn fill_regions(
             if *state == AppState::CrashReplay {
                 let inputs = super::replay::ReplayInputs {
                     replay: &replay,
+                    jobs: &jobs,
                     crash: &crash,
                     view: &view,
                     camera: camera.as_ref().map(|c| c.0),
