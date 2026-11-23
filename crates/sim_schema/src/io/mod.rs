@@ -765,6 +765,46 @@ fn check_footer<R: ChunkReader + 'static>(
     Ok((header, dynamic, metadata))
 }
 
+/// A part file's name: `node_{rank}_a{attempt}_p{part}_{table}` (IB-07), as
+/// `(rank, attempt, part, rest)`; `rest` keeps any `.tmp` or `.partial` suffix.
+pub fn parse_part_name(name: &str) -> Option<(u32, u16, u32, &str)> {
+    let rest = name.strip_prefix("node_")?;
+    let (rank, rest) = rest.split_once("_a")?;
+    let (attempt, rest) = rest.split_once("_p")?;
+    let (part, table) = rest.split_once('_')?;
+    Some((
+        rank.parse().ok()?,
+        attempt.parse().ok()?,
+        part.parse().ok()?,
+        table,
+    ))
+}
+
+/// The committed files of `table` in a campaign's shared output folder, by attempt, rank and
+/// part: a part counts once its summaries file is there under its final name (IB-07), so `.tmp`
+/// and `.partial` files, and the other files of a part whose summaries never committed, are left
+/// out. An unreadable folder has none.
+pub fn committed_parts(dir: &std::path::Path, table: Table) -> Vec<std::path::PathBuf> {
+    let summaries = format!("{}.parquet", Table::Summaries.name());
+    let wanted = format!("{}.parquet", table.name());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut parts: Vec<((u16, u32, u32), std::path::PathBuf)> = entries
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            let (rank, attempt, part, rest) = parse_part_name(&name)?;
+            (rest == summaries).then(|| {
+                let stem = format!("node_{rank}_a{attempt}_p{part}_");
+                ((attempt, rank, part), dir.join(format!("{stem}{wanted}")))
+            })
+        })
+        .filter(|(_, p)| p.is_file())
+        .collect();
+    parts.sort();
+    parts.into_iter().map(|(_, p)| p).collect()
+}
+
 /// Read a SABER Parquet file held in memory (a manifest broadcast to every rank, IB-05).
 pub fn read_parquet_bytes(bytes: Vec<u8>, table: Table) -> Result<TableFile, TableError> {
     read_parquet(bytes::Bytes::from(bytes), table)

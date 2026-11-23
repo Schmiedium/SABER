@@ -1,5 +1,6 @@
 //! The Launcher (`sim_studio_ux.md` §7.1): recent workspaces, starting a new one from a domain
-//! pack, recent campaigns, and opening a workspace, crash dump or campaign folder by path.
+//! pack, recent campaigns (with their runs in Run Replay), and opening a workspace, crash dump or
+//! campaign folder by path.
 //!
 //! Paths are typed (or pasted) into a field: a native file dialog is a later addition.
 
@@ -199,6 +200,12 @@ pub fn spawn(mut commands: Commands, recent: Res<Recent>, campaigns: Res<Launche
                     ),
                     StudioCommand::OpenCampaign(c.dir.clone()),
                 );
+                action(
+                    &mut commands,
+                    camp_panel,
+                    plain_button(format!("Replay a run of {}", c.id)),
+                    StudioCommand::OpenRuns(c.dir.clone()),
+                );
             }
             Err((dir, e)) => {
                 let r = child(&mut commands, camp_panel, row());
@@ -227,10 +234,11 @@ pub fn spawn(mut commands: Commands, recent: Res<Recent>, campaigns: Res<Launche
     );
     let buttons = child(&mut commands, open_panel, row());
     type Make = fn(PathBuf) -> StudioCommand;
-    let opens: [(&str, Make); 3] = [
+    let opens: [(&str, Make); 4] = [
         ("Open workspace", StudioCommand::OpenWorkspace),
         ("Open crash dump", StudioCommand::OpenCrash),
         ("Open campaign folder", StudioCommand::OpenCampaign),
+        ("Replay a campaign's runs", StudioCommand::OpenRuns),
     ];
     for (text, make) in opens {
         commands

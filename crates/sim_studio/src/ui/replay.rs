@@ -1,13 +1,15 @@
-//! Crash Replay's panels (`sim_studio_ux.md` §7.9) in the shell's dock: the entities at the
-//! frame shown on the left; the 3D viewport, the transport, the jumps and the energy and events
-//! tracks in the center; the selected body's snapshot and the growth inspector on the right.
-//! Without an open replay the center lists a crash stream's dumps. The layout is rebuilt on
+//! Crash Replay's and Run Replay's panels (`sim_studio_ux.md` §7.9) in the shell's dock: the
+//! entities at the frame shown on the left; the 3D viewport, the transport, the jumps and the
+//! energy and events tracks in the center; the selected body's snapshot and the growth inspector
+//! (a crash), or the run's verdicts and metrics (a campaign run), on the right. Without an open
+//! replay the center lists a crash stream's dumps, or a campaign's runs. The layout is rebuilt on
 //! [`ReplayChanged`]; the texts and tracks are rewritten in place when the playhead moves.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::scene::{CommandsSceneExt, bsn};
 use bevy::ui::UiGlobalTransform;
-use sim_schema::{BodySnapshot, TickFrame};
+use sim_schema::{BodySnapshot, TickFrame, Verdict};
 use sim_studio_ui::dock::DockRegion;
 use sim_studio_ui::plot::{
     PlotColors, column_of, draw_column, draw_in, draw_level, draw_series, plot_image, row_of,
@@ -17,10 +19,10 @@ use sim_studio_ui::prelude::*;
 
 use super::builder::RegionBody;
 use super::{action, child};
-use crate::actions::{CurrentCrash, ReplayChanged, StudioCommand};
+use crate::actions::{CurrentCrash, CurrentRuns, ReplayChanged, StudioCommand};
 use crate::replay::{
     FPS, Jump, Replay, ReplayJobs, ReplaySource, ReplayState, Shown, energy_track, entity_order,
-    events, finite_body, flag_words, frame_at, growth,
+    events, finite_kept, flag_words, frame_at, growth,
 };
 use crate::rerun::Check;
 
@@ -144,7 +146,20 @@ fn wrap_row() -> impl bevy::scene::Scene {
     }
 }
 
-/// What Crash Replay's panels are built from.
+/// The replay resources a system reads to lay the replay screens out.
+#[derive(SystemParam)]
+pub struct ReplayRes<'w> {
+    /// The open replay and playhead.
+    pub replay: Res<'w, ReplayState>,
+    /// Its re-simulation and ghost while they run.
+    pub jobs: Res<'w, ReplayJobs>,
+    /// The open crash stream.
+    pub crash: Res<'w, CurrentCrash>,
+    /// The campaign whose runs are listed.
+    pub runs: Res<'w, CurrentRuns>,
+}
+
+/// What Crash Replay's and Run Replay's panels are built from.
 #[derive(Clone, Copy)]
 pub struct ReplayInputs<'a> {
     /// The open replay and playhead.
@@ -153,6 +168,10 @@ pub struct ReplayInputs<'a> {
     pub jobs: &'a ReplayJobs,
     /// The open crash stream, for its index.
     pub crash: &'a CurrentCrash,
+    /// The campaign whose runs are listed, for Run Replay's index.
+    pub runs: &'a CurrentRuns,
+    /// Laying out Run Replay (a campaign run) rather than Crash Replay.
+    pub run_screen: bool,
     /// The viewport.
     pub view: &'a ViewportState,
     /// The camera rendering the viewport, once spawned.
@@ -163,7 +182,8 @@ pub struct ReplayInputs<'a> {
     pub log: &'a ToastLog,
 }
 
-/// Fill one dock region of Crash Replay.
+/// Fill one dock region of Crash Replay or Run Replay. Each screen shows the open replay when it
+/// is of its kind (a crash, or a campaign run), and its list otherwise.
 pub fn fill(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -171,17 +191,32 @@ pub fn fill(
     kind: DockRegion,
     inputs: &ReplayInputs,
 ) {
-    let Some(replay) = &inputs.replay.replay else {
+    let open = inputs
+        .replay
+        .replay
+        .as_ref()
+        .filter(|r| r.is_run() == inputs.run_screen);
+    let Some(replay) = open else {
+        let what = if inputs.run_screen { "a run" } else { "a dump" };
         match kind {
+            DockRegion::Center if inputs.run_screen => run_index(commands, body, inputs.runs),
             DockRegion::Center => index(commands, body, inputs.crash),
             DockRegion::Bottom => super::shell::console(commands, body, inputs.log),
             DockRegion::Left => {
                 child(commands, body, heading("Entities"));
-                child(commands, body, muted("Open a dump to see its bodies."));
+                child(
+                    commands,
+                    body,
+                    muted(format!("Open {what} to see its bodies.")),
+                );
             }
             DockRegion::Right => {
                 child(commands, body, heading("Snapshot"));
-                child(commands, body, muted("Open a dump to inspect a body."));
+                child(
+                    commands,
+                    body,
+                    muted(format!("Open {what} to inspect a body.")),
+                );
             }
         }
         return;
@@ -189,6 +224,7 @@ pub fn fill(
     match kind {
         DockRegion::Left => entities(commands, body, inputs.replay, replay),
         DockRegion::Center => center(commands, images, body, inputs, replay),
+        DockRegion::Right if replay.is_run() => run_right(commands, body, replay),
         DockRegion::Right => {
             child(commands, body, heading("Snapshot"));
             let t = child(commands, body, mono(""));
@@ -212,6 +248,127 @@ pub fn fill(
             );
         }
         DockRegion::Bottom => super::shell::console(commands, body, inputs.log),
+    }
+}
+
+/// Run Replay's right dock: the selected body at the frame shown, then the run's verdicts and
+/// metrics from its summary row.
+fn run_right(commands: &mut Commands, body: Entity, replay: &Replay) {
+    child(commands, body, heading("Snapshot"));
+    let t = child(commands, body, mono(""));
+    commands.entity(t).insert(ReplayLive::Snapshot);
+    let note = if replay.full_frames() {
+        "Re-simulated, in the scenario's world frame. Δpos: moved since the frame before."
+    } else {
+        "As sampled, in the scenario's world frame: snapshots keep no force or flags. Δpos: moved since the snapshot before."
+    };
+    child(commands, body, muted(note));
+    child(commands, body, heading("Requirements"));
+    if replay.verdicts.is_empty() {
+        child(
+            commands,
+            body,
+            muted("The campaign judged no requirements."),
+        );
+    }
+    for (id, v) in &replay.verdicts {
+        let status = match v {
+            Verdict::Pass => Status::Pass,
+            Verdict::Fail => Status::Fail,
+            Verdict::Inconclusive => Status::Warning,
+        };
+        child(commands, body, status_text(status, format!("{id}: {v:?}")));
+    }
+    if !replay.metrics.is_empty() {
+        child(commands, body, heading("Metrics"));
+        let lines: Vec<String> = replay
+            .metrics
+            .iter()
+            .map(|(k, v)| format!("{k:<16} {}", num(*v)))
+            .collect();
+        child(commands, body, mono(lines.join("\n")));
+    }
+    child(
+        commands,
+        body,
+        muted("From the run's summary row, as the campaign judged it."),
+    );
+}
+
+/// A campaign's committed runs, each with an Open button.
+fn run_index(commands: &mut Commands, body: Entity, runs: &CurrentRuns) {
+    child(commands, body, title("Run Replay"));
+    let Some(c) = &runs.0 else {
+        child(
+            commands,
+            body,
+            muted(
+                "Open a campaign's runs from the Launcher: Runs on a recent campaign, or a campaign output folder by path.",
+            ),
+        );
+        return;
+    };
+    let counts: Vec<String> = c
+        .counts()
+        .iter()
+        .map(|(s, n)| format!("{n} {s:?}"))
+        .collect();
+    let build = if c.header.build_id.is_empty() {
+        "unknown"
+    } else {
+        &c.header.build_id
+    };
+    child(
+        commands,
+        body,
+        label(format!(
+            "{} committed run{} · campaign {} · build {build}",
+            c.runs.len(),
+            if c.runs.len() == 1 { "" } else { "s" },
+            c.campaign_id(),
+        )),
+    );
+    child(
+        commands,
+        body,
+        muted(format!("{} · from {}", counts.join(" · "), c.dir.display())),
+    );
+    for row in c.runs.iter().take(crate::runs::LIST_MAX) {
+        let r = child(commands, body, wrap_row());
+        action(
+            commands,
+            r,
+            plain_button(format!("Open run {}", row.run_id)),
+            StudioCommand::OpenRun(row.run_id),
+        );
+        let verdicts = Verdict::ALL
+            .iter()
+            .map(|v| row.verdicts.iter().filter(|x| *x == v).count())
+            .collect::<Vec<_>>();
+        child(
+            commands,
+            r,
+            mono(format!(
+                "set {:>6}  seed {:>12}  {:?} at tick {}  pass {} fail {} inconclusive {}",
+                row.param_set_id,
+                row.replicate_seed,
+                row.status,
+                row.total_ticks,
+                verdicts[0],
+                verdicts[1],
+                verdicts[2]
+            )),
+        );
+    }
+    if c.runs.len() > crate::runs::LIST_MAX {
+        child(
+            commands,
+            body,
+            muted(format!(
+                "… and {} more",
+                c.runs.len() - crate::runs::LIST_MAX
+            )),
+        );
     }
 }
 
@@ -273,18 +430,19 @@ fn index(commands: &mut Commands, body: Entity, crash: &CurrentCrash) {
 
 fn entities(commands: &mut Commands, body: Entity, state: &ReplayState, replay: &Replay) {
     child(commands, body, heading("Entities"));
-    child(
-        commands,
-        body,
-        muted("At the frame shown: the crash's origin first, then flagged bodies."),
-    );
+    let note = if replay.is_run() {
+        "At the frame shown, by SimId."
+    } else {
+        "At the frame shown: the crash's origin first, then flagged bodies."
+    };
+    child(commands, body, muted(note));
     let t = child(commands, body, mono(""));
     commands.entity(t).insert(ReplayLive::Entities);
     let Some(last) = replay.frames.last() else {
         return;
     };
     let r = child(commands, body, wrap_row());
-    let order = entity_order(last, replay.origin());
+    let order = entity_order(last, replay.origin(), replay.shown_fields());
     for b in order.iter().take(MAX_BODY_BUTTONS) {
         let text = format!("Show #{}", b.sim_id);
         let command = StudioCommand::ReplaySelect(b.sim_id);
@@ -311,7 +469,15 @@ fn center(
     replay: &Replay,
 ) {
     let state = inputs.replay;
-    child(commands, body, title("Crash Replay"));
+    child(
+        commands,
+        body,
+        title(if replay.is_run() {
+            "Run Replay"
+        } else {
+            "Crash Replay"
+        }),
+    );
     child(commands, body, label(replay.title()));
     child(commands, body, muted(replay.why()));
     let mut notes = Vec::new();
@@ -327,12 +493,30 @@ fn center(
                 ),
             }
         }
+        ReplaySource::Run { dir, scenario, .. } => {
+            let cadence = match replay.recorded() {
+                [a, b, ..] => format!(
+                    "{} snapshots, every {} ticks, and the final state",
+                    replay.recorded().len(),
+                    b.tick - a.tick
+                ),
+                _ => "1 snapshot".to_owned(),
+            };
+            notes.push(format!("From {}: {cadence}.", dir.display()));
+            match scenario {
+                Some(rel) => notes.push(format!("Scenario {rel} (matched by scene_hash).")),
+                None => notes.push(
+                    "No scenario here matches the campaign's scene_hash: positions are shown as recorded, as if in ENU."
+                        .to_owned(),
+                ),
+            }
+        }
     }
     if replay.other_build {
-        notes.push(
-            "Written by another build: these frames are exact; re-running it here would be approximate (D15)."
-                .to_owned(),
-        );
+        notes.push(format!(
+            "Written by another build: {} are exact; re-running it here would be approximate (D15).",
+            replay.recorded_noun()
+        ));
     }
     child(commands, body, muted(notes.join(" ")));
     if let ReplaySource::Dump { .. } = replay.source
@@ -343,6 +527,14 @@ fn center(
             body,
             plain_button("Back to the dump list"),
             StudioCommand::CloseDump,
+        );
+    }
+    if replay.is_run() {
+        action(
+            commands,
+            body,
+            plain_button("Back to the run list"),
+            StudioCommand::CloseRun,
         );
     }
 
@@ -390,6 +582,18 @@ fn center(
         ("No loop", StudioCommand::ReplayLoopClear),
     ] {
         action(commands, r, plain_button(text), command);
+    }
+    if !replay.full_frames() {
+        let p = child(commands, body, mono(""));
+        commands.entity(p).insert(ReplayLive::Position);
+        child(
+            commands,
+            body,
+            muted(
+                "Snapshots hold no total energy, forces or flags: re-simulate the run to draw the energy and event tracks and to jump to contacts.",
+            ),
+        );
+        return;
     }
     let r = child(commands, body, wrap_row());
     child(commands, r, muted("Jump to"));
@@ -475,6 +679,8 @@ fn rerun_rows(commands: &mut Commands, body: Entity, inputs: &ReplayInputs, repl
         (Some(_), None) => {
             let text = if replay.other_build {
                 "Re-run on this build (approximate)"
+            } else if replay.is_run() {
+                "Re-simulate at full rate"
             } else {
                 "Re-simulate from Tick 0"
             };
@@ -487,16 +693,26 @@ fn rerun_rows(commands: &mut Commands, body: Entity, inputs: &ReplayInputs, repl
             } else {
                 "Re-simulated from Tick 0"
             };
-            let thin = if res.stride > 1 {
-                format!(", a frame every {} ticks before the recording", res.stride)
-            } else {
-                String::new()
+            let thin = match (res.stride > 1, replay.is_run()) {
+                (false, _) => String::new(),
+                (true, false) => {
+                    format!(", a frame every {} ticks before the recording", res.stride)
+                }
+                (true, true) => format!(", a frame every {} ticks and every snapshot", res.stride),
             };
-            let line = format!("{what}{thin}: {}", res.check.describe());
+            let line = format!(
+                "{what}{thin}: {}",
+                res.check.describe_against(replay.recorded_noun())
+            );
             let status = if ok { Status::Pass } else { Status::Warning };
             child(commands, r, status_text(status, line));
+            let recorded = if replay.is_run() {
+                "Show snapshots"
+            } else {
+                "Show recorded frames"
+            };
             let (text, shown) = match replay.shown {
-                Shown::Resimulated => ("Show recorded frames", Shown::Recorded),
+                Shown::Resimulated => (recorded, Shown::Recorded),
                 Shown::Recorded => ("Show re-simulated frames", Shown::Resimulated),
             };
             action(
@@ -734,7 +950,8 @@ fn vec3(v: [f64; 3]) -> String {
     format!("({}, {}, {})", num(v[0]), num(v[1]), num(v[2]))
 }
 
-fn snapshot(b: &BodySnapshot, before: Option<&BodySnapshot>) -> String {
+/// A body's lines; `full` adds force and flags, which snapshots do not keep.
+fn snapshot(b: &BodySnapshot, before: Option<&BodySnapshot>, full: bool) -> String {
     let speed = (b.lin_vel.iter().map(|v| v * v).sum::<f64>()).sqrt();
     let mut lines = vec![
         format!("#{}", b.sim_id),
@@ -749,17 +966,19 @@ fn snapshot(b: &BodySnapshot, before: Option<&BodySnapshot>) -> String {
         format!("vel     {} m/s", vec3(b.lin_vel)),
         format!("|v|     {} m/s", num(speed)),
         format!("ω       {} rad/s", vec3(b.ang_vel)),
-        format!("force   {} N", num(b.force_mag)),
     ];
-    let flags = flag_words(b);
-    lines.push(format!(
-        "flags   {}",
-        if flags.is_empty() {
-            "none".to_owned()
-        } else {
-            flags.join(", ")
-        }
-    ));
+    if full {
+        lines.push(format!("force   {} N", num(b.force_mag)));
+        let flags = flag_words(b, crate::rerun::Fields::Frame);
+        lines.push(format!(
+            "flags   {}",
+            if flags.is_empty() {
+                "none".to_owned()
+            } else {
+                flags.join(", ")
+            }
+        ));
+    }
     if let Some(p) = before {
         let d = [
             b.pos[0] - p.pos[0],
@@ -811,13 +1030,17 @@ pub fn live_text(
                 Shown::Recorded => "",
                 Shown::Resimulated => " re-simulated",
             };
+            let (unit, energy) = if replay.full_frames() {
+                ("frame", format!(" · energy {:.6e} J", frame.total_energy))
+            } else {
+                ("snapshot", String::new())
+            };
             format!(
-                "tick {} · frame {} of {}{which} · t = {:.6} s · energy {:.6e} J{}{looped}",
+                "tick {} · {unit} {} of {}{which} · t = {:.6} s{energy}{}{looped}",
                 frame.tick,
                 i + 1,
                 replay.frames.len(),
                 frame.t_s,
-                frame.total_energy,
                 if state.scrub.playing {
                     format!(" · playing at {} fps", state.scrub.fps)
                 } else {
@@ -825,10 +1048,10 @@ pub fn live_text(
                 }
             )
         }
-        ReplayLive::Entities => entity_order(frame, replay.origin())
+        ReplayLive::Entities => entity_order(frame, replay.origin(), replay.shown_fields())
             .iter()
             .map(|b| {
-                let flags = flag_words(b);
+                let flags = flag_words(b, replay.shown_fields());
                 let mark = if flags.is_empty() { " " } else { "!" };
                 format!("{mark} #{:<5} {}", b.sim_id, flags.join(", "))
                     .trim_end()
@@ -845,8 +1068,9 @@ pub fn live_text(
                 .and_then(|j| replay.frames[j].bodies.iter().find(|b| b.sim_id == id));
             match frame.bodies.iter().find(|b| b.sim_id == id) {
                 Some(b) => {
-                    let mut s = snapshot(b, before);
-                    if !finite_body(b) {
+                    let full = replay.full_frames();
+                    let mut s = snapshot(b, before, full);
+                    if !finite_kept(b, replay.shown_fields()) {
                         s.push_str("\nNot finite at this frame.");
                     }
                     if let Some(g) = &replay.ghost {
@@ -943,9 +1167,7 @@ pub fn refresh(
     mut changed: MessageReader<ReplayChanged>,
     mut commands: Commands,
     state: Res<State<AppState>>,
-    replay: Res<ReplayState>,
-    jobs: Res<ReplayJobs>,
-    crash: Res<CurrentCrash>,
+    rp: ReplayRes,
     theme: Res<StudioTheme>,
     log: Res<ToastLog>,
     view: Res<ViewportState>,
@@ -953,13 +1175,17 @@ pub fn refresh(
     mut images: ResMut<Assets<Image>>,
     bodies: Query<(Entity, &RegionBody)>,
 ) {
-    if changed.read().count() == 0 || *state.get() != AppState::CrashReplay {
+    let screen = *state.get();
+    if changed.read().count() == 0 || !matches!(screen, AppState::CrashReplay | AppState::RunReplay)
+    {
         return;
     }
     let inputs = ReplayInputs {
-        replay: &replay,
-        jobs: &jobs,
-        crash: &crash,
+        replay: &rp.replay,
+        jobs: &rp.jobs,
+        crash: &rp.crash,
+        runs: &rp.runs,
+        run_screen: screen == AppState::RunReplay,
         view: &view,
         camera: camera.as_ref().map(|c| c.0),
         mode: theme.mode,

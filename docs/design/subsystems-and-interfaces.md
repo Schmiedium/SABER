@@ -126,6 +126,9 @@ v0.36 (2026-11-04, build step S4-1) records Crash Replay as built (§5.5): recor
 (D15), with no change to IB-10.
 v0.37 (2026-11-23, build step S4-2) records re-simulation in the studio as built (§5.5, G9): a crash re-runs from
 Tick 0 and is checked bit for bit against its recorded frames; the ghost run; Open in Builder pins a run for Preview.
+v0.38 (2026-11-23, build step S4-3) records Run Replay as built (§5.5): a campaign's committed runs read from its
+summaries parts, one run shown from its Tier 3 snapshots and re-simulated at full rate against them (G9);
+`sim_schema::io` gains `committed_parts`, and `parse_part_name` moves there from `sim_hpc` (IB-07 unchanged).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -799,8 +802,21 @@ the build that wrote the dump they match, which `sim_studio/tests/replay.rs` sho
 as "approximate" (D15) and reports where it first differs from the recording; comparing by metrics waits for
 step 6b. The ghost run is the same parameter row with another replicate seed, kept at the replay's ticks. Open
 in Builder opens the run's scenario with its parameter row and seed pinned for Preview, which then reproduces
-the crash. IB-10 is unchanged. Run Replay of completed runs from Tier 3 snapshots is step S4-3. Details in
+the crash. IB-10 is unchanged. Run Replay of completed runs from Tier 3 snapshots came in step S4-3. Details in
 `sim_studio_ux.md` §7.9.2.
+
+**As built (step S4-3).** Run Replay reads a campaign's shared output folder directly, without `sim_query`:
+`sim_studio::runs::CampaignRuns` reads every committed summaries part (IB-07: a part whose
+`*_summaries.parquet` has its final name) and lists each `run_id` once, and reads one run's rows from the
+committed snapshots parts as frames. `sim_schema::io::committed_parts` lists those parts for any table, and
+`parse_part_name` moved there from `sim_hpc::resume`, which re-exports it. A run then opens as a `Replay` like a
+crash dump, so the viewport, re-simulation, ghost and Open in Builder are shared. Snapshots keep position,
+attitude, velocity and body rates but no force, flags or total energy, so a run's re-simulation keeps every tick
+(thinned when long) plus every snapshot tick and is compared with the snapshots on the fields they keep
+(`rerun::Fields::Snapshot`), bit for bit on the same build; `sim_studio/tests/replay.rs` shows it for a campaign
+`sim_hpc --local` wrote. The verdicts and metrics shown are the summary row's, as the campaign judged them.
+Requirement overlays are step S4-4; picking a run from the Results Explorer waits for `sim_explorer` (step 6b).
+IB-07 and the Parquet schemas are unchanged. Details in `sim_studio_ux.md` §7.9.3.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 
@@ -2067,7 +2083,7 @@ upgrades because the file format, not the Rust crate version, is the contract.
 | G6 | `CrashQuota` "first M" is per node and nondeterministic across reruns (thread race). | **Decided (2026-10-30):** the quota is campaign-wide. Rank 0 owns the counts, synced as deltas on `ChunkRequest`/`ChunkAssign`; each node's `Quota` is a view. Overshoot by a few dumps is accepted; replay and analysis show the `M` lowest-seed dumps, so the selection is stable across reruns. Plus a crash-storm abort (`[crash_policy]`, exit 6) with canary strided dispatch (IB-04, IB-05, seq §8). |
 | G7 | f64 → f32 `Transform` copy loses precision at ballistic ranges (10–100 km). | Floating origin in `RenderBridge` (camera-relative f64 subtraction before casting). |
 | G8 | Verlet integration only; no rotational dynamics, multibody or stiff contact. | **Decided (D13, 2026-11-01):** own kernel, RK4 for 6DOF and 3DOF; contact via Parry detection plus custom compliant/impulsive response (IB-19); multibody deferred with robotics. |
-| G9 | Crash replay shows only last K frames of a few bodies; no way to inspect earlier state. | Deterministic **re-simulation** in Studio (rebuild from params+seed, run to `crash_tick − K`, then step live). Ring buffer becomes the fallback when determinism can't be confirmed. As built (S4-2, §5.5): re-runs from Tick 0 to the crash, keeps the frames, and checks them bit for bit against the ring buffer. |
+| G9 | Crash replay shows only last K frames of a few bodies; no way to inspect earlier state. | Deterministic **re-simulation** in Studio (rebuild from params+seed, run to `crash_tick − K`, then step live). Ring buffer becomes the fallback when determinism can't be confirmed. As built (S4-2, §5.5): re-runs from Tick 0 to the crash, keeps the frames, and checks them bit for bit against the ring buffer. S4-3: a completed run re-runs at full rate and is checked against its Tier 3 snapshots on the fields they keep. |
 | G10 | `SimStatus`, `CrashReason`, `CrashDump`, `SimEvent` types referenced but undefined. | Defined in `sim_schema` (§5.4, IB-10). |
 | G11 | No checkpoint/resume: a walltime kill loses the whole campaign's tail. | **Decided (2026-10-30):** rolling parts committed every `checkpoint_interval_s` by IO.Stager, `--resume` as a new attempt that skips `run_id`s in committed summaries footers, `_MANIFEST.json` as the index, drain before walltime, optional `auto_resume` (IB-04, IB-07, seq §7, §12). |
 | G12 | Rank 0 is both dispatcher and worker under `Funneled`; dispatcher latency unspecified. | Dispatcher on thread 0 polls with `MPI_Iprobe`; pool on Rank 0 uses one fewer thread. |

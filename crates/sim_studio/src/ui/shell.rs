@@ -111,8 +111,9 @@ pub fn spawn_for(
     Res<LiveCrash>,
     Res<BuilderDoc>,
     Res<PreviewState>,
+    Res<crate::actions::CurrentRuns>,
 ) {
-    move |mut commands, workspace, scenario, crash, live_crash, doc, preview| {
+    move |mut commands, workspace, scenario, crash, live_crash, doc, preview, runs| {
         let root = commands
             .spawn_scene(screen())
             .insert(DespawnOnExit(state))
@@ -127,6 +128,11 @@ pub fn spawn_for(
             if let Some(Ok(info)) = &scenario.0 {
                 crumbs.push(info.path.clone());
             }
+        }
+        if state == AppState::RunReplay
+            && let Some(r) = &runs.0
+        {
+            crumbs.push(format!("campaign {}", r.campaign_id()));
         }
         if state == AppState::CrashReplay {
             if let Some(c) = &live_crash.0 {
@@ -194,7 +200,7 @@ pub fn spawn_for(
         let rail = child(&mut commands, mid, rail_column());
         let rcx = RailContext {
             workspace: workspace.0.is_some(),
-            run: false,
+            run: runs.0.is_some(),
             crash: crash.0.is_some() || live_crash.0.is_some(),
         };
         for item in Rail::ALL {
@@ -253,9 +259,7 @@ pub fn fill_regions(
     pending: Query<(Entity, &PendingRegions)>,
     regions: Query<(Entity, &DockRegion, &ChildOf)>,
     parents: Query<&ChildOf>,
-    crash: Res<CurrentCrash>,
-    replay: Res<crate::replay::ReplayState>,
-    jobs: Res<crate::replay::ReplayJobs>,
+    rp: super::replay::ReplayRes,
     scenario: Res<CurrentScenario>,
     log: Res<ToastLog>,
     docs: Res<BuilderDoc>,
@@ -302,11 +306,13 @@ pub fn fill_regions(
                 super::preview::fill(&mut commands, &mut images, body, kind, &inputs);
                 continue;
             }
-            if *state == AppState::CrashReplay {
+            if matches!(*state, AppState::CrashReplay | AppState::RunReplay) {
                 let inputs = super::replay::ReplayInputs {
-                    replay: &replay,
-                    jobs: &jobs,
-                    crash: &crash,
+                    replay: &rp.replay,
+                    jobs: &rp.jobs,
+                    crash: &rp.crash,
+                    runs: &rp.runs,
+                    run_screen: *state == AppState::RunReplay,
                     view: &view,
                     camera: camera.as_ref().map(|c| c.0),
                     mode: theme.mode,

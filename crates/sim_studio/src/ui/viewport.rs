@@ -17,7 +17,7 @@ use sim_studio_ui::prelude::*;
 
 use super::{action, child};
 use crate::actions::{PreviewState, StudioCommand};
-use crate::replay::{ReplayState, finite_body, last_finite_position};
+use crate::replay::{ReplayState, finite_kept, last_finite_position};
 use crate::state::AppState;
 use crate::viewport::{
     FOV_Y, FocusMode, FocusPhase, GRID_HALF_LINES, GRID_LEVELS, HUD_PERIOD_S, LineKind, MAX_LABELS,
@@ -652,8 +652,16 @@ pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
         .replay
         .as_ref()
         .is_some_and(|r| r.shown == crate::replay::Shown::Resimulated);
+    // Snapshots keep no force or flags: only a body that is not finite in what they keep raises
+    // an alarm.
+    let fields = replay.replay.as_ref().map_or(
+        crate::rerun::Fields::Frame,
+        crate::replay::Replay::shown_fields,
+    );
+    let full = fields == crate::rerun::Fields::Frame;
     let state = format!(
-        "frame {} of {}{}{}",
+        "{} {} of {}{}{}",
+        if full { "frame" } else { "snapshot" },
         replay.scrub.index + 1,
         replay.len(),
         if resim { " re-simulated" } else { "" },
@@ -684,7 +692,7 @@ pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
     let alarms = frame
         .bodies
         .iter()
-        .filter(|b| b.flags & sim_schema::FLAG_NAN_ORIGIN != 0 || !finite_body(b))
+        .filter(|b| b.flags & sim_schema::FLAG_NAN_ORIGIN != 0 || !finite_kept(b, fields))
         .filter_map(|b| last_finite_position(shown, b.sim_id))
         .collect();
     *source = ViewSource {
