@@ -1,26 +1,32 @@
 //! Crash Replay's logic without a window (verification §8.3): the scrubber, the jumps, the
 //! tracks, the growth inspector and the entity order on synthetic frames; a crash stream opened
 //! through the studio's commands, matched to its scenario by `scene_hash` and shown frame for
-//! frame exactly as written.
+//! frame exactly as written. G9: a crash written by `sim_hpc` re-simulated in the studio from
+//! Tick 0 bit for bit, a ghost replicate laid over it, and the run opened in the Builder with its
+//! parameters pinned, where Preview crashes the same way.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use sim_core::{Scenario, SimAppBuilder, SimConfig};
-use sim_schema::io::CrashWriter;
+use sim_core::{RunSeed, Scenario, SimAppBuilder, SimConfig};
+use sim_schema::io::{CrashReader, CrashWriter, Table, TableRow, write_parquet};
 use sim_schema::{
     BodySnapshot, CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump, CrashKind, CrashReason,
-    FLAG_CLAMPED, FLAG_COLLIDING, FLAG_NAN_ORIGIN, FileHeader, Frame, SimStatus, TickFrame,
+    FLAG_CLAMPED, FLAG_COLLIDING, FLAG_NAN_ORIGIN, FileHeader, Frame, ManifestRow, SimStatus,
+    TickFrame,
 };
 use sim_studio::StudioCorePlugin;
-use sim_studio::actions::StudioCommand;
+use sim_studio::actions::{BuilderDoc, PreviewState, StudioCommand};
+use sim_studio::builder::ScenarioDoc;
 use sim_studio::replay::{
-    FPS, Jump, Replay, ReplaySource, ReplayState, Scrubber, energy_track, entity_order, events,
-    flag_words, frame_at, growth, last_finite_position,
+    FPS, Jump, Replay, ReplayJobs, ReplaySource, ReplayState, Scrubber, Shown, energy_track,
+    entity_order, events, flag_words, frame_at, growth, last_finite_position,
 };
+use sim_studio::rerun::{Check, Keep, MAX_FRAMES, Rerun, compare, frame_diff, stride_for};
 use sim_studio::state::AppState;
 use sim_studio::viewport::ViewportState;
 use sim_studio::workspace::{Pack, Workspace};
@@ -483,4 +489,307 @@ fn a_crash_stream_replays_its_frames_exactly() {
     assert_eq!(last_toast(&app).0, ToastLevel::Error);
     send(&mut app, StudioCommand::CloseDump);
     assert!(state(&app).replay.is_none());
+}
+
+/// The stride keeps a re-simulation within its frame budget; a comparison finds the first
+/// differing bit and the first recorded tick a re-simulation did not reach.
+#[test]
+fn re_simulations_are_thinned_and_compared() {
+    assert_eq!(stride_for(0, 2, 1), 1);
+    assert_eq!(stride_for(1000, 600, 1), 1, "fits whole");
+    let s = stride_for(10_000_000, 600, 1);
+    assert!(10_000_000 / s + 600 <= MAX_FRAMES as u64 + 1, "{s}");
+    let few = stride_for(1_000_000, 100, 500);
+    assert!(
+        1_000_000 / few + 100 <= 2_000 + 1,
+        "500 bodies: 2 000 frames, {few}"
+    );
+
+    let f = frames();
+    assert_eq!(compare(&f[3..], &f), Check::Exact { frames: 5 });
+    assert_eq!(compare(&[], &f), Check::Exact { frames: 0 });
+    let mut other = f.clone();
+    other[5].bodies[1].lin_vel[0] = f64::from_bits(40f64.to_bits() + 1);
+    assert_eq!(
+        compare(&f[3..], &other),
+        Check::Diverged {
+            tick: 105,
+            what: "#2 vel".into()
+        },
+        "one ulp is a difference"
+    );
+    assert_eq!(frame_diff(&f[7], &f[7]), None, "NaN equals NaN");
+    let mut flags = f[4].clone();
+    flags.bodies[0].flags = 0;
+    assert_eq!(frame_diff(&f[4], &flags).as_deref(), Some("#1 flags"));
+    let mut energy = f[4].clone();
+    energy.total_energy = 101.0;
+    assert_eq!(frame_diff(&f[4], &energy).as_deref(), Some("total energy"));
+    assert_eq!(compare(&f[3..], &f[..6]), Check::Short { tick: 106 });
+    assert!(
+        Check::Exact { frames: 2 }
+            .describe()
+            .contains("bit for bit")
+    );
+}
+
+const MASS: &str = "sim_core::body::MassProps";
+
+/// A quad workspace with its mass swept as `mass_q` and a watchdog energy bound it climbs
+/// through, so every run crashes `CrashedEnergy` a few hundred ticks in.
+fn bounded_quad(dir: &Path) -> Workspace {
+    let ws = Workspace::create(&dir.join("ws"), "q", Pack::Multirotor).unwrap();
+    let (mut doc, _) = ScenarioDoc::open(&ws.root, "scenarios/quad.scn.ron").unwrap();
+    let v = doc.slot_of(1).unwrap();
+    doc.bind(v, MASS, ".mass", "mass_q", Some((1.0, 1.5)))
+        .unwrap();
+    doc.export().unwrap();
+    let quad = ws.root.join("scenarios/quad.scn.ron");
+    let text = std::fs::read_to_string(&quad).unwrap();
+    let bounded = text.replacen("energy_max_j: None", "energy_max_j: Some(60.0)", 1);
+    assert_ne!(text, bounded);
+    std::fs::write(&quad, bounded).unwrap();
+    ws
+}
+
+/// Run the bounded quad's two rows with `sim_hpc --local` (as R7 does) and return the crash
+/// stream it wrote.
+fn campaign_crashes(ws: &Workspace) -> PathBuf {
+    let dir = ws.root.join("campaigns");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rows = [
+        ManifestRow {
+            run_id: 0,
+            param_set_id: 3,
+            replicate_seed: 7,
+            params: vec![1.1],
+        },
+        ManifestRow {
+            run_id: 1,
+            param_set_id: 4,
+            replicate_seed: 8,
+            params: vec![1.45],
+        },
+    ];
+    let batch = ManifestRow::to_batch(&rows, &["param_mass_q".to_owned()]).unwrap();
+    write_parquet(
+        File::create(dir.join("sweep_manifest.parquet")).unwrap(),
+        Table::Manifest,
+        &Table::Manifest.header(),
+        &[batch],
+        &[],
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("campaign.toml"),
+        r#"
+[campaign]
+id = "g9"
+scene = "../scenarios/quad.scn.ron"
+requirements = "../requirements/quad.req.ron"
+manifest = "sweep_manifest.parquet"
+
+[execution]
+flight_recorder_ticks = 50
+
+[output]
+scratch_dir = "scratch"
+shared_out = "out"
+"#,
+    )
+    .unwrap();
+    let campaign =
+        sim_hpc::Campaign::load(&dir.join("campaign.toml"), sim_hpc::standard_library).unwrap();
+    let report = sim_hpc::run_local(
+        &campaign,
+        &sim_hpc::RunOptions {
+            threads: Some(1),
+            stage_backoff: Duration::from_millis(1),
+            ..sim_hpc::RunOptions::default()
+        },
+    );
+    assert_eq!(report.runs, 2, "{report:?}");
+    std::fs::read_dir(dir.join("out"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("_crashes.zst"))
+        .expect("a crash stream")
+}
+
+fn until_jobs_done(app: &mut App) {
+    for _ in 0..10_000 {
+        let jobs = app.world().resource::<ReplayJobs>();
+        if jobs.resim.is_none() && jobs.ghost.is_none() {
+            return;
+        }
+        app.update();
+    }
+    panic!("the re-simulation did not finish");
+}
+
+/// G9: a crash `sim_hpc` wrote is re-simulated in the studio from Tick 0 and matches every
+/// recorded frame bit for bit; the recorded frames come back on request; a ghost replicate is laid
+/// over the replay by tick; Open in Builder pins the run, and Preview then crashes the same way.
+#[test]
+fn a_campaign_crash_re_simulates_bit_for_bit() {
+    let dir = scratch("g9");
+    let ws = bounded_quad(&dir);
+    let stream = campaign_crashes(&ws);
+    let mut reader =
+        CrashReader::open(std::io::BufReader::new(File::open(&stream).unwrap())).unwrap();
+    let entries = reader.index().to_vec();
+    assert_eq!(entries.len(), 2, "both rows crash");
+    let dumps: Vec<CrashDump> = entries.iter().map(|e| reader.read(e).unwrap()).collect();
+    let dump = dumps.iter().find(|d| d.run_id == 1).unwrap().clone();
+    assert_eq!(dump.status, SimStatus::CrashedEnergy);
+    assert_eq!(dump.frames.len(), 50);
+    let crash_tick = dump.frames.last().unwrap().tick;
+    assert!(
+        crash_tick > 100,
+        "crashes after the recorder's window: {crash_tick}"
+    );
+
+    let mut app = app(&dir.join("recent.ron"));
+    send(&mut app, StudioCommand::OpenWorkspace(ws.root.clone()));
+    send(&mut app, StudioCommand::OpenCrash(stream.clone()));
+    let i = entries.iter().position(|e| e.run_id == 1).unwrap();
+    send(&mut app, StudioCommand::OpenDump(i));
+    let r = state(&app).replay.clone().unwrap();
+    assert!(r.rerun.is_some(), "matched by scene_hash");
+    assert_eq!(r.rerun.as_ref().unwrap().seed, RunSeed::new(4, 8));
+    assert!(!r.other_build);
+
+    send(&mut app, StudioCommand::ReplayResimulate);
+    until_jobs_done(&mut app);
+    let r = state(&app).replay.clone().unwrap();
+    let res = r.resim.clone().unwrap();
+    assert_eq!(res.check, Check::Exact { frames: 50 }, "G9: bit for bit");
+    assert!(!res.approximate);
+    assert_eq!(res.status, Some(SimStatus::CrashedEnergy));
+    assert_eq!(res.tick, crash_tick);
+    assert_eq!(r.shown, Shown::Resimulated);
+    assert_eq!(r.frames[0].tick, 0, "from Tick 0");
+    assert_eq!(
+        r.frames.len() as u64,
+        crash_tick + 1,
+        "every tick: {}",
+        res.stride
+    );
+    assert_eq!(
+        state(&app).frame().unwrap().tick,
+        crash_tick,
+        "the same tick shown"
+    );
+    same_bits(&r.frames[r.frames.len() - 50..], &dump.frames);
+    same_bits(r.recorded(), &dump.frames);
+    send(&mut app, StudioCommand::ReplayResimulate);
+    assert!(app.world().resource::<ReplayJobs>().resim.is_none(), "once");
+
+    send(&mut app, StudioCommand::ReplayJump(Jump::First));
+    send(&mut app, StudioCommand::ReplayShow(Shown::Recorded));
+    let s = state(&app);
+    assert_eq!(s.replay.as_ref().unwrap().shown, Shown::Recorded);
+    assert_eq!(
+        s.frame().unwrap().tick,
+        dump.frames[0].tick,
+        "the nearest recorded tick"
+    );
+    send(&mut app, StudioCommand::ReplayShow(Shown::Resimulated));
+    assert_eq!(state(&app).frame().unwrap().tick, dump.frames[0].tick);
+
+    // A ghost: the other replicate seed of the same row, at the ticks shown.
+    send(&mut app, StudioCommand::ReplayGhost("nine".into()));
+    assert!(
+        app.world().resource::<ReplayJobs>().ghost.is_none(),
+        "not a seed"
+    );
+    send(&mut app, StudioCommand::ReplayGhost("9".into()));
+    until_jobs_done(&mut app);
+    let r = state(&app).replay.clone().unwrap();
+    let g = r.ghost.clone().unwrap();
+    assert_eq!(g.seed, 9);
+    let ghost_ticks: Vec<u64> = g.frames.iter().map(|f| f.tick).collect();
+    assert_eq!(
+        ghost_ticks[..],
+        r.ticks()[..ghost_ticks.len()],
+        "synchronised by tick"
+    );
+    let mut alone = Rerun::new(
+        r.rerun.as_ref().unwrap(),
+        RunSeed::new(4, 9),
+        crash_tick,
+        Keep::Every {
+            stride: 1,
+            all_from: 0,
+        },
+    )
+    .unwrap();
+    alone.finish();
+    same_bits(&g.frames, &alone.frames()[..g.frames.len()]);
+    send(&mut app, StudioCommand::ReplayGhostOff);
+    assert!(state(&app).replay.as_ref().unwrap().ghost.is_none());
+
+    // Open in Builder pins the run; Preview then runs that exact case.
+    send(&mut app, StudioCommand::ReplayOpenInBuilder);
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::ScenarioBuilder
+    );
+    let preview = app.world().resource::<PreviewState>();
+    let pinned = preview.pinned.clone().unwrap();
+    assert_eq!(pinned.label, "run 1");
+    assert_eq!(pinned.param_set_id, 4);
+    assert_eq!(pinned.params, dump.params);
+    assert_eq!(preview.seed, 8);
+    assert!(app.world().resource::<BuilderDoc>().0.is_some());
+    send(&mut app, StudioCommand::StartPreview);
+    {
+        let world = app.world_mut();
+        let mut preview = world.resource_mut::<PreviewState>();
+        let run = preview.run.as_mut().unwrap();
+        assert_eq!(run.seed(), RunSeed::new(4, 8));
+        assert_eq!(run.step(u64::MAX), Some(SimStatus::CrashedEnergy));
+        assert_eq!(run.tick(), crash_tick);
+        let crash = run.crash().unwrap();
+        same_bits(&crash.frames[crash.frames.len() - 50..], &dump.frames);
+    }
+    send(
+        &mut app,
+        StudioCommand::PreviewParams(sim_studio::preview::ParamChoice::Nominal),
+    );
+    assert!(
+        app.world().resource::<PreviewState>().pinned.is_none(),
+        "unpinned"
+    );
+}
+
+/// A dump from another build re-runs on this one as an approximation (D15), and says so.
+#[test]
+fn another_builds_crash_re_runs_approximately() {
+    let dir = scratch("approx");
+    let ws = bounded_quad(&dir);
+    let hash = scene_hash(&ws.root.join("scenarios/quad.scn.ron"));
+    let mut app = app(&dir.join("recent.ron"));
+    send(&mut app, StudioCommand::OpenWorkspace(ws.root.clone()));
+    let path = dir.join("old_crashes.zst");
+    let mut d = dump(9, Some(hash), "another-build");
+    d.params = vec![("mass_q".into(), 1.2)];
+    write_stream(&path, &[d]);
+    send(&mut app, StudioCommand::OpenCrash(path));
+    assert!(state(&app).replay.as_ref().unwrap().other_build);
+    send(&mut app, StudioCommand::ReplayResimulate);
+    until_jobs_done(&mut app);
+    let res = state(&app).replay.as_ref().unwrap().resim.clone().unwrap();
+    assert!(res.approximate);
+    assert!(
+        matches!(res.check, Check::Diverged { tick: 100, .. }),
+        "synthetic frames are not this run: {:?}",
+        res.check
+    );
+    assert_eq!(
+        last_toast(&app).0,
+        ToastLevel::Info,
+        "{:?}",
+        last_toast(&app)
+    );
 }

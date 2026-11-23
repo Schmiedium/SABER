@@ -82,22 +82,42 @@ pub fn draw_in(
     if samples.is_empty() {
         return;
     }
-    let (t0, t1) = (samples[0][0], samples[samples.len() - 1][0]);
+    if lo < 0.0 && hi > 0.0 {
+        let zy = ((hi / (hi - lo)) * (h - 1) as f64).round() as i64;
+        for px in 0..w {
+            let i = ((zy * w + px) * 4) as usize;
+            pixels[i..i + 4].copy_from_slice(&colors.zero);
+        }
+    }
+    let span = (samples[0][0], samples[samples.len() - 1][0]);
+    draw_series(pixels, width, height, samples, span, (lo, hi), colors.line);
+}
+
+/// Draw `[t, value]` samples as a line over a plot already drawn, with time `span` across and
+/// the value range `(lo, hi)` up the side, so a second series (a ghost run) shares the axes.
+/// Non-finite values break the line.
+pub fn draw_series(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    samples: &[[f64; 2]],
+    (t0, t1): (f64, f64),
+    (lo, hi): (f64, f64),
+    color: [u8; 4],
+) {
+    let (w, h) = (width as i64, height as i64);
+    if !(lo.is_finite() && hi.is_finite() && hi > lo) {
+        return;
+    }
     let span = if t1 > t0 { t1 - t0 } else { 1.0 };
     let x = |t: f64| (((t - t0) / span) * (w - 1) as f64).round() as i64;
     let y = |v: f64| (((hi - v) / (hi - lo)) * (h - 1) as f64).round() as i64;
-    let mut put = |px: i64, py: i64, c: [u8; 4]| {
+    let mut put = |px: i64, py: i64| {
         if (0..w).contains(&px) && (0..h).contains(&py) {
             let i = ((py * w + px) * 4) as usize;
-            pixels[i..i + 4].copy_from_slice(&c);
+            pixels[i..i + 4].copy_from_slice(&color);
         }
     };
-    if lo < 0.0 && hi > 0.0 {
-        let zy = y(0.0);
-        for px in 0..w {
-            put(px, zy, colors.zero);
-        }
-    }
     let mut last: Option<(i64, i64)> = None;
     for s in samples {
         if !s[1].is_finite() {
@@ -106,7 +126,7 @@ pub fn draw_in(
         }
         let p = (x(s[0]), y(s[1]));
         let from = last.unwrap_or(p);
-        line(from, p, |a, b| put(a, b, colors.line));
+        line(from, p, &mut put);
         last = Some(p);
     }
 }

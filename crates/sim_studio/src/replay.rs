@@ -1,6 +1,8 @@
 //! Crash Replay's logic (`sim_studio_ux.md` §7.9): the recorded frames of a crashed run, a
-//! scrubber over them, the jumps, the tracks under the timeline and the growth inspector. Nothing
-//! here re-simulates: every state shown is a recorded `TickFrame`, exactly as written (D15).
+//! scrubber over them, the jumps, the tracks under the timeline and the growth inspector. Every
+//! state shown is a `TickFrame`: as recorded, exactly as written (D15), or from a re-simulation
+//! of the run ([`crate::rerun`], G9) that the screen labels and checks against the recording. A
+//! ghost run, another replicate of the same parameter row, can be laid over it by tick.
 //!
 //! The frames come from a crash dump in a `*_crashes.zst` stream (IB-10) or from a preview that
 //! crashed in the studio. The screens are in `crate::ui::replay`.
@@ -8,13 +10,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sim_core::{Scenario, SimAppBuilder, SimConfig};
+use sim_core::{RunSeed, Scenario, SimAppBuilder, SimConfig};
 use sim_schema::{
     BodySnapshot, CrashDump, CrashReason, FLAG_CLAMPED, FLAG_COLLIDING, FLAG_NAN_ORIGIN, Frame,
     SimStatus, TickFrame,
 };
 
 use crate::preview::PreviewCrash;
+use crate::rerun::{Check, RerunSource, SceneRef};
 
 /// Playback rates, frames per second (§7.9).
 pub const FPS: [f64; 4] = [1.0, 2.0, 5.0, 25.0];
@@ -62,8 +65,66 @@ pub struct Replay {
     pub energy_max_j: Option<f64>,
     /// Written by another build: the frames are exact, a re-run would not be (D15).
     pub other_build: bool,
-    /// The flight recorder's frames, oldest first.
+    /// The frames shown, oldest first: the flight recorder's, or the re-simulation's once it is
+    /// shown ([`Replay::shown`]).
     pub frames: Vec<TickFrame>,
+    /// The other set of frames while the re-simulation's are shown (the recorded ones), or the
+    /// re-simulation's while the recorded ones are; empty before a re-simulation.
+    pub other: Vec<TickFrame>,
+    /// Which frames are shown.
+    pub shown: Shown,
+    /// What the run is rebuilt from, when its scenario is known.
+    pub rerun: Option<RerunSource>,
+    /// How the re-simulation went, once it ran.
+    pub resim: Option<Resimulated>,
+    /// The ghost run laid over the replay.
+    pub ghost: Option<Ghost>,
+}
+
+/// Which frames a replay shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Shown {
+    /// The flight recorder's.
+    #[default]
+    Recorded,
+    /// The re-simulation's, from Tick 0.
+    Resimulated,
+}
+
+/// A finished re-simulation of the replayed run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resimulated {
+    /// How it compares with the recorded frames.
+    pub check: Check,
+    /// Run on another build than the one that recorded it: approximate by design (D15).
+    pub approximate: bool,
+    /// Ticks between its frames before the recorded window.
+    pub stride: u64,
+    /// How it ended, if it did.
+    pub status: Option<SimStatus>,
+    /// The tick it ended at, or reached.
+    pub tick: u64,
+}
+
+/// Another replicate of the same parameter row, re-simulated and laid over the replay by tick.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ghost {
+    /// Its replicate seed.
+    pub seed: u64,
+    /// Its frames at the replay's ticks, oldest first (up to where it ended).
+    pub frames: Vec<TickFrame>,
+    /// How it ended, if it did by the replay's last tick.
+    pub status: Option<SimStatus>,
+}
+
+impl Ghost {
+    /// Its frame at `tick`, if it has one.
+    pub fn at(&self, tick: u64) -> Option<&TickFrame> {
+        self.frames
+            .binary_search_by_key(&tick, |f| f.tick)
+            .ok()
+            .map(|i| &self.frames[i])
+    }
 }
 
 impl Replay {
@@ -80,6 +141,15 @@ impl Replay {
             energy_max_j: crash.energy_max_j,
             other_build: false,
             frames: crash.frames.clone(),
+            other: Vec::new(),
+            shown: Shown::Recorded,
+            rerun: Some(RerunSource {
+                scene: crash.scene.clone(),
+                seed: crash.seed,
+                params: crash.params.clone(),
+            }),
+            resim: None,
+            ghost: None,
         }
     }
 
@@ -88,6 +158,11 @@ impl Replay {
     pub fn from_dump(dump: CrashDump, path: &Path, scenario: Option<ScenarioMatch>) -> Self {
         let other_build =
             !dump.header.build_id.is_empty() && dump.header.build_id != sim_schema::build_id();
+        let rerun = scenario.as_ref().map(|m| RerunSource {
+            scene: m.scene.clone(),
+            seed: RunSeed::new(dump.param_set_id, dump.replicate_seed),
+            params: dump.params.clone(),
+        });
         let (rel, frame, energy_max_j) = match scenario {
             Some(m) => (Some(m.rel), m.frame, m.energy_max_j),
             None => (None, Frame::Enu, None),
@@ -108,7 +183,42 @@ impl Replay {
             energy_max_j,
             other_build,
             frames: dump.frames,
+            other: Vec::new(),
+            shown: Shown::Recorded,
+            rerun,
+            resim: None,
+            ghost: None,
         }
+    }
+
+    /// The frames as recorded, whichever are shown.
+    pub fn recorded(&self) -> &[TickFrame] {
+        match self.shown {
+            Shown::Recorded => &self.frames,
+            Shown::Resimulated => &self.other,
+        }
+    }
+
+    /// Show the recorded frames or the re-simulation's; false when there is nothing to switch to.
+    pub fn show(&mut self, shown: Shown) -> bool {
+        if shown == self.shown || self.other.is_empty() {
+            return false;
+        }
+        std::mem::swap(&mut self.frames, &mut self.other);
+        self.shown = shown;
+        true
+    }
+
+    /// The index of the last frame shown at or before `tick` (0 when there is none).
+    pub fn index_at(&self, tick: u64) -> usize {
+        self.frames
+            .partition_point(|f| f.tick <= tick)
+            .saturating_sub(1)
+    }
+
+    /// The ticks of the frames shown.
+    pub fn ticks(&self) -> Vec<u64> {
+        self.frames.iter().map(|f| f.tick).collect()
     }
 
     /// The body that caused the crash: the reason's, else the first flagged `FLAG_NAN_ORIGIN` in
@@ -169,6 +279,8 @@ pub struct ScenarioMatch {
     pub frame: Frame,
     /// Its watchdog energy bound.
     pub energy_max_j: Option<f64>,
+    /// The scenario itself, to re-simulate the run.
+    pub scene: SceneRef,
 }
 
 /// Find the scenario with `scene_hash` among the `.scn.ron` files in `dirs` (not recursive): the
@@ -202,6 +314,7 @@ pub fn find_scenario(scene_hash: u64, dirs: &[(PathBuf, String)]) -> Option<Scen
                     rel: format!("{prefix}{name}"),
                     frame: s.frame(),
                     energy_max_j: s.config().watchdog.energy_max_j,
+                    scene: SceneRef(s),
                 });
             }
         }
@@ -600,6 +713,23 @@ impl ReplayState {
         self.replay = Some(replay);
     }
 
+    /// Show the recorded frames or the re-simulation's, at the same tick; the loop is cleared,
+    /// since its frames are others.
+    pub fn show(&mut self, shown: Shown) -> bool {
+        let tick = self.frame().map(|f| f.tick);
+        let Some(replay) = self.replay.as_mut() else {
+            return false;
+        };
+        if !replay.show(shown) {
+            return false;
+        }
+        let i = tick.map_or(0, |t| replay.index_at(t));
+        let len = replay.frames.len();
+        self.scrub.span = None;
+        self.scrub.seek(i, len);
+        true
+    }
+
     /// The frame shown.
     pub fn frame(&self) -> Option<&TickFrame> {
         self.replay
@@ -626,4 +756,74 @@ pub fn last_finite_position(frames: &[TickFrame], id: u32) -> Option<[f64; 3]> {
             .find(|b| b.sim_id == id && b.pos.iter().all(|v| v.is_finite()))
             .map(|b| b.pos)
     })
+}
+
+/// The replay's background runs: the re-simulation and the ghost, stepped a few milliseconds per
+/// frame while Crash Replay is open.
+#[derive(bevy::prelude::Resource, Debug, Default)]
+pub struct ReplayJobs {
+    /// The re-simulation of the replayed run, with the stride it keeps frames at before the
+    /// recorded window.
+    pub resim: Option<(u64, crate::rerun::Rerun)>,
+    /// The ghost run, with its replicate seed.
+    pub ghost: Option<(u64, crate::rerun::Rerun)>,
+}
+
+impl ReplayJobs {
+    /// Words for what runs, with progress, or empty when nothing does.
+    pub fn progress(&self) -> String {
+        let mut out = Vec::new();
+        if let Some((_, r)) = &self.resim {
+            out.push(format!("Re-simulating: tick {} of {}", r.tick(), r.last()));
+        }
+        if let Some((seed, r)) = &self.ghost {
+            out.push(format!(
+                "Ghost (seed {seed}): tick {} of {}",
+                r.tick(),
+                r.last()
+            ));
+        }
+        out.join(" · ")
+    }
+}
+
+/// Start the ghost run of `replay` with replicate `seed` (same parameter row), keeping the ticks
+/// the replay shows.
+pub fn ghost_job(replay: &Replay, seed: u64) -> Result<crate::rerun::Rerun, String> {
+    let source = replay
+        .rerun
+        .as_ref()
+        .ok_or("a ghost needs the run's scenario, and none here matches its scene_hash")?;
+    let ticks = replay.ticks();
+    let last = ticks.last().copied().unwrap_or(0);
+    crate::rerun::Rerun::new(
+        source,
+        RunSeed::new(source.seed.param_set_id, seed),
+        last,
+        crate::rerun::Keep::Ticks(ticks),
+    )
+}
+
+/// Start re-simulating `replay` from Tick 0 to its last recorded tick: every tick of the recorded
+/// window, thinned before it ([`crate::rerun::stride_for`]). Returns the stride with the run.
+pub fn resim_job(replay: &Replay) -> Result<(u64, crate::rerun::Rerun), String> {
+    let source = replay
+        .rerun
+        .as_ref()
+        .ok_or("re-simulating needs the run's scenario, and none here matches its scene_hash")?;
+    let recorded = replay.recorded();
+    let (Some(first), Some(last)) = (recorded.first(), recorded.last()) else {
+        return Err("the replay has no frames".to_owned());
+    };
+    let stride = crate::rerun::stride_for(first.tick, recorded.len(), last.bodies.len());
+    let run = crate::rerun::Rerun::new(
+        source,
+        source.seed,
+        last.tick,
+        crate::rerun::Keep::Every {
+            stride,
+            all_from: first.tick,
+        },
+    )?;
+    Ok((stride, run))
 }

@@ -187,9 +187,17 @@ pub fn fill(
 fn toolbar(commands: &mut Commands, body: Entity, preview: &PreviewState) {
     let r = child(commands, body, toolbar_row());
     child(commands, r, muted("Params"));
+    if let Some(p) = &preview.pinned {
+        // Pinned from Crash Replay: shown as the current choice; any other choice unpins it.
+        child(
+            commands,
+            r,
+            status_text(Status::Running, format!("Params: {} (pinned)", p.label)),
+        );
+    }
     for c in ParamChoice::ALL {
         let text = format!("Params: {}", c.label());
-        if c == preview.choice {
+        if c == preview.choice && preview.pinned.is_none() {
             action(
                 commands,
                 r,
@@ -345,7 +353,7 @@ pub fn live_text(kind: Live, preview: &PreviewState) -> String {
                 run.elapsed_s(),
                 run.tick(),
                 run.max_ticks(),
-                preview.choice.label(),
+                preview.params_label(),
                 run.seed().replicate_seed,
             )
         }
