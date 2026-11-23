@@ -31,6 +31,9 @@ pub struct CampaignRuns {
     pub requirements: Vec<String>,
     /// Every committed run once, by `run_id`.
     pub runs: Vec<SummaryRow>,
+    /// The requirement set with the campaign's `req_set_hash`, once the studio found it
+    /// ([`crate::overlay::find_set`]); `open` leaves it empty.
+    pub set: Option<crate::overlay::SetMatch>,
 }
 
 fn strip(names: &[String], prefix: &str) -> Vec<String> {
@@ -102,6 +105,7 @@ impl CampaignRuns {
             metrics: family(1, "metric_"),
             requirements: family(2, "req_"),
             runs: runs.into_values().collect(),
+            set: None,
         })
     }
 

@@ -640,8 +640,19 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
                 cx.replay_changed.write(ReplayChanged);
             }
             StudioCommand::OpenRuns(dir) => match CampaignRuns::open(dir) {
-                Ok(runs) => {
+                Ok(mut runs) => {
                     let n = runs.runs.len();
+                    runs.set = runs.header.req_set_hash.and_then(|h| {
+                        crate::overlay::find_set(
+                            h,
+                            &near_campaign(cx.workspace.0.as_ref(), dir, "requirements"),
+                        )
+                    });
+                    if runs.set.is_none() && !runs.requirements.is_empty() {
+                        cx.toasts.write(Toast::warning(
+                            "No requirement set here has this campaign's req_set_hash: verdicts are shown, but not drawn over the runs",
+                        ));
+                    }
                     if runs.other_build() {
                         cx.toasts.write(Toast::warning(format!(
                             "{} was written by build {}; replay shows its snapshots, and re-simulating is approximate (D15)",
@@ -1191,19 +1202,7 @@ fn open_run(run_id: u64, cx: &mut CommandCx) {
             return;
         }
     };
-    // The open workspace's scenarios, then the output folder, and up to three folders above it
-    // with their scenarios/ (a workspace's campaigns/<id>/out reaches the workspace's).
-    let mut dirs = Vec::new();
-    if let Some(ws) = &cx.workspace.0 {
-        dirs.push((ws.root.join("scenarios"), "scenarios/".to_owned()));
-    }
-    dirs.push((runs.dir.clone(), String::new()));
-    let mut prefix = String::new();
-    for up in runs.dir.ancestors().skip(1).take(3) {
-        prefix.push_str("../");
-        dirs.push((up.to_owned(), prefix.clone()));
-        dirs.push((up.join("scenarios"), format!("{prefix}scenarios/")));
-    }
+    let dirs = near_campaign(cx.workspace.0.as_ref(), &runs.dir, "scenarios");
     let found = runs.header.scene_hash.and_then(|h| find_scenario(h, &dirs));
     if found.is_none() {
         cx.toasts.write(Toast::warning(
@@ -1213,6 +1212,25 @@ fn open_run(run_id: u64, cx: &mut CommandCx) {
     let replay = Replay::from_run(runs, &row, frames, found);
     show_replay(replay, &mut cx.replay, &mut cx.jobs, &mut cx.view);
     cx.next.set(AppState::RunReplay);
+}
+
+/// Where to look for a campaign's scenario or requirement set (`sub` is `scenarios` or
+/// `requirements`): the open workspace's `sub/`, then the output folder `dir`, and up to three
+/// folders above it with their `sub/` (a workspace's `campaigns/<id>/out` reaches the
+/// workspace's). Each with the prefix its files are named with.
+fn near_campaign(ws: Option<&Workspace>, dir: &Path, sub: &str) -> Vec<(PathBuf, String)> {
+    let mut dirs = Vec::new();
+    if let Some(ws) = ws {
+        dirs.push((ws.root.join(sub), format!("{sub}/")));
+    }
+    dirs.push((dir.to_owned(), String::new()));
+    let mut prefix = String::new();
+    for up in dir.ancestors().skip(1).take(3) {
+        prefix.push_str("../");
+        dirs.push((up.to_owned(), prefix.clone()));
+        dirs.push((up.join(sub), format!("{prefix}{sub}/")));
+    }
+    dirs
 }
 
 /// Open `replay` at its crashed state with the camera on the body that caused it.
@@ -1484,7 +1502,7 @@ pub fn run_replay_jobs(
     {
         let tick = run.tick();
         let status = run.status();
-        let frames = run.into_frames();
+        let (frames, signals) = run.into_parts();
         let check = crate::rerun::compare(replay.recorded(), &frames, replay.fields());
         let approximate = replay.other_build;
         let line = check.describe_against(replay.recorded_noun());
@@ -1497,6 +1515,7 @@ pub fn run_replay_jobs(
             stride,
             status,
             tick,
+            signals,
         });
         state.show(Shown::Resimulated);
         toasts.write(if exact {

@@ -129,6 +129,9 @@ Tick 0 and is checked bit for bit against its recorded frames; the ghost run; Op
 v0.38 (2026-11-23, build step S4-3) records Run Replay as built (§5.5): a campaign's committed runs read from its
 summaries parts, one run shown from its Tier 3 snapshots and re-simulated at full rate against them (G9);
 `sim_schema::io` gains `committed_parts`, and `parse_part_name` moves there from `sim_hpc` (IB-07 unchanged).
+v0.39 (2026-11-23, build step S4-4) records requirement overlays in Run Replay as built (§5.5): the campaign's
+requirement set found by `req_set_hash`, each requirement drawn over the run, levels on a position as planes; IB-03
+unchanged.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -817,6 +820,15 @@ attitude, velocity and body rates but no force, flags or total energy, so a run'
 `sim_hpc --local` wrote. The verdicts and metrics shown are the summary row's, as the campaign judged them.
 Requirement overlays are step S4-4; picking a run from the Results Explorer waits for `sim_explorer` (step 6b).
 IB-07 and the Parquet schemas are unchanged. Details in `sim_studio_ux.md` §7.9.3.
+
+**As built (step S4-4).** Requirement overlays: the studio finds the campaign's requirement set as a `*.req.ron`
+whose `RequirementSet::hash` equals the summaries header's `req_set_hash` (IB-03, unchanged), and
+`sim_studio::overlay` turns each requirement into the signal it watches, its threshold levels, window and scope,
+with the run's verdict from its summary row. A signal the frames keep (positions, velocities, body rates,
+attitude) is read from them; any other is sampled by the re-simulation through `FieldPath`, as `sim_verify` reads
+it. Levels on a body's position are drawn as planes in `Studio.Viewport` (`ViewSource::planes`). Corridor, cone
+and impact-circle overlays need requirement kinds that carry geometry, which IB-03 does not have yet. Details in
+`sim_studio_ux.md` §7.9.4.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 

@@ -5,8 +5,8 @@
 //! (title bar, activity rail, dock, status bar, notifications). Step S2-1 adds the Scenario
 //! Builder's document ([`builder`]) with its Outliner, Inspector and Lint, S2-2 its Parameters and
 //! S2-3 its Requirements; S3-1 the Preview Run ([`preview`]), S3-2 its 3D [`viewport`], S4-1 Crash
-//! Replay ([`replay`]), S4-2 re-simulation ([`rerun`]) and S4-3 Run Replay ([`runs`]). Requirement
-//! overlays and the other screens follow in S4-4 to S6.
+//! Replay ([`replay`]), S4-2 re-simulation ([`rerun`]), S4-3 Run Replay ([`runs`]) and S4-4 its
+//! requirement overlays ([`overlay`]). Models and Campaign Setup follow in S5 and S6.
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -18,6 +18,7 @@ pub mod builder;
 pub mod campaign;
 pub mod clock;
 pub mod crash;
+pub mod overlay;
 pub mod preview;
 pub mod recent;
 pub mod replay;

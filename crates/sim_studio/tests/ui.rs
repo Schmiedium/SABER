@@ -847,6 +847,18 @@ shared_out = "out"
     (ws, camp.join("out"))
 }
 
+/// The replay's tracks: energy, events, then the requirements in order.
+fn track_kinds(app: &mut App) -> Vec<TrackKind> {
+    let mut q = app.world_mut().query::<&ReplayTrack>();
+    let mut v: Vec<TrackKind> = q.iter(app.world()).map(|t| t.kind).collect();
+    v.sort_by_key(|k| match k {
+        TrackKind::Energy => 0,
+        TrackKind::Events => 1,
+        TrackKind::Requirement(i) => 2 + i,
+    });
+    v
+}
+
 fn all_texts(app: &mut App) -> Vec<String> {
     let mut q = app.world_mut().query::<&Text>();
     q.iter(app.world()).map(|t| t.0.clone()).collect()
@@ -885,7 +897,25 @@ fn a_campaign_run_replays_on_the_run_replay_screen() {
     );
     assert_eq!(r.frames.len(), 9);
     assert!(r.rerun.is_some(), "matched by scene_hash");
-    assert_eq!(count::<ReplayTrack>(&mut app), 0, "no tracks on snapshots");
+    assert_eq!(
+        track_kinds(&mut app),
+        [
+            TrackKind::Requirement(0),
+            TrackKind::Requirement(1),
+            TrackKind::Requirement(2)
+        ],
+        "no energy or event track on snapshots, the requirements' tracks"
+    );
+    assert_eq!(
+        app.world()
+            .resource::<ViewSource>()
+            .planes
+            .iter()
+            .map(|p| p.value)
+            .collect::<Vec<_>>(),
+        [-9.5, -10.5, 0.0],
+        "the requirements' levels on the altitude, as planes"
+    );
     assert_eq!(count::<ViewportView>(&mut app), 1);
     let position = live_replay(&mut app, ReplayLive::Position);
     assert!(
@@ -907,6 +937,9 @@ fn a_campaign_run_replays_on_the_run_replay_screen() {
         "R-hold-low: Fail",
         "R-no-ground: Pass",
         "Metrics",
+        "Requirements over the run",
+        "R-hold-low: z_final_m (Final of entity(1).RigidBody6.position.z) ≤ -9.5 (Fail)",
+        "R-no-ground: never entity(1).RigidBody6.position.z ≥ 0.0 (Pass)",
     ] {
         assert!(texts.iter().any(|t| t.ends_with(want)), "{want:?} shown");
     }
@@ -934,7 +967,17 @@ fn a_campaign_run_replays_on_the_run_replay_screen() {
         "{position}"
     );
     assert!(position.contains("energy"), "{position}");
-    assert!(count::<ReplayTrack>(&mut app) > 0, "tracks on full frames");
+    assert_eq!(
+        track_kinds(&mut app),
+        [
+            TrackKind::Energy,
+            TrackKind::Events,
+            TrackKind::Requirement(0),
+            TrackKind::Requirement(1),
+            TrackKind::Requirement(2)
+        ],
+        "the energy and event tracks on full frames"
+    );
     assert!(
         all_texts(&mut app)
             .iter()
