@@ -9,7 +9,7 @@
 //! frame; step 2 the per-tick event channel (`events`) and field reads for verification probes
 //! (`field`); step 3b the run's Tier 2 and 3 log (`telemetry::TelemetryLog`); step 5d collision
 //! shapes over Parry (`geometry`) and compliant contact with landing-gear points (`contact`).
-//! The fragment pool arrives in step 5e.
+//! Step 5e adds the fragment pool (`fragments`).
 
 pub mod app;
 pub mod body;
@@ -22,6 +22,7 @@ pub mod environment;
 pub mod events;
 pub mod field;
 pub mod force;
+pub mod fragments;
 pub mod geometry;
 pub mod hash;
 pub mod integrator;
@@ -63,14 +64,20 @@ pub use body::{BodyState, BodyTable, FRAGMENT_BASE, MassProps, PointMass3, Rigid
 pub use checks::{CheckCatalog, CheckFactory, CheckState, CustomCheck};
 pub use clock::{RateDivider, SimClock};
 pub use contact::{
-    CONTACT, CONTACT_END, ContactConfig, ContactMaterial, ContactModel, ContactOverride,
-    ContactOverrides, ContactPoint, ContactPoints, Contacts, DampingLaw, GearPoint,
+    CONTACT, CONTACT_DEFERRED, CONTACT_END, CONTACT_PROJECTED, ContactConfig, ContactMaterial,
+    ContactModel, ContactOverride, ContactOverrides, ContactPoint, ContactPoints, Contacts,
+    DampingLaw, GearPoint, IMPACT, RayHit,
 };
 pub use distribution::{Distribution, Sampler};
 pub use environment::{EnvSample, Environment, SimEnvironment, UniformEnvironment, WorldFrame};
 pub use events::{SimEvent, SimEvents};
 pub use field::{FieldPath, FieldReadError};
 pub use force::{ForceModel, Stage, Wrench};
+pub use fragments::{
+    Covariance, FRAGMENTATION, FRAGMENTS_DROPPED, Fragment, FragmentCloud, FragmentConfig,
+    FragmentDrag, FragmentImpact, FragmentParent, FragmentPool, FragmentState, FragmentTotals,
+    FragmentWriter, Fragmentable, FragmentationModel, ImpactTally, ParentSummary,
+};
 pub use geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
 pub use hash::{RollingHash, RunIdentity, state_hash};
 pub use parametric::{

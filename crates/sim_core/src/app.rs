@@ -25,13 +25,19 @@ use crate::body::{MassProps, PointMass3, RigidBody6, SimId};
 use crate::checks::{CheckCatalog, CheckFactory};
 use crate::clock::SimClock;
 use crate::contact::{
-    CONTACT, CONTACT_END, ContactConfig, ContactMaterial, ContactModel, ContactOverride,
-    ContactOverrides, ContactPoints, Contacts, DampingLaw, GearPoint,
+    CONTACT, CONTACT_DEFERRED, CONTACT_END, CONTACT_PROJECTED, ContactConfig, ContactMaterial,
+    ContactModel, ContactOverride, ContactOverrides, ContactPoints, Contacts, DampingLaw,
+    GearPoint, IMPACT,
 };
 use crate::dynamics::{Dynamics, contact_system, integrate_system};
 use crate::environment::{Environment, SimEnvironment, UniformEnvironment, WorldFrame};
 use crate::events::{SimEvents, clear_events};
 use crate::force::ForceModel;
+use crate::fragments::{
+    Covariance, FRAGMENTATION, FRAGMENTS_DROPPED, FragmentCloud, FragmentConfig, FragmentDrag,
+    FragmentPool, Fragmentable, FragmentationModel, ImpactTally, attach_outputs,
+    fragment_integrate_system, fragment_system,
+};
 use crate::geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
 use crate::hash::{
     CONFIG_CONTEXT, RollingHash, RunIdentity, finish, rolling_hash_system, state_hash,
@@ -96,6 +102,9 @@ pub struct SimConfig {
     /// Contact settings (step 5d).
     #[serde(default)]
     pub contact: ContactConfig,
+    /// Fragment pool settings (step 5e, IB-16).
+    #[serde(default)]
+    pub fragments: FragmentConfig,
     /// Flight-recorder frames `K`.
     #[serde(default = "default_recorder_frames")]
     pub recorder_frames: u32,
@@ -117,6 +126,7 @@ impl SimConfig {
             integrator: IntegratorConfig::default(),
             watchdog: WatchdogConfig::default(),
             contact: ContactConfig::default(),
+            fragments: FragmentConfig::default(),
             recorder_frames: default_recorder_frames(),
         }
     }
@@ -132,6 +142,34 @@ impl SimConfig {
         if self.contact.max_contact_pairs == 0 {
             return Err(SetupError::BadConfig(
                 "contact.max_contact_pairs must be at least 1",
+            ));
+        }
+        if !(self.contact.max_projection.is_finite() && self.contact.max_projection >= 0.0) {
+            return Err(SetupError::BadConfig(
+                "contact.max_projection must be finite and at least 0",
+            ));
+        }
+        if self
+            .contact
+            .max_penetration
+            .is_some_and(|m| !(m.is_finite() && m > 0.0))
+        {
+            return Err(SetupError::BadConfig(
+                "contact.max_penetration must be finite and above 0",
+            ));
+        }
+        if self.contact.penetration_ticks == 0 {
+            return Err(SetupError::BadConfig(
+                "contact.penetration_ticks must be at least 1",
+            ));
+        }
+        if self
+            .fragments
+            .lifetime
+            .is_some_and(|l| !(l.is_finite() && l > 0.0))
+        {
+            return Err(SetupError::BadConfig(
+                "fragments.lifetime must be finite and above 0",
             ));
         }
         if self.watchdog.energy_max_j.is_some_and(f64::is_nan) {
@@ -196,7 +234,19 @@ impl SimConfig {
             None => h.update(&[0]),
             Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
         };
-        h.update(&self.contact.max_contact_pairs.to_le_bytes());
+        h.update(&self.contact.max_contact_pairs.to_le_bytes())
+            .update(&self.contact.max_events_per_tick.to_le_bytes())
+            .update(&self.contact.max_projection.to_bits().to_le_bytes());
+        match self.contact.max_penetration {
+            None => h.update(&[0]),
+            Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
+        };
+        h.update(&self.contact.penetration_ticks.to_le_bytes());
+        h.update(&self.fragments.capacity.to_le_bytes());
+        match self.fragments.lifetime {
+            None => h.update(&[0]),
+            Some(v) => h.update(&[1]).update(&v.to_bits().to_le_bytes()),
+        };
         finish(&h)
     }
 }
@@ -389,13 +439,28 @@ impl SimAppBuilder {
             .register_type::<GearPoint>()
             .register_type::<ContactPoints>()
             .register_type::<ContactOverride>()
-            .register_type::<ContactOverrides>();
+            .register_type::<ContactOverrides>()
+            .register_type::<Fragmentable>()
+            .register_type::<FragmentDrag>()
+            .register_type::<FragmentCloud>()
+            .register_type::<Covariance>()
+            .register_type::<ImpactTally>();
         b.world.insert_resource(SimEvents::default());
+        b.world.insert_resource(FragmentPool::default());
         b.world.insert_resource(CheckCatalog::default());
-        b.declare_event(CONTACT).declare_event(CONTACT_END);
+        b.declare_event(CONTACT)
+            .declare_event(CONTACT_END)
+            .declare_event(IMPACT)
+            .declare_event(CONTACT_DEFERRED)
+            .declare_event(CONTACT_PROJECTED)
+            .declare_event(FRAGMENTATION)
+            .declare_event(FRAGMENTS_DROPPED);
         b.add_systems(SimSet::Environment, clear_events)
-            .add_systems(SimSet::Integrate, integrate_system)
-            .add_systems(SimSet::Constraints, contact_system)
+            .add_systems(
+                SimSet::Integrate,
+                (integrate_system, fragment_integrate_system),
+            )
+            .add_systems(SimSet::Constraints, (contact_system, fragment_system))
             .add_systems(SimSet::Telemetry, telemetry_system)
             .add_systems(SimSet::Record, (record_frame, log_tick))
             .add_systems(
@@ -443,6 +508,17 @@ impl SimAppBuilder {
     /// Add a force model. Models are evaluated in the order added.
     pub fn add_force_model(&mut self, model: impl ForceModel) -> &mut Self {
         self.models.push(Box::new(model));
+        self
+    }
+
+    /// Register a fragmentation model (IB-16) under its id, for `Fragmentable` bodies to name.
+    ///
+    /// # Panics
+    /// If a model with the same id is already registered.
+    pub fn add_fragmentation_model(&mut self, model: impl FragmentationModel) -> &mut Self {
+        self.world
+            .resource_mut::<FragmentPool>()
+            .add_model(Box::new(model));
         self
     }
 
@@ -706,6 +782,7 @@ impl SimWorld {
             scenario.spawn(world, &registry.read());
         }
         crate::parametric::resolve(world, params)?;
+        attach_outputs(world);
         for plugin in &self.plugins {
             plugin.start(world)?;
         }
@@ -718,6 +795,9 @@ impl SimWorld {
         crate::with_resource(world, |world, d: &mut Dynamics| {
             d.contact_end_of_tick(world)
         });
+        crate::with_resource(world, |world, pool: &mut FragmentPool| {
+            pool.start(world, config)
+        })?;
 
         let n = world.resource::<Dynamics>().bodies().len();
         world.resource_mut::<TickEnergy>().per_body.resize(n, 0.0);
@@ -728,9 +808,10 @@ impl SimWorld {
             stats.energy_initial = e0;
             stats.energy.push(e0);
         }
+        let parents = world.resource::<FragmentPool>().parent_count();
         world
             .resource_mut::<FlightRecorder>()
-            .ensure(config.recorder_frames as usize, n);
+            .ensure(config.recorder_frames as usize, n, parents);
         record_frame(world);
         let telemetry = *world.resource::<TelemetryConfig>();
         world.resource_mut::<TelemetryLog>().start(&telemetry, n);
@@ -869,6 +950,8 @@ impl SimWorld {
             } else {
                 Vec::new()
             },
+            fragments: self.world.resource::<FragmentPool>().totals(),
+            impacts: self.world.resource::<FragmentPool>().impacts().to_vec(),
         }
     }
 

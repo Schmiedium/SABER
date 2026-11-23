@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.97.1"
 license = "Apache-2.0"
 repository = "https://github.com/Schmiedium/SABER"
 publish = false
@@ -14,6 +14,7 @@ publish = false
 # (docs/design/subsystems-and-interfaces.md §4).
 [workspace.dependencies]
 sim_schema = { path = "crates/sim_schema" }
+sim_hpc = { path = "crates/sim_hpc" }
 sim_core = { path = "crates/sim_core" }
 sim_models = { path = "crates/sim_models" }
 sim_verify = { path = "crates/sim_verify", default-features = false }
@@ -35,6 +36,35 @@ rand_chacha = "=0.10.0"
 bevy_ecs = { version = "=0.20.1", default-features = false, features = ["std", "bevy_reflect"] }
 bevy_reflect = { version = "=0.20.1", default-features = false, features = ["std", "glam"] }
 glam = { version = "0.33.12", features = ["serde"] }
+# The studio (D11): Bevy with Feathers, pinned exactly with bevy_ecs above and upgraded together. Only
+# what the studio draws: UI, picking, a window on X11 (loaded at run time, so no system packages to
+# build), no audio or gamepads. Only `sim_studio_ui` names Feathers types (`sim_studio_ux.md` §6.1.3).
+bevy = { version = "=0.20.1", default-features = false, features = [
+    "std",
+    "multi_threaded",
+    "async_executor",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_state",
+    "bevy_winit",
+    "x11",
+    "default_font",
+    "ui_api",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "bevy_feathers",
+    "bevy_picking",
+    "ui_picking",
+    "bevy_clipboard",
+    "custom_cursor",
+    "bevy_scene",
+    # The 3D viewport (step S3-2): meshes, unlit materials and gizmo lines, rendered into a
+    # `ViewportNode`'s image. No glTF, lights or tonemapping LUTs yet.
+    "bevy_pbr",
+    "bevy_mesh",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+] }
 # Collision detection (D13). Only `sim_core::geometry` imports it (IB-19); pinned exactly because a new
 # version can move contact points, and it is part of `build_id`.
 parry3d-f64 = { version = "=0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }

@@ -503,6 +503,8 @@ struct Collider {
     fixed_box: Option<(DVec3, DVec3)>,
     /// A static collider with a half-space part pairs with every body.
     unbounded: bool,
+    /// Its body fragmented (IB-16): it takes no further part in contact or ray queries.
+    retired: bool,
 }
 
 struct Gear {
@@ -512,6 +514,8 @@ struct Gear {
     point: GearPoint,
     /// The leg's own law (the ground's material plays no part).
     law: Law,
+    /// Its body fragmented (IB-16).
+    retired: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -674,6 +678,7 @@ impl ContactSolver {
                 overrides,
                 fixed_box,
                 unbounded,
+                retired: false,
             });
         }
         if self.colliders.iter().any(|c| c.body.is_none())
@@ -726,6 +731,7 @@ impl ContactSolver {
                         index: k as u32,
                         point: *g,
                         law,
+                        retired: false,
                     });
                 }
             }
@@ -878,6 +884,9 @@ impl ContactSolver {
         let cap = self.config.max_contact_pairs as usize;
         let mut ok = true;
         for (k, c) in self.colliders.iter().enumerate() {
+            if c.retired {
+                continue;
+            }
             self.boxes[k] = match c.body {
                 Some(slot) => {
                     let s = &states[slot];
@@ -923,7 +932,7 @@ impl ContactSolver {
         }
         // Unbounded static colliders (with a half-space) pair with every body.
         for (i, c) in self.colliders.iter().enumerate() {
-            if c.body.is_none() || !ok {
+            if c.body.is_none() || c.retired || !ok {
                 continue;
             }
             for (j, s) in self.colliders.iter().enumerate() {
@@ -968,6 +977,9 @@ impl ContactSolver {
         }
         // Gear rays against static colliders near their body.
         for (g, gear) in self.gears.iter().enumerate() {
+            if gear.retired {
+                continue;
+            }
             let s = &states[gear.body];
             let sweep = s.velocity * dt;
             let reach = gear.point.attach.length() + gear.point.stroke;
@@ -991,6 +1003,21 @@ impl ContactSolver {
             }
         }
         ok
+    }
+
+    /// Take a fragmented body's colliders and gear points out of contact and ray queries (IB-16),
+    /// from the next broad phase on.
+    pub(crate) fn retire_body(&mut self, slot: usize) {
+        for c in &mut self.colliders {
+            if c.body == Some(slot) {
+                c.retired = true;
+            }
+        }
+        for g in &mut self.gears {
+            if g.body == slot {
+                g.retired = true;
+            }
+        }
     }
 
     /// Once per tick, before integration: the broad phase on the tick-start states.

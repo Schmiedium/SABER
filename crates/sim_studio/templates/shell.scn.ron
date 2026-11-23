@@ -1,0 +1,76 @@
+// Aero-ballistics starter (studio template): a synthetic 155 mm-class spin-stabilised shell (not a
+// real round) fired east at 17° from a site at 45° N, with McCoy 6DOF aerodynamics (a C_D(Mach)
+// table and constant coefficients), the 1976 standard atmosphere and Earth rotation. The lift slope
+// is swept as `cla`. The run ends at ground impact. Eight RK4 substeps per 1 ms tick resolve the
+// 1135 rad/s spin. Same scenario as `crates/sim_models/tests/scenarios/shell.scn.ron`.
+(
+    header: (
+        magic: "SABER",
+        format: "scenario",
+        schema_version: "1.0.0",
+    ),
+    units: "SI",
+    frame: ENU,
+    model_library_version: "0.1.1",
+    config: (
+        dt: 0.001,
+        max_ticks: 60000,
+        at_max_ticks: Timeout,
+        integrator: (
+            kind: Rk4,
+            mode: Fixed(substeps: 8, rtol: 1e-6, atol: (pos: 0.001, vel: 0.001, quat: 1e-8, rate: 1e-6, model: 1e-6)),
+            fragments: SemiImplicitEuler,
+        ),
+    ),
+    scene: (
+        entities: {
+            0: (
+                components: {
+                    "sim_core::body::SimId": (100),
+                    "sim_models::environment::Gravity": Flat(g: 9.80665),
+                    "sim_models::environment::Atmosphere": Ussa1976,
+                    "sim_models::environment::Wind": Calm,
+                    "sim_models::environment::EarthRotation": Local(latitude_deg: 45.0),
+                },
+            ),
+            1: (
+                components: {
+                    "sim_core::body::SimId": (1),
+                    "sim_core::body::RigidBody6": (
+                        position: (0.0, 0.0, 0.0),
+                        velocity: (534.9884339103394, 0.0, 165.49131573035015),
+                        attitude: (0.0, -0.14943813247359922, 0.0, 0.9887710779360422),
+                        body_rates: (1135.0, 0.0, 0.0),
+                    ),
+                    "sim_core::body::MassProps": (
+                        mass: 43.0,
+                        inertia: (0.1444, 0.0, 0.0, 0.0, 1.165, 0.0, 0.0, 0.0, 1.165),
+                    ),
+                    "sim_models::ballistics::ProjectileAero": (
+                        diameter: 0.155,
+                        cd0: Mach((
+                            axes: [(name: "mach", breakpoints: [0.6, 0.9, 1.0, 1.1, 1.5, 2.5])],
+                            values: [0.14, 0.16, 0.28, 0.37, 0.33, 0.27],
+                        )),
+                        cd2: Constant(3.0),
+                        cla: Constant(1.7),
+                        cma: Constant(3.6),
+                        cmq: Constant(-10.0),
+                        clp: Constant(-0.02),
+                        cnpa: Constant(-0.4),
+                        cmpa: Constant(0.1),
+                    ),
+                    "sim_models::environment::GroundImpactStop": (altitude_m: 0.0),
+                    "sim_core::parametric::ParamBindings": ([
+                        (
+                            param_key: "cla",
+                            target: "ProjectileAero.cla.0",
+                            default: 1.7,
+                            bounds: Some((1.0, 3.0)),
+                        ),
+                    ]),
+                },
+            ),
+        },
+    ),
+)

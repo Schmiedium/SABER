@@ -6,7 +6,7 @@
 //! past `max_snapshots` are counted, not stored.
 
 use bevy_ecs::prelude::*;
-use sim_schema::BodySnapshot;
+use sim_schema::{BodySnapshot, FragmentCloudSnapshot, TickFrame};
 
 use crate::body::SimId;
 use crate::clock::SimClock;
@@ -185,6 +185,22 @@ pub struct SnapshotSample {
     pub t_s: f64,
     /// The body's state, as the flight recorder holds it.
     pub body: BodySnapshot,
+    /// Its fragments, summed up, when it is a `Fragmentable` body (IB-16).
+    pub fragments: Option<FragmentCloudSnapshot>,
+}
+
+/// Every body of a frame as snapshot samples.
+fn samples(frame: &TickFrame) -> impl Iterator<Item = SnapshotSample> + '_ {
+    frame.bodies.iter().map(|b| SnapshotSample {
+        tick: frame.tick,
+        t_s: frame.t_s,
+        body: *b,
+        fragments: frame
+            .fragments
+            .iter()
+            .find(|c| c.parent_sim_id == b.sim_id)
+            .copied(),
+    })
 }
 
 /// The run's events and snapshots.
@@ -231,12 +247,7 @@ impl TelemetryLog {
         }
         self.snapshot_ticks += 1;
         self.last_snapshot_tick = Some(frame.tick);
-        self.snapshots
-            .extend(frame.bodies.iter().map(|b| SnapshotSample {
-                tick: frame.tick,
-                t_s: frame.t_s,
-                body: *b,
-            }));
+        self.snapshots.extend(samples(frame));
     }
 
     /// The snapshots plus the final state when snapshots are on and the final tick was not on the
@@ -251,11 +262,7 @@ impl TelemetryLog {
             && let Some(frame) = recorder.latest()
             && self.last_snapshot_tick != Some(frame.tick)
         {
-            out.extend(frame.bodies.iter().map(|b| SnapshotSample {
-                tick: frame.tick,
-                t_s: frame.t_s,
-                body: *b,
-            }));
+            out.extend(samples(frame));
         }
         out
     }

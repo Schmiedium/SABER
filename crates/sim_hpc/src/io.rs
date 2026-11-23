@@ -3,8 +3,10 @@
 //!
 //! Workers send one [`IoMsg::Run`] per finished run over a bounded channel, so a slow disk blocks
 //! them instead of growing memory. `IO.Mux` appends the rows to the open **part** in the scratch
-//! directory (`node_{rank}_a{attempt}_p{part}_{summaries|events|snapshots}.parquet` and
-//! `..._crashes.zst`, written as `.partial`), and every `checkpoint_interval_s` closes it: footers
+//! directory (`node_{rank}_a{attempt}_p{part}_{summaries|events|snapshots}.parquet`,
+//! `..._crashes.zst` and, from the first run in the part whose scenario broke up with
+//! `fragment_impacts` on, `..._impacts.parquet` (IB-16), written as `.partial`), and every
+//! `checkpoint_interval_s` closes it: footers
 //! with the part's `run_id` ranges and crash counts, fsync, rename. `IO.Stager` then copies the
 //! closed part to the shared output as `.tmp` files and renames them, summaries last: a part is
 //! committed exactly when its summaries file appears under its final name.
@@ -24,7 +26,7 @@ use sim_schema::io::{
     STATUS_COUNTS_KEY, Table, TableError, TableWriter,
 };
 use sim_schema::{
-    CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, EventRow, RangeSet, SnapshotRow, SummaryRow,
+    CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, EventRow, ImpactRow, RangeSet, SnapshotRow, SummaryRow,
 };
 
 use crate::campaign::Campaign;
@@ -33,7 +35,7 @@ use crate::worker::RunRecord;
 /// A message to `IO.Mux` (IB-06).
 #[derive(Debug)]
 pub enum IoMsg {
-    /// One finished run: its summary, events, snapshots and crash dump.
+    /// One finished run: its summary, events, snapshots, impacts and crash dump.
     Run(Box<RunRecord>),
     /// No more runs: close the part and stop.
     EndOfStream,
@@ -50,6 +52,9 @@ pub struct PartRows {
     pub snapshots: u64,
     /// Crash dumps.
     pub crash_dumps: u64,
+    /// Fragment impact rows (IB-16).
+    #[serde(default)]
+    pub impacts: u64,
 }
 
 /// A closed part.
@@ -94,13 +99,18 @@ pub struct MuxReport {
 struct OpenPart {
     index: u32,
     stem: String,
+    scratch: PathBuf,
     summaries: TableWriter<BufWriter<File>>,
     events: TableWriter<BufWriter<File>>,
     snapshots: TableWriter<BufWriter<File>>,
     crashes: CrashWriter<BufWriter<File>>,
+    /// Opened by the part's first run that broke up, when the campaign writes impacts.
+    impacts: Option<TableWriter<BufWriter<File>>>,
+    impacts_header: Option<sim_schema::FileHeader>,
     buf_summaries: Vec<SummaryRow>,
     buf_events: Vec<EventRow>,
     buf_snapshots: Vec<SnapshotRow>,
+    buf_impacts: Vec<ImpactRow>,
     run_ids: RangeSet,
     crash_counts: BTreeMap<u32, u32>,
     status_counts: BTreeMap<String, u64>,
@@ -116,6 +126,8 @@ const SUFFIXES: [&str; 4] = [
     "crashes.zst",
     "summaries.parquet",
 ];
+/// Only in a part with a fragmenting run, before the summaries.
+const IMPACTS: &str = "impacts.parquet";
 
 fn partial(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.partial"))
@@ -151,7 +163,7 @@ impl OpenPart {
             create(&s.scratch, &name(SUFFIXES[1]))?,
             Table::Snapshots,
             &campaign.table_header(Table::Snapshots),
-            &[],
+            &campaign.snapshot_columns,
         )?;
         let crashes = CrashWriter::new(
             create(&s.scratch, &name(SUFFIXES[2]))?,
@@ -160,13 +172,19 @@ impl OpenPart {
         Ok(Self {
             index,
             stem,
+            scratch: s.scratch.clone(),
             summaries,
             events,
             snapshots,
             crashes,
+            impacts: None,
+            impacts_header: campaign
+                .fragment_impacts
+                .then(|| campaign.table_header(Table::Impacts)),
             buf_summaries: Vec::new(),
             buf_events: Vec::new(),
             buf_snapshots: Vec::new(),
+            buf_impacts: Vec::new(),
             run_ids: RangeSet::new(),
             crash_counts: BTreeMap::new(),
             status_counts: BTreeMap::new(),
@@ -198,12 +216,30 @@ impl OpenPart {
                 .entry(rec.summary.param_set_id)
                 .or_insert(0) += 1;
         }
+        // The impacts file opens with the part's first run that broke up.
+        let broke_up = rec.summary.fragments.first().is_some_and(|&n| n > 0);
+        if self.impacts.is_none()
+            && (broke_up || !rec.impacts.is_empty())
+            && let Some(header) = &self.impacts_header
+        {
+            let name = format!("{}{IMPACTS}", self.stem);
+            self.impacts = Some(TableWriter::new(
+                create(&self.scratch, &name)?,
+                Table::Impacts,
+                header,
+                &[],
+            )?);
+        }
         self.rows.summaries += 1;
         self.rows.events += rec.events.len() as u64;
         self.rows.snapshots += rec.snapshots.len() as u64;
         self.buf_summaries.push(rec.summary);
         self.buf_events.append(&mut rec.events);
         self.buf_snapshots.append(&mut rec.snapshots);
+        if self.impacts.is_some() {
+            self.rows.impacts += rec.impacts.len() as u64;
+            self.buf_impacts.append(&mut rec.impacts);
+        }
         self.flush(batch_rows)
     }
 
@@ -220,6 +256,12 @@ impl OpenPart {
         if self.buf_snapshots.len() >= min_rows.max(1) {
             self.snapshots.write_rows(&self.buf_snapshots)?;
             self.buf_snapshots.clear();
+        }
+        if let Some(w) = &mut self.impacts
+            && self.buf_impacts.len() >= min_rows.max(1)
+        {
+            w.write_rows(&self.buf_impacts)?;
+            self.buf_impacts.clear();
         }
         Ok(())
     }
@@ -245,6 +287,13 @@ impl OpenPart {
         finish_file(self.events.finish(&[])?)?;
         finish_file(self.snapshots.finish(&[])?)?;
         finish_file(self.crashes.finish()?)?;
+        let has_impacts = match self.impacts {
+            Some(w) => {
+                finish_file(w.finish(&[])?)?;
+                true
+            }
+            None => false,
+        };
         finish_file(self.summaries.finish(&[
             (RUN_IDS_KEY, run_ids),
             (CRASH_COUNTS_KEY, counts),
@@ -254,7 +303,9 @@ impl OpenPart {
         ])?)?;
         let mut files = Vec::new();
         let mut names = Vec::new();
-        for suffix in SUFFIXES {
+        let (last, rest) = SUFFIXES.split_last().expect("summaries");
+        let impacts = has_impacts.then_some(IMPACTS);
+        for suffix in rest.iter().copied().chain(impacts).chain([*last]) {
             let name = format!("{}{suffix}", self.stem);
             let path = scratch.join(&name);
             std::fs::rename(partial(scratch, &name), &path)?;

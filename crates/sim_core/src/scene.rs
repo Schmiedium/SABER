@@ -182,6 +182,27 @@ impl SceneEntity {
             .iter()
             .find_map(|c| c.as_ref().downcast_ref::<T>())
     }
+
+    /// A deep copy through reflection (the studio's editable copy of a scene). `None` if a
+    /// component cannot be cloned, which a registered scene component always can.
+    pub fn try_clone(&self, registry: &TypeRegistry) -> Option<SceneEntity> {
+        let components = self
+            .components
+            .iter()
+            .map(|c| {
+                c.reflect_clone().ok().or_else(|| {
+                    registry
+                        .get(c.as_ref().type_id())
+                        .and_then(|r| r.data::<ReflectFromReflect>())
+                        .and_then(|f| f.from_reflect(c.as_partial_reflect()))
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(SceneEntity {
+            key: self.key,
+            components,
+        })
+    }
 }
 
 /// What a scenario says besides its entities, for export from a World.
@@ -380,6 +401,54 @@ impl Scenario {
         scenario.validate(registry)?;
         scenario.rehash(registry);
         Ok(scenario)
+    }
+
+    /// Build a scenario from edited parts (the studio's Builder, `sim_studio_ux.md` §7.2): the
+    /// entities keep their keys and component order, so export writes them as authored. Validated
+    /// and hashed like a parsed file; the header is this build's, as in [`Scenario::from_world`].
+    pub fn from_parts(
+        entities: Vec<SceneEntity>,
+        meta: SceneMeta,
+        visual: Option<&str>,
+        registry: &TypeRegistry,
+    ) -> Result<Self, SceneError> {
+        meta.config.validate().map_err(SceneError::BadConfig)?;
+        let visual = match visual {
+            Some(v) => Some(
+                RawValue::from_ron(v)
+                    .map_err(|e| SceneError::BadHeader(format!("the visual section: {}", e.code)))?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        let mut header = FileHeader::new(
+            SCENE_FORMAT,
+            SCENE_SCHEMA_VERSION,
+            env!("CARGO_PKG_VERSION"),
+        );
+        header.scene_hash = None;
+        let mut scenario = Self {
+            header,
+            frame: meta.frame,
+            model_library_version: meta.model_library_version,
+            config: meta.config,
+            entities,
+            visual,
+            scene_hash: 0,
+            visual_hash: None,
+        };
+        scenario.validate(registry)?;
+        scenario.rehash(registry);
+        Ok(scenario)
+    }
+
+    /// What the scenario says besides its entities.
+    pub fn meta(&self) -> SceneMeta {
+        SceneMeta {
+            frame: self.frame,
+            config: self.config.clone(),
+            model_library_version: self.model_library_version,
+        }
     }
 
     /// Structural checks after parsing: `SimId`s, then every binding and uncertainty.

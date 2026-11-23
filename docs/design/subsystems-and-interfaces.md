@@ -79,6 +79,51 @@ limit, a first- or second-order lag and backlash; and `Imu`, `Gnss` and `Baromet
 random walk, quantisation, divided rates and latency. In the kernel: `FieldPath::write`, `Environment: Any`
 with `SimEnvironment::downcast_mut`, and `Default` for `RngStreams`. `LIBRARY_VERSION` 0.1.3. The rotorcraft
 and control plugins are part 2 of step 5c.
+v0.23 (2026-11-03, build step 5c, part 2) records the rotorcraft and control plugins as built (§5.2, IB-08):
+`Rotorcraft` with lumped rotors whose speeds are integrated states behind a first-order motor lag, frame and
+rotor drag, spin-up and gyroscopic moments, and `MixerCommand` through the minimum-norm inverse of the
+allocation matrix; `PidControl` loops that read and write fields by path, cascade and wrap angles; and the
+`Controller` trait as built (a component with observation and command components, run by
+`ControllerPlugin<C>`). `LIBRARY_VERSION` 0.1.4.
+v0.24 (2026-11-03, build step 5d, part 1) records geometry and compliant contact as built (§5.1, §6, IB-19):
+`sim_core::geometry` over Parry `=0.31.1` and `sim_core::contact` with its solver inside `Dynamics`;
+`SimEvent` and the event log gain the other entity and a position; `ResolveReport` gains setup warnings;
+`SimConfig` gains `contact.max_contact_pairs`.
+v0.25 (2026-11-03, build step 5d, part 2) records impulsive contact as built (§5.1, §6, IB-19): impacts
+located inside `Integrate`, `impact`, `contact_deferred` and `contact_projected` events, `SimEvent.time`,
+and `contact.max_events_per_tick` and `contact.max_projection` in `SimConfig`.
+v0.26 (2026-11-03, build step 5d, part 3) records the kernel ray query, range finders and the
+persistent-penetration watchdog as built (§5.1, §5.2, IB-19): `Dynamics::ray_cast`, `RangeFinder` in the
+`SensorPlugin`, `contact.max_penetration` and `contact.penetration_ticks` in `SimConfig`, and
+`CrashKind::Penetration`. `LIBRARY_VERSION` 0.1.5.
+v0.27 (2026-11-03, build step 5e, part 1) records the fragment pool's kernel side as built (§5.1, IB-16): slots
+as a struct of arrays rather than dormant entities, the `FragmentationModel` trait with `setup`, `triggers`
+and `generate`, parent retirement, fragment motion and impacts, `fragmentation` and `fragments_dropped`
+events, and `fragments` in `SimConfig`. The impact table, summary column, aggregates and drag importer are
+step 5e-2.
+v0.28 (2026-11-03, build step 5e, part 2) records the fragment outputs as built (§5.1, §5.4, IB-04, IB-07,
+IB-09, IB-13, IB-16): the `FragmentCloud` and `ImpactTally` components and their signals (`impacts(SimId)`
+shorthand), the dropped-fragments `Inconclusive` rule, fragment clouds in recorder frames (crash stream 2.0
+with an upgrader for 1.x) and Tier 3 snapshots (`ch_frag_*`), the summaries' `fragments_*` family (summaries
+1.1), `*_impacts.parquet` from `sim_hpc` with `[output] fragment_impacts`, and
+`sim_models::import::fragment_drag`.
+v0.29 (2026-11-03, build step S1) records the studio's frame as built (§5.5): kit, states, workspaces, starter
+packs, Launcher and shell; details in `sim_studio_ux.md` §6.3. It also records D21 (was O9): `Probability`
+requirements are judged pooled by default and per parameter set on request, as step 4c built them.
+v0.30 (2026-11-03, build step S2-1) records the Builder's document as built (§5.5) and the kernel API it uses
+(§5.1): `Scenario::from_parts`, `Scenario::meta` and `SceneEntity::try_clone`.
+v0.31 (2026-11-03, build step S2-2) records the bind menu as built (§5.5): `ParamBindings` and `Uncertainties`
+edited from the studio, with no change to their file form.
+v0.32 (2026-11-03, build step S2-3) records the Requirements tab as built (§5.5): the studio edits a `.req.ron`
+and compiles it against the open scenario with `sim_verify`'s own Tick-0 compiler (IB-03).
+v0.33 (2026-11-04, build step S3-1) records the Preview Run as built (§5.5), which builds its World the way `sim_hpc`
+does (R7), and `sim_verify`'s read-only `VerifyState::progress` for live requirement status (§5.3).
+v0.34 (2026-11-04, build step S3-2) records the Preview Run's 3D viewport as built (§5.5): `RenderBridge` and
+`Studio.Viewport` as the `sim_studio::viewport` f64 logic and its draw systems, with the floating origin at the
+camera pivot (G7).
+v0.35 (2026-11-04, build step S3-3) records the kit's bundled symbol font (§5.5).
+v0.36 (2026-11-04, build step S4-1) records Crash Replay as built (§5.5): recorded frames only, no re-simulation
+(D15), with no change to IB-10.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -352,12 +397,12 @@ flowchart LR
 | `SimClock` | Tick counter + fixed dt + multi-rate dividers so controllers/sensors can run at e.g. 1/10 physics rate deterministically. | `RateDivider(u32)` |
 | `Core.Integrator` | One Butcher-tableau-driven explicit RK stepper for every method (RK2, RK4 default, BS3(2), RKF45, CK45, DOPRI5(4), DOP853) plus semi-implicit Euler. Crosses each tick in fixed substeps or adaptive substeps (PI control) that always land exactly on the tick boundary; embedded pairs report a local error estimate in both modes; dense output feeds contact event location. One integrator per World; fragments use their own fixed method (D14). | `IntegratorConfig`, `Integrator`, `Tableau<S>`, `trait OdeSystem`, `StateLayout`, `TickReport`, `IntegratorStats`, `SolverFailure` |
 | `SimRng` | Root RNG + **named substreams** (`rng.stream("wind")`) so adding a new noise source doesn't shift every other random draw. | `SimRng`, `RngStream` |
-| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). As built (step 3b): after the recorder in `SimSet::Record`, `TelemetryLog` copies this tick's events (with the body's position from the frame just recorded) and, every `snapshot_every` ticks from Tick 0, every body's state; buffers are sized at Tick 0 from `TelemetryConfig { max_events, snapshot_every, max_snapshots }` (a campaign setting, not in `sim_config_hash`), so overflow is counted, never allocated, and `RunOutput` adds the final state when it was off the cadence. Adaptive snapshot ramp-up is not built yet. As built (step 5d, part 1): `SimEvent` also carries `other` (the second entity of a contact) and `pos` (where it happened; when absent the log uses the body's position), and the log row fills `other_sim_id`. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
+| `Telemetry` | T1 online reductions, T2 events, T3 adaptive snapshots. Writes into pre-allocated per-run buffers. Tick energies are computed here once and shared with the recorder and watchdog. As built (step 2): models emit named `SimEvent { name, sim_id, value }`s into `SimEvents`, which is cleared at the start of every tick (first system of `Environment`) and holds 256 events per tick, counting further ones as dropped instead of allocating; names are `&'static str` declared with `SimAppBuilder::declare_event`. The `events.parquet` row is `sim_schema::EventRow` (3a); writing it is `IO.Mux`'s (3b). As built (step 3b): after the recorder in `SimSet::Record`, `TelemetryLog` copies this tick's events (with the body's position from the frame just recorded) and, every `snapshot_every` ticks from Tick 0, every body's state; buffers are sized at Tick 0 from `TelemetryConfig { max_events, snapshot_every, max_snapshots }` (a campaign setting, not in `sim_config_hash`), so overflow is counted, never allocated, and `RunOutput` adds the final state when it was off the cadence. Adaptive snapshot ramp-up is not built yet. As built (step 5d, part 1): `SimEvent` also carries `other` (the second entity of a contact) and `pos` (where it happened; when absent the log uses the body's position), and the log row fills `other_sim_id`. As built (step 5e-2): a snapshot of a `Fragmentable` body carries its fragment cloud from the same frame (`SnapshotSample::fragments`), and `RunOutput` adds the run's fragment counts and impacts. | `RunningStats` (Welford energy statistics, energy drift, peak force), `TickEnergy`, `SimEvent`, `SimEvents`, `SnapshotSampler` |
 | `FieldPath`, `CheckCatalog` | Kernel support for verification that model plugins can reach without depending on `sim_verify` (§4): `FieldPath` reads a number or `bool` from `Component.field.path` through a path parsed once (no allocation per read); `CheckCatalog` holds the named custom requirement checks plugins register with `SimAppBuilder::register_check` (step 2). | `FieldPath`, `FieldReadError`, `CustomCheck`, `CheckState`, `CheckCatalog` |
-| `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). | `FlightRecorder` |
-| `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). As built (step 5d, part 1): the module is `sim_core::geometry`; shapes are `CollisionShape { parts }` of `ShapePart { shape: ShapeDesc, pose: Pose }`, built into Parry shapes at Tick 0 (meshes and height fields with their BVH); the broad phase lives in `ContactSolver`. Ray queries serve gear points now and range sensors in 5d-2. | `CollisionShape`, `ShapePart`, `ShapeDesc`, `Pose` |
-| `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. As built (step 5d, part 1): `sim_core::contact`, owned by `Dynamics`; `Compliant` and `EventOnly` (at tick ends) only, `Impulsive` arrives in 5d-2. Forces are added after the force models in every stage; `SimSet::Constraints` fills `Contacts` and emits `contact` and `contact_end`. Details in `physics-engine-tradeoffs.md` §9.7a. | `ContactMaterial`, `DampingLaw`, `ContactPoints`, `GearPoint`, `ContactOverrides`, `ContactConfig`, `Contacts`, `ContactPoint` |
-| `FragmentPool` | Fixed-capacity store of dormant 3DOF fragment slots, sized from the scenario and allocated at Tick 0 so fragmentation never allocates mid-run (IB-16). Absent when a scenario declares no fragmentation. | `FragmentPool`, `FragmentSlot` |
+| `Core.Recorder` | Fixed-capacity ring buffer of `TickFrame`s. Records authored bodies and per-parent fragment aggregates, never individual fragments (IB-16). As built (step 5e-2): every frame carries `TickFrame::fragments`, one `FragmentCloudSnapshot` per `Fragmentable` body in `SimId` order, with room reserved at Tick 0. | `FlightRecorder` |
+| `GeometryService` | Only module that imports Parry. Builds Parry shapes from `CollisionShape` and the terrain BVH at Tick 0; runs the swept-AABB sort-and-sweep broad phase; wraps contact, time-of-impact and ray/segment queries for contact, sensors and fragment impacts. All buffers preallocated (D13, IB-19). As built (step 5d, part 1): the module is `sim_core::geometry`; shapes are `CollisionShape { parts }` of `ShapePart { shape: ShapeDesc, pose: Pose }`, built into Parry shapes at Tick 0 (meshes and height fields with their BVH); the broad phase lives in `ContactSolver`. Ray queries serve gear points; from step 5d-3 `Dynamics::ray_cast` also serves range sensors (first collider along a ray, skipping one `SimId`, `RayHit { distance, point, normal, sim_id }`). | `CollisionShape`, `ShapePart`, `ShapeDesc`, `Pose` |
+| `ContactSolver` | Contact response for the three models in `physics-engine-tradeoffs.md` §9: `Compliant` (spring–damper + regularised friction, evaluated in every RK4 stage), `Impulsive` (restitution + friction cone at an event-located time of impact), `EventOnly` (detect and record). Emits `SimEvent::Contact`. As built (step 5d, part 1): `sim_core::contact`, owned by `Dynamics`; `Compliant` and `EventOnly` (at tick ends) only, `Impulsive` arrived in 5d-2 (`sim_core::contact::impact`): impacts located inside `Integrate` by re-integrating every body, Newton impulses with Coulomb friction (Poisson and plastic fallbacks when Newton would add energy), the resting switch, deferred impacts, penetration recovery, swept `EventOnly` checks. Forces are added after the force models in every stage; `SimSet::Constraints` fills `Contacts` and emits `contact` and `contact_end`. Details in `physics-engine-tradeoffs.md` §9.7a and §9.7b. | `ContactMaterial`, `DampingLaw`, `ContactPoints`, `GearPoint`, `ContactOverrides`, `ContactConfig`, `Contacts`, `ContactPoint` |
+| `FragmentPool` | Fixed-capacity store of dormant 3DOF fragment slots, sized from the scenario and allocated at Tick 0 so fragmentation never allocates mid-run (IB-16). Absent when a scenario declares no fragmentation. As built (step 5e-1): `sim_core::fragments`, a struct of arrays (no per-fragment entity), sized to `config.fragments.capacity` when a `Fragmentable` body exists and to nothing otherwise. As built (step 5e-2): the per-parent `FragmentCloud` and per-target `ImpactTally` components, updated at the end of every tick (IB-16). | `FragmentPool`, `Fragmentable`, `FragmentDrag`, `FragmentationModel`, `FragmentCloud`, `ImpactTally` |
 | `Core.Watchdog` | Detects divergence, sets `SimStatus::Crashed*`, tags `FLAG_NAN_ORIGIN`. Checks every body's state is finite, then (when set) that total mechanical energy (translational, rotational and the environment's gravity potential) stays at or below `energy_max_j`. Names the first non-finite body in `SimId` order, or the body with the most energy. | `WatchdogConfig { energy_max_j: Option<f64> }`, `RunStatus` |
 | `TerminationPolicy` | Ends the run: tick budget, model-declared stop conditions (impact, landing, goal reached), crash. Stop conditions call `StopRequests::request(name)`; the run ends as `Terminated` at the end of that tick. At `max_ticks` the run ends with `at_max_ticks`, `Completed` by default (D19). | `SimStatus`, `StopRequests`, `MaxTicksOutcome` |
 | `RunSink` | Abstracts output so the kernel never knows whether it is in the GUI or on a cluster. | `trait RunSink` (IB-06), `RunOutput`, `MemorySink` |
@@ -424,120 +469,9 @@ at or below that altitude; the plugin lists the watched bodies at Tick 0, so a s
 watched. `AeroTable` has one to four named axes of strictly increasing breakpoints, values with the last axis
 fastest, multilinear interpolation, and `Clamp` (default) or `Extrapolate` outside the grid.
 `sim_models::add_library` adds every library plugin, and `sim_models::LIBRARY_VERSION` (0.1.0 at step 1c,
-0.1.1 from step 5a, 0.1.2 from step 5b, 0.1.3 from step 5c) is the version scenarios check against (IB-01).
-
-**As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
-`SetupError` names the body that breaks a rule:
-
-- `ProjectileAero { diameter, cd0, cd2, cla, cla2, cma, cma2, cmq, clp, cnpa, cmpa, cl0 }` on a `RigidBody6`
-  whose body `x` axis is the axis of symmetry, nose forward. Each coefficient is a `Coef`: `Constant(f64)` or
-  `Mach(AeroTable)` with one axis named `mach`, looked up at the Mach number of the air-relative velocity.
-  Every coefficient defaults to zero, so a scenario names only those it uses.
-- `PointMassAero { diameter, cd0 }` on a `PointMass3`: drag only (the 3DOF option of D2).
-
-With `v_b = q⁻¹(V − wind)`, `v = |v_b|`, `x̂` the body axis, `q_s = ½ρ·πd²/4`, `sin²δ = (v_y² + v_z²)/v²` and
-`(p, q, r)` the body rates relative to the world frame, the force and moment in body axes are:
-
-| Term | Body-axis form | Sign convention |
-|---|---|---|
-| Drag | `−q_s (C_D0 + C_D2 sin²δ) v v_b` | |
-| Lift | `q_s (C_Lα + C_Lα2 sin²δ) [v_b × (x̂ × v_b)]` | toward the nose for `C_Lα > 0` |
-| Magnus force | `q_s d p C_Npα (x̂ × v_b)` | |
-| Overturning moment | `q_s d v (C_Mα + C_Mα2 sin²δ) (v_b × x̂)` | `C_Mα > 0` is statically unstable, as in McCoy |
-| Pitch damping | `q_s d² v C_Mq (0, q, r)` | `C_Mq` stands for `C_Mq + C_Mα̇` |
-| Spin damping | `q_s d² v C_lp p x̂` | |
-| Magnus moment | `q_s d² p C_Mpα [x̂ × (v_b × x̂)]` | |
-| Roll drive (fin cant) | `q_s d v² C_l0 x̂` | |
-
-Linearised for small yaw, and dropping the Magnus force and products of small terms as McCoy does, these give
-his yaw equation `ξ'' + (H − iP)ξ' − (M + iPT)ξ = 0` per calibre with his `H`, `P`, `M` and `T` (verification
-§6.2). A body carries one of the two components; either on a body of the other kind
-or on an entity without a body, a non-finite coefficient, a non-positive diameter or a table that is invalid
-or not over `mach` is a `SetupError`. The force model copies each body's coefficients at Tick 0, after the
-Resolver, so a coefficient can be swept (`ProjectileAero.cla.0` targets a `Constant`). It skips a body with no
-air or no airspeed. The plugin inserts `AeroState { mach, dynamic_pressure, total_yaw, spin_rate,
-gyro_stability }` on each such body at Tick 0 and updates it in `SimSet::Telemetry` from a list built at Tick 0,
-so metrics can read it (`entity(1).AeroState.mach`). `gyro_stability` is McCoy's
-`S_g = I_x² p² / (2ρ I_y S d v² C_Mα)`. `AeroState` is run output: the plugin overwrites it at every Tick 0, so a
-scenario file need not carry it.
-
-`EnvironmentPlugin` also reads an optional `EarthRotation` (`None`, `Ecef`, or `Local { latitude_deg }` for an
-ENU or NED frame whose origin is at that geodetic latitude). The frame then turns at the WGS 84 rate
-`ω_E = 7.292115e-5 rad/s`: about `+z` in ECEF, `(0, cos φ, sin φ)` in ENU, `(cos φ, 0, −sin φ)` in NED. The
-kernel adds the Coriolis and centrifugal terms (§10.3). Without the component no frame rotates, ECEF
-included, so scenarios written before step 5a run unchanged. `Ecef` with J2 gravity gives WGS 84 normal
-gravity less its small J4 term. With `Local`, flat gravity is the local plumb line (centrifugal term at the
-origin included), and the kernel adds the Coriolis term and the centrifugal term of the offset from the
-origin. `Ecef` in a local frame, `Local` in ECEF or a latitude outside ±90° is a `SetupError`.
-
-**As built (step 5b).** `FixedWingPlugin` (`ModelId` namespace `fixedwing/`) acts on a `RigidBody6` whose body
-axes are forward, right, down. Its components, each checked at Tick 0 with a `SetupError` naming the body:
-
-- `FixedWingAero { area, span, chord, moment_reference, cx, cy, cz, lift, drag, roll, pitch, yaw }`. Each of the
-  eight coefficients is a list of `AeroTerm { value, factors }`, summed. A value is `Constant(f64)` or
-  `Table(AeroTable)` whose axes are named after inputs; a factor is `Input(i)`, `Sign(i)` (−1 below zero, else
-  +1, for data tabulated over `|β|`) or `Poly(i, [c₀, c₁, …])`. The 21 inputs (`AeroInput`) are α and β in
-  radians or degrees, `|β|`, Mach, altitude, airspeed, each control surface in radians or degrees, the
-  normalised rates `p̂ = pb/2V`, `q̂ = qc̄/2V`, `r̂ = rb/2V`, and throttle. So a table buildup (Stevens and
-  Lewis's F-16), stability derivatives (`C_mq · q̂`) or a mix are all data, not code.
-- `ControlSurfaces { elevator, aileron, rudder, flap, throttle }`, radians and 0–1, read once per tick (IB-08),
-  so a controller, an actuator model (5c), a scenario or a sweep can set them. The sign convention (positive
-  elevator trailing edge down, positive aileron rolls left, positive rudder yaws left) is the data's.
-- `Propulsion { engine, thrust_point }`: `Thrust(Vec<AeroTerm>)` in newtons, or `Turbofan { idle, military,
-  maximum, angular_momentum }`, Stevens and Lewis's F-16 engine: throttle gearing to a commanded power, a power
-  lag whose rate depends on the change asked for, thrust interpolated between the tables by power, and the
-  rotor's gyroscopic moment `−ω × h_e`.
-- `EngineState { power }`: the turbofan's lag, an integrated state the force model owns (IB-08), inserted at
-  Tick 0 at the commanded power unless the scenario gives one.
-- `AirData { airspeed, alpha, beta, mach, dynamic_pressure, load_factor, thrust }`: telemetry at the end of
-  every tick (`entity(1).AirData.alpha`).
-- `TrimCondition { airspeed, flight_path_angle, heading }`: the plugin trims the aircraft for steady straight
-  wings-level flight at Tick 0, in `after_setup`: Levenberg–Marquardt over throttle, elevator, aileron, rudder,
-  α and β on the World's full right-hand side (`sim_core::dynamics::derivatives`), to residuals below 1e-9.
-  The position stays as authored, so altitude and airspeed can be swept. A trim that fails, needs a throttle
-  outside 0–1, or runs in ECEF or a rotating frame is a `SetupError`.
-
-Force `F = q̄S[(C_X, C_Y, C_Z) + C_L (sin α, 0, −cos α) − C_D (cos α, 0, sin α)]` (lift and drag in stability
-axes) and moment `q̄S(b C_l, c̄ C_m, b C_n) + r_ref × F` about the centre of mass, where `r_ref` is the point the
-moment data refer to; then thrust along body `x` at `thrust_point`. `FixedWingAero` and `ProjectileAero` on one
-body is a `SetupError` (D9). Coefficients are copied at Tick 0 after the Resolver, so any term can be swept.
-The Stevens–Lewis F-16 is in the reference store (`tests/reference/stevens_lewis/f16/`) as a scenario file.
-
-**As built (step 5c, part 1).** Turbulence, servos and sensors; rotorcraft and control follow in part 2.
-
-- `Wind::Dryden { mean, airspeed, heading, intensity, scale }` (local ENU or NED frames only): the MIL-F-8785C
-  spectra `Φ_u = σ_u² (2L_u/π) / (1 + (L_uΩ)²)` and `Φ_v = σ_v² (L_v/π)(1 + 3(L_vΩ)²) / (1 + (L_vΩ)²)²` (`w`
-  likewise), which are MIL-HDBK-1797's with its lateral and vertical lengths doubled. The field is frozen and
-  traversed at `airspeed`, the same everywhere at a given time, along world-fixed axes: `u` horizontal along
-  `heading`, `v` to its right, `w` down. Each component is the exact discretisation of its shaping filter
-  under continuous white noise, so its samples on the tick grid have exactly the Dryden autocorrelation for
-  any tick length; the state starts from the stationary distribution. The plugin draws five normals a tick
-  from the `environment/dryden` stream in `SimSet::Environment`, and the wind is interpolated linearly within
-  the tick, so every integrator stage sees a continuous wind. A trim at Tick 0 trims into the gust at `t = 0`.
-- `Actuators { channels }`: each `Actuator { output, command, hold_start, min, max, rate_limit, lag, backlash,
-  position }` drives an `f64` (or `f32`) field of a component on the same entity, named by its path
-  (`ControlSurfaces.elevator`, later `Rotorcraft.rotors[2].command`). In `SimSet::Actuation` it clamps the
-  command, moves the lag toward it (`None`; `FirstOrder { time_constant }` with the rate limit solved in
-  closed form; `SecondOrder { natural_frequency, damping }` by the matrix exponential of the error dynamics,
-  with the rate limit capping the tick's change), applies backlash of total width `backlash`, clamps to the
-  limits, and writes the position at the end of the tick to the field and to `position`. Channels are set up
-  in `after_setup`, after every other plugin and any trim: they start at rest at the field's value, which
-  must lie within the limits, and `hold_start` commands that value, so servos hold a trimmed aircraft as it
-  was. Unknown or non-float fields, a second channel on one field, a channel driving `Actuators`, and bad
-  parameters are `SetupError`s. A scenario file need give only `output`; the rest default to no limits, no
-  rate limit, no lag and no backlash.
-- `Imu`, `Gnss` and `Barometer` components, each with `rate_divider`, `latency` (ticks), a `Noise { white,
-  bias, bias_walk, resolution }` per measured quantity (applied to each axis independently) and its outputs
-  plus `valid`. In `SimSet::Sensors` a sensor samples the state the tick starts from when the tick is a
-  multiple of its divider, and publishes the newest sample at least `latency` ticks old, so a controller in
-  the same tick sees it exactly `latency` ticks late. The `Imu` (on a `RigidBody6`, at the centre of mass,
-  body axes) reads the inertial rate and the specific force averaged over its sample period, with gravity and
-  a turning frame's terms removed; the `Gnss` reads world-frame position and velocity; the `Barometer` reads
-  the environment's static pressure and the 1976 standard's pressure altitude of what it measured. The bias
-  starts at `bias` and walks by `bias_walk·√T·η` per sample period `T`. Each sensor draws two normals per axis
-  per sample from its own stream `sensors/<kind>/<SimId>`, so adding or retuning one sensor never changes
-  another's draws. Every sensor field may be left out of a scenario file (a sample every tick, no latency,
-  no noise).
+0.1.1 from step 5a, 0.1.2 from step 5b, 0.1.3 from step 5c, 0.1.4 from step 5c part 2, 0.1.5 from step 5d
+part 3) is the version
+scenarios check against (IB-01).
 
 **As built (step 5a).** `AeroBallisticsPlugin` (`ModelId` namespace `ballistics/`) acts on two components, and a
 `SetupError` names the body that breaks a rule:
@@ -762,15 +696,19 @@ feeds the reducers and moves every open requirement:
   stop (`StopRequests`, reason `requirement_failed`, so the run ends `Terminated` at the end of that tick).
 - **After the run,** `run_verdicts(world)` (or `VerifyState::finalize(world, status, stop_reason)`) gives the
   `RunVerdictRow` by §8.2. Ticks never allocate; the row is built once per run.
+- **While it runs** (step S3-1), `VerifyState::progress()` reads where the run stands without changing it: every
+  metric so far, every requirement's settled verdict (a `Threshold` once decided as above) or `None`, and the last
+  reading of the signal each `Envelope`, `Never` or `Eventually` watches. The studio's Preview Run shows it live;
+  the run's verdicts still come only from `finalize`.
 
 ### 5.4 `sim_schema` — formats & versions (new)
 
 | Item | Content |
 |---|---|
 | `FileHeader` | `magic`, `format`, `schema_version` (semver), `saber_version`, `build_id` (git sha + rustc + target + feature flags), `campaign_id`, `scene_hash`, `req_set_hash`, `created_utc`. As built (step 1c): a serde struct whose last five fields are optional (left out when unset); `FileHeader::check(format, supported)` checks the magic, the format and the version, and `Semver::satisfies` is Cargo's caret rule (same major, at least the required version, and the same minor below 1.0). |
-| Arrow schemas | `SUMMARY_SCHEMA` (fixed + dynamic `param_*`, `metric_*`, `req_*` columns), `EVENTS_SCHEMA`, `SNAPSHOTS_SCHEMA`, `VERDICTS_SCHEMA`, `MANIFEST_SCHEMA`. As built (step 3a): one `io::Table` enum (`Summaries`, `Events`, `Snapshots`, `Impacts`, `Manifest`, `Verdicts`) whose `columns()` are the fixed columns in file order with type and nullability, `dynamic()` the families allowed after them (`param_ f64`, `metric_ f64`, `req_ u8`; `ch_ f64` for snapshots; `param_ f64` for the manifest) and `sort_key()`. `arrow_schema(dynamic)` builds the Arrow schema from full dynamic names (families in order) and `check_schema` checks a file's. Every table is schema version `1.0.0`. |
+| Arrow schemas | `SUMMARY_SCHEMA` (fixed + dynamic `param_*`, `metric_*`, `req_*` columns), `EVENTS_SCHEMA`, `SNAPSHOTS_SCHEMA`, `VERDICTS_SCHEMA`, `MANIFEST_SCHEMA`. As built (step 3a): one `io::Table` enum (`Summaries`, `Events`, `Snapshots`, `Impacts`, `Manifest`, `Verdicts`) whose `columns()` are the fixed columns in file order with type and nullability, `dynamic()` the families allowed after them (`param_ f64`, `metric_ f64`, `req_ u8`; `ch_ f64` for snapshots; `param_ f64` for the manifest) and `sort_key()`. `arrow_schema(dynamic)` builds the Arrow schema from full dynamic names (families in order) and `check_schema` checks a file's. Every table is schema version `1.0.0`. As built (step 5e-2): summaries `1.1.0` adds a fourth family, `fragments_ u64`, after `req_`: `fragments_written`, `fragments_dropped`, `fragments_impacted`, `fragments_expired` (`SummaryRow::FRAGMENT_COLUMNS`, `SummaryRow::fragments`), present only when the scenario has a `Fragmentable` body, so 1.0 files read unchanged; the snapshot channels of a fragmenting campaign are `FragmentCloudSnapshot::CHANNELS` (`ch_frag_*`, 20 columns). |
 | Parquet I/O | As built (step 3a, feature `io`): `write_parquet` (zstd) puts the `FileHeader` JSON in the footer under `saber.header`, plus extra entries (`saber.run_ids`, `saber.crash_counts`, `saber.sampler`); `read_parquet` refuses a file without the header, with another format or schema major, or with columns that do not match, before it reads a row. `TableRow` turns each row type (`SummaryRow`, `EventRow`, `SnapshotRow`, `ImpactRow`, `ManifestRow`, `CampaignVerdictRow`, which need no Arrow) into a record batch and back, refusing unknown enum bytes and half-null vectors. Arrow and Parquet are pinned to 59.x, the release DataFusion 55.2 uses. |
-| `CrashDump` | header + run identity + `SimStatus` + `CrashReason` + chronological `Vec<TickFrame>` + optional panic message/backtrace. As built (step 3a): `CrashDump { header, run_id, param_set_id, replicate_seed, params: Vec<(String, f64)>, status, reason, panic, frames }` (the backtrace waits for 3b's `catch_unwind`); `io::CrashWriter` and `io::CrashReader` write and read the stream described in IB-07, format `crashes` `1.0.0`. bincode is pinned (`=2.0.1`) because its bytes are on disk. |
+| `CrashDump` | header + run identity + `SimStatus` + `CrashReason` + chronological `Vec<TickFrame>` + optional panic message/backtrace. As built (step 3a): `CrashDump { header, run_id, param_set_id, replicate_seed, params: Vec<(String, f64)>, status, reason, panic, frames }` (the backtrace waits for 3b's `catch_unwind`); `io::CrashWriter` and `io::CrashReader` write and read the stream described in IB-07, format `crashes` `1.0.0`. bincode is pinned (`=2.0.1`) because its bytes are on disk. As built (step 5e-2): `crashes` `2.0.0`, because `TickFrame` gained `fragments: Vec<FragmentCloudSnapshot>` and bincode has no optional fields; `CrashReader` still opens a 1.x stream and decodes its dumps with the 1.x frame layout (no fragments), the upgrader for one previous major (§10.4), checked against the step-3a golden stream kept as `tests/shared/io/crashes_v1.zst`. A writer takes only 2.x. |
 | `build_id` | As built (step 3a): `sim_schema::build_id()` is `saber <version> git <sha> <rustc -V> target <triple> profile <profile>`, stamped by `build.rs` (`SABER_GIT_SHA` overrides the git lookup for builds outside a checkout). A library cannot see the final binary's Cargo features, so the id has none yet; `sim_hpc` can append its own with 3b. Bit-identical results are promised only within one `build_id` (D1). |
 | `TickFrame`, `BodySnapshot`, `CrashReason` | The flight-recorder frame (`tick`, `t_s`, `total_energy`, bodies in `SimId` order with `sim_id`, `pos`, `quat_wxyz`, `lin_vel`, `ang_vel` (body rates), `force_mag`, `flags`), the `FLAG_*` bits, and `CrashReason { kind, sim_id, tick, detail }`. Plain `f64` arrays, so the crate needs no maths library (step 1b). |
 | `SimStatus`, `CrashKind`, `IntegratorKind`, `EventType`, `Verdict` | `#[repr(u8)]` enums with stable discriminants, exported to Python. `CrashKind` is the `kind` of a `CrashReason { kind, sim_id, tick, detail }` and the summaries' `crash_reason u8`: `0 NonFinite`, `1 EnergyBound`, `2 Panic`, `3 StepSizeUnderflow`, `4 SubstepLimit`, `5 ContactCapacity`, `6 Penetration` (step 5d-3); each maps to one crashed `SimStatus`. `IntegratorKind` is the summaries' `integrator u8` (`0 SemiImplicitEuler` … `7 DormandPrince853`, `physics-engine-tradeoffs.md` §10.1). As built (step 3a): `Verdict` is `0 Pass`, `1 Fail`, `2 Inconclusive`, and the `DiskEnum` trait gives each enum's byte and back. There is no `EventType`: an event row carries the name its plugin declared (`ground_impact`, ...) as a string column, which Parquet dictionary-encodes, so a new model adds events without a schema change. |
@@ -812,6 +750,41 @@ stateDiagram-v2
 | `Studio.Viewport` | `StudioCameraRig` (f64 pivot, focus modes Frame / Follow / Chase / Track), `StateHud`, `GroundGridPlugin` (infinite graph-paper plane, per-pixel decade LOD, distance labels). Detail in `sim_studio_ux.md` §7.10. |
 | `Studio.Assets` | `VisualModelPlugin`: resolves each entity's `VisualModel` through the `sim_assets` catalogue, loads glTF through Bevy's `AssetServer` (cached per content hash, cameras and lights skipped), spawns a `ModelRoot` under the body's render proxy, handles placeholders, LOD and far markers (moving-part bindings later, D17), and hosts the Import dialog and Derive collision (§5.10, `sim_studio_ux.md` §7.11). |
 | `Studio.UiKit` | `sim_studio_ui`: Feathers facade plus own widgets (`StudioDock`, `DataTable`, `PlotCanvas`, `TreeView`, `EntityPicker`, `QuantityInput`, `CodeEditor`). Detail and risk register in `sim_studio_ux.md` §6.1. |
+
+**As built (step S1).** The frame only: `Studio.UiKit` has the theme (every `sim_studio_ux.md` §10.1 token as a Feathers token), `StudioDock` with fixed regions, toasts and the widget facade; `sim_studio` has the six `AppState`s, the activity rail, workspaces (`saber.workspace.ron`, schema in `sim_studio_ux.md` §6.3) with starter packs, the per-user recent list (`~/.saber/studio/recent.ron`), the Launcher and the shell. `Studio.Replay` opens a crash stream's index (dumps listed; scrubbing is S6). `Studio.Handoff` is not built: Results says the explorer arrives with step 6b. The studio's logic (`StudioCorePlugin`) runs on `MinimalPlugins`, so tests drive it without a window. Details in `sim_studio_ux.md` §6.3.
+
+**As built (step S2-1).** `Studio.Builder`'s document: `sim_studio::builder::ScenarioDoc` keeps a reflected copy of the open scenario's entities (`SceneEntity::try_clone`) and rebuilds a validated, hashed `Scenario` from them on demand with `Scenario::from_parts(entities, meta, visual, registry)`, which keeps file keys, component order and the `visual:` section, so an untouched scene exports with its `scene_hash`. Fields are edited by reflection path as text; every edit is undoable and saved to `<file>~autosave`, and Export writes the canonical `.scn.ron` (refused while Lint has errors). Lint runs the scene's validation and Tick 0's setup in a World built with the standard library, so setup errors and `ResolveReport.warnings` show while editing. Parameters (bind menu) and requirements are S2-2 and S2-3; the viewport is S3. Details in `sim_studio_ux.md` §7.2.
+
+**As built (step S2-2).** The bind menu writes the entity's `ParamBindings` and `Uncertainties` (§7, IB-01) exactly as a hand-written file would: target `Component.field.path`, the field's value as the binding default, a draw on a swept field with `apply: Add`, and the stream named `<SimId>.<target>`. Components are added with their `Default` or with every field at its `#[reflect(default)]` (what `()` reads as in a file). Every change is one undoable edit, refused if it would make a valid scene invalid (the kernel's validation decides). Details in `sim_studio_ux.md` §7.2, §7.3.
+
+**As built (step S2-3).** The Builder's Requirements tab edits the IB-03 `RequirementSet` in `sim_studio::builder::RequirementDoc`; the file form is unchanged. Edits that would fail `RequirementSet::validate` are refused. Lint builds the open scenario's World, runs Tick 0's setup and compiles each metric and requirement with `sim_verify::VerifyState::compile`, the compiler `VerifyPlugin` runs at every Tick 0, so a set that lints clean in the studio compiles in every run of that scenario on the same build. The tab needs nothing new from `sim_core` or `sim_verify`. Details in `sim_studio_ux.md` §7.4.
+
+**As built (step S3-1).** `Studio.LocalRun` is `sim_studio::preview::PreviewRun`: one `SimWorld` built like a `sim_hpc` run (`SimAppBuilder` with `sim_models::add_library`, the requirement set's `VerifyPlugin`, `set_scenario`, a 600-frame flight recorder, `start_with_params` with the row's `ParamValues` and `RunSeed`), stepped in whole ticks from a Bevy system in the studio's frame loop, at most 12 ms of ticks per frame. Nothing the studio shows writes to that World: bodies come from `FlightRecorder::latest`, plotted signals from `FieldPath::read`, requirement status from `VerifyState::progress` (§5.3). R7 is checked against `sim_hpc --local` itself (`sim_hpc` is a dev-dependency of `sim_studio`, never a dependency). A crash keeps the recorder's frames in memory and opens Crash Replay without a file. The 3D viewport is S3-2; the replay scrubber S4. Details in `sim_studio_ux.md` §7.5.
+
+**As built (step S3-2).** `RenderBridge` and `Studio.Viewport` are `sim_studio::viewport` (f64, no rendering) and
+`sim_studio::ui::viewport` (Bevy systems). A `Camera3d` renders into a `ViewportNode`'s image on render layer 1.
+Bodies come from `FlightRecorder::latest` as before, turned into a display frame that is always ENU (NED turned,
+ECEF in the local WGS 84 tangent plane of the first body's Tick-0 position). The floating origin is the camera
+rig's f64 pivot, re-anchored every frame; positions become f32 only as `(p − origin)`, so G7's 100 km case is
+tested in CI. `StudioCameraRig` is `CameraRig` (own orbit rig, not `PanOrbitCamera`, f64 pivot, yaw, pitch and
+distance) and `CameraFocus` holds the target `SimId`, mode (Frame, Follow, Chase, Track) and phase (Free,
+Transition, Locked, Held); both live in one `ViewportState` resource. `StateHud` is a text panel refreshed at
+10 Hz while running. `GroundGridPlugin` is not the full-screen shader yet: the grid is drawn with gizmo lines (three
+decades about the pivot, in f64 then cast) on a plane mesh, and distance labels are pooled UI text placed by
+projecting f64 points (`ViewProjection`). No new kernel API was needed. Details in `sim_studio_ux.md` §7.10.4.
+
+**As built (step S3-3).** `Studio.UiKit` bundles a symbol font (DejaVu Sans 2.37's symbol and arrow blocks, in
+`crates/sim_studio_ui/assets/fonts/` with its license) and puts it behind every text's font, so the symbols Fira
+lacks draw instead of empty boxes. Details in `sim_studio_ux.md` §10.2.
+
+**As built (step S4-1).** Crash Replay is `sim_studio::replay` (frames, playhead, jumps, tracks, growth; no UI) and
+`sim_studio::ui::replay`. It reads a dump with `CrashReader::read` by its index entry (IB-10, unchanged) or takes a
+crashed preview's frames from memory, and shows each `TickFrame` exactly as recorded: nothing is re-simulated, so
+a dump from another build replays exactly (D15). The scenario is found by `scene_hash` among the workspace's
+scenarios and the files beside the stream, for its world frame and `watchdog.energy_max_j`; the Tick-0 resolver of
+`Architecture.md` §6.4 is not run, because the viewport draws snapshots directly. `Studio.Viewport` now reads a
+`ViewSource` resource that Preview or Crash Replay fills, so both screens share one viewport. Run Replay and
+re-simulation are step S4-2. Details in `sim_studio_ux.md` §7.9.1.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 
@@ -975,7 +948,7 @@ the one-sided Clopper–Pearson lower bound, with the inconclusive runs as failu
 upper bound with them as passes is below it, and otherwise reports how many all-passing runs would show it;
 `Quantile` takes the empirical quantile (inverted CDF) with the unknown values on the failing side for `Pass` and
 on the passing side for `Fail`. Rules judge every counted run together by default; `by_param_set=True` judges
-each parameter set on its own and reports the worst (O9). `envelope` keeps runs whose parameters lie in given
+each parameter set on its own and reports the worst (D21). `envelope` keeps runs whose parameters lie in given
 ranges. A partial campaign is judged on what committed and says so. The bounds come from a regularized incomplete
 beta in the standard library (no scipy), checked against scipy and the binomial tails in tests.
 `Verification.write()` writes `verdicts.parquet` next to the parts, with the campaign's hashes in its header and
@@ -1309,7 +1282,9 @@ Notes:
   run in `Constraints`. See `physics-engine-tradeoffs.md` §9.4. As built (step 5d, part 1): the solver is a
   kernel part of `Dynamics` rather than a `trait ContactForces` implementation, and runs after the force
   models in every stage of every substep; its end-of-tick pass is the first system of `Constraints`, so
-  plugin systems there already see this tick's `Contacts`.
+  plugin systems there already see this tick's `Contacts`. As built (step 5d, part 2): impacts are located
+  inside `Integrate` as sketched, by re-integrating every body to probed times (no dense output); the
+  penetration push and the swept `EventOnly` checks run at the end of that same `Constraints` pass.
 
 ---
 
@@ -1626,6 +1601,7 @@ auto_resume           = 3        # resubmit up to N times (PBS depend=afterany /
 scratch_dir = "${TMPDIR}"
 shared_out = "campaigns/drn-hover-a/out"
 heartbeat_s = 15                 # campaign_status.json (IB-15)
+fragment_impacts = true          # *_impacts.parquet (IB-16); default: on when the scenario fragments
 ```
 
 | | |
@@ -1638,6 +1614,7 @@ heartbeat_s = 15                 # campaign_status.json (IB-15)
 | As built (step 3c) | `saber.campaign` maps exit codes to statuses: `0` completed, `2` invalid, `3` build mismatch, `4` I/O error, `5` partial, `6` aborted, `64` usage, `70` (or any other code) internal, and a signal (a negative code from Python, or 129–159 from a shell) killed; `4`, `5` and killed are resumable. With `--json`, `sim_hpc` prints one object: on a refusal `{ok: false, exit, kind, error}` with `kind` one of `Config`, `Scene`, `Requirements`, `Manifest`, `SceneMismatch`, `BuildMismatch`; `--validate-only` adds `req_set_hash` and `param_keys` to step 3b's fields; `--local` adds `campaign_id` and `threads`. |
 | As built (step 4b) | CLI: `sim_hpc --campaign c.toml [--local \| --validate-only] [--resume [--override-crash-policy]] [--deadline UNIX_S] [--threads N] [--json]`; `--override-crash-policy` without `--resume` is a usage error (64). Without `--resume` an output directory that already holds a campaign is refused (exit 2, `OutputExists`), also by `--validate-only`; with it, `--validate-only` adds `attempt`, `committed_runs` and `missing_runs` (the plan, refused as the run would be). The walltime deadline is `--deadline`, else `SABER_WALLTIME_END`, else `SLURM_JOB_END_TIME`. `--json` adds `attempt`, `committed_runs` and `missing_runs` (every attempt), and `stopped` (`walltime`, `signal` or null). New refusal kinds: `OutputExists`, `ResumeMismatch` (2), `BuildMismatch` (3, from a part footer), `ResumeRead` (4), `Aborted` (6). `saber.campaign`: `preflight` and `run_local` take `resume` and `override_crash_policy` (`run_local` also `deadline`); `Resources` (nodes, cpus per node, walltime, queue, account, threads, setup lines, launcher and its flags, the cluster's `sim_hpc` path, extra directives), `render_job` (PBS Pro, or Slurm with `scheduler="slurm"`; one rank per node; the job exports `SABER_WALLTIME_END` from the walltime) and `submit` (preflight, `qsub` or `sbatch --parsable`, then `auto_resume` resubmissions each with `depend=afterany` / `--dependency=afterany` on the one before). A resubmission reads the job directory's `ledger.tsv` (each job's start with the committed part count, and its end with `sim_hpc`'s exit from the JSON report, since a launcher killed by SIGTERM exits with its own code) and exits 0 at once if the attempt before it ended `0`, `2`, `3`, `6`, `64` or `70`, or committed no new parts. `submit` refuses a `drain_margin_s` as long as the walltime. |
 | As built (step 4a) | Without `--local` or `--validate-only`, `sim_hpc --campaign c.toml` is one rank of an MPI job (`mpiexec -n N sim_hpc --campaign c.toml [--threads N] [--json]`); a binary built without the `mpi` feature refuses that with `64`. Every rank exits with the code rank 0 broadcasts; only rank 0 prints. `--json` adds `ranks`, `abort` (`{reason, detail}`), an `error` sentence for an abort, and `status` (the heartbeat's path). New key `output.heartbeat_s` (default 15, positive, at most a day), mirrored by `saber.campaign.Output`. |
+| As built (step 5e-2) | New key `output.fragment_impacts` (bool, optional), mirrored by `saber.campaign.Output`: whether the campaign writes `*_impacts.parquet` (IB-16). Unset, it is on exactly when the scene has a `Fragmentable` body; set on a scene without one, `sim_hpc` warns and writes no file (a part opens the file only at its first run that broke up). A fragmenting scene also adds the four `fragments_*` summary columns and the 20 `ch_frag_*` snapshot channels (IB-09, IB-16). |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
 
@@ -1739,7 +1716,9 @@ earlier file, and the `*_summaries.parquet` globs still match.
   `sim_id`, `other_sim_id` and `value`).
 * snapshots: `param_set_id u32, run_id u64, tick u64, t_s, sim_id u32, pos_xyz, quat_wxyz, vel_xyz, angvel_xyz`, then
   `ch_*`.
-* impacts: as above, with `target_sim_id` and `point_target_body_xyz` null for the ground.
+* impacts: as above, with `target_sim_id` and `point_target_body_xyz` null for the ground. As built (step 5e-2):
+  `target_sim_id` is the target's own `SimId`, the ground's too (IB-16 as built), so it is never null when `sim_hpc`
+  writes it; `point_target_body_xyz` is null for a static collider.
 * `crashes.zst`: `[u32 len][FileHeader JSON]`, then per dump `[b'D'][u32 len][zstd(bincode CrashDump)]`, then the
   index `[b'I'][u32 len][bincode Vec<CrashIndexEntry>]` (`run_id, param_set_id, replicate_seed, status, kind, tick,
   offset, len`) and a 16-byte trailer `[u64 index offset]["SABERIDX"]`. A stream without the trailer (a killed
@@ -1747,6 +1726,13 @@ earlier file, and the `*_summaries.parquet` globs still match.
 
 Floats are `f64` unless marked. Footer keys are `saber.header`, `saber.run_ids` (`[[first, last], ...]`) and
 `saber.crash_counts` (`{"param_set_id": count}`); writing them is `IO.Mux`'s job (3b).
+
+**As built (step 5e-2).** `IO.Mux` opens a part's `impacts.parquet` with the part's first run whose parent broke up
+(`fragments_written > 0`) when the campaign writes impacts, and lists it before the summaries, so the commit rule is
+unchanged; a part without such a run has no impacts file. Rows go in run by run, each run's in the order found
+(tick, then slot). `PartRows` counts `impacts`. Resume picks up a committed part's impacts file like its other
+files. A fragmenting campaign's summaries carry the `fragments_*` columns and its snapshots the `ch_frag_*`
+channels (on the parent's rows, `NaN` on the others).
 
 **As built (step 3b).** `IO.Mux` opens a part when its first run arrives (so an idle node writes no empty parts),
 writes all four files of it in the scratch directory `<scratch_dir>/saber-<campaign_id>/a<attempt>-r<rank>/`
@@ -1789,6 +1775,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | As built (step 5a) | `Environment::frame_rotation()` (default zero) makes the world frame turn (§10.3), and `Stage::frame_rotation()` and `Stage::rates_relative_to_frame(i)` give force models what they need in a turning frame. `AeroBallisticsPlugin` is the first library force model: it copies its coefficients in `setup`, has no `prepare`, and updates its `AeroState` telemetry from a Tick-0 list in an exclusive `SimSet::Telemetry` system. |
 | As built (step 5b) | A force model may own integrated states: `ForceModel::state_len` (read after `setup`, fixed for the run), `read_states`/`write_states` (World to packed vector at the start of each tick and back at its end) and `state_rhs(stage, dxdt)`, pure like `eval`, which sees its states as `Stage::model_states()`. They are packed after the bodies, one `StateClass::Model` error group per model, so every integrator crosses them (D14); a solver failure on them names no body. `SimPlugin::after_setup` runs at Tick 0 after the body table, integrator and force models are set up and before the first frame is recorded, for initial-condition solvers. `sim_core::dynamics::derivatives(world)` (and `SimWorld::derivatives`) evaluates the right-hand side once at the current state: each body's `ṗ`, `v̇`, `q̇`, `ω̇` and net applied wrench, and each model's states and rates; it runs every model's `prepare` first and allocates, so it belongs to Tick 0 and tests, not to the tick loop. `FixedWingPlugin` uses all three (engine power lag, trim). |
 | As built (step 5c) | `FieldPath::write(world, entity, value)` writes an `f64` or `f32` field through the same pre-parsed path as `read`, without allocating, so a model can drive another plugin's inputs by name (actuators). `Environment` has `Any` as a supertrait and `SimEnvironment::downcast_mut::<T>()` reaches the concrete model, so a system in `SimSet::Environment` can advance per-tick state such as turbulence; within the tick `sample` stays a fixed function of position and time. `RngStreams` implements `Default` (an empty placeholder) so tick systems take it out of the World with `sim_core::with_resource`: `World::resource_scope` allocated on the first ticks of each run in the allocation tests. |
+| As built (step 5c, part 2) | Systems added to one `SimSet` run in the order their plugins were added, and `sim_models::add_library` fixes that order: Environment, AeroBallistics, FixedWing, Rotorcraft, Actuator, Sensor, Control. So in `SimSet::Actuation` the rotorcraft mixer runs before the servo channels, and in `SimSet::Control` the PID loops run before any `ControllerPlugin<C>` added after the library. A plugin that inserts components other plugins look for does so in `start`; plugins that build per-run tables over such components (the mixer) do so in `after_setup`. |
 | Owner | `sim_core` (trait + sets), `sim_models` (implementations). |
 | Enforcement | A conformance test harness in `sim_core::testing`: determinism (2 Worlds, same seed, bit-equal), allocation counter (`dhat`/counting allocator) after Tick 0, NaN-injection watchdog test. Every model plugin must pass it in CI. |
 
@@ -1799,6 +1786,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 | Contract | `sim_verify` compiles a `RequirementSet` into a `VerifyPlan` resource: typed probes (resolved signal accessors), reducer slots (pre-allocated `f64` state), predicate trees. Systems run in `SimSet::Verify`. Optional `early_stop_on_fail` asks `TerminationPolicy` to end the run with `SimStatus::Terminated`. |
 | Output | `RunVerdictRow { metrics: [f64; M], verdicts: [Verdict; R] }` merged into `SummaryRow`. |
 | Errors | Probe reading a non-finite value → that requirement becomes `Inconclusive` for the run (and watchdog will usually also trip). |
+| As built (step 5e-2) | `parse_signal` also takes `impacts(SimId).count`, `.mass` and `.max_ke`, short for `entity(SimId).ImpactTally.<field>` (IB-16). A run that dropped fragments makes every metric (`NaN`) and requirement (`Inconclusive`) that reads a `FragmentCloud` or `ImpactTally` signal inconclusive, leaving the others alone. |
 | As built (step 2) | `VerifyPlugin::new(Arc<RequirementSet>)`; the compiled plan and per-run state are the `VerifyState` resource, rebuilt at every Tick 0. Probes read through `FieldPath` (a reflection lookup on a pre-parsed path, no string parsing or allocation per tick; a typed fast path can follow with `ModelMeta.signals`). `RunVerdictRow { metrics: Vec<f64>, verdicts: Vec<Verdict> }` in column order, from `run_verdicts(world)` after the run; merging it into the summary row comes with the summaries schema (3a, 3b). Early stop uses `StopRequests` with reason `requirement_failed`. |
 
 ### IB-10 · Crash dump → sim_studio Replay (via sim_explorer and the handoff cache for campaign dumps)
@@ -1832,7 +1820,7 @@ a failure is bounded by `checkpoint_interval_s` plus the stage-out time of the l
 |---|---|---|
 | URDF / MJCF | `sim_models::import::urdf` (deferred with robotics, D13) | `MultibodyPlugin` entities + visual meshes |
 | 3D model (glTF/GLB; OBJ as a stretch goal) | `sim_assets::import` (IB-20); OBJ through `Assets.ObjConverter` to `.glb` | `models/<slug>/` with `model.ron`; linked per entity in the `visual:` section; collision only if derived on request (IB-19). STEP, IGES, STL and native CAD are converted outside SABER (D17) |
-| Fragment drag table (CSV) | `sim_models::import::fragment_drag` | `FragmentDrag` table with ballistic coefficient (and Cd vs Mach if given), converted to SI, shared by all fragments (IB-16) |
+| Fragment drag table (CSV) | `sim_models::import::fragment_drag` | `FragmentDrag` table with ballistic coefficient (and Cd vs Mach if given), converted to SI, shared by all fragments (IB-16). As built (step 5e-2): a header row of `mach` and one of `bc_kg_m2`, `bc_lb_in2` (× 703.0696) or `cd` (with a `# mass_per_area_kg_m2:` or `_lb_in2:` line giving `m / A`, so `BC = (m / A) / C_d`); one row without `mach` is a constant. Returns the `FragmentDrag` and the convention it came from; a BC referred to a standard projectile's drag law (`# drag_law: G1`) is refused, since its Mach dependence needs that projectile's table. Errors carry the line. |
 | Aero coefficient tables (CSV) | `sim_models::import::aero_table` | `AeroTable` (Mach × alpha × beta grids) for `ProjectileAero` or `FixedWingAero` |
 | DATCOM / OpenVSP-VSPAERO output | `sim_models::import::fixedwing_derivs` | `FixedWingAero` stability derivatives and tables |
 | Motor/prop data (CSV) | `import::rotor_table` | `Ct, Cq` curves |
@@ -1921,6 +1909,8 @@ sequenceDiagram
 | Recorder | `FlightRecorder` records authored bodies plus the per-parent aggregates only. Recording every fragment would need about 30,000 × 256 ticks × 62 Worlds × 80 B ≈ 40 GB per node. A crashing fragment is still identifiable (`FLAG_NAN_ORIGIN` carries its `SimId`), and its full state is recovered by deterministic re-simulation in Studio (G9). |
 | Errors | Pool exhaustion: fragments beyond capacity are dropped, counted in `FragmentationEvent.n_dropped` and a `fragments_dropped` summary column, and requirements that read fragment or impact signals become `Inconclusive` for that run. Preflight warns if `expected_fragments` exceeds `fragment_pool_capacity`. A non-finite fragment state trips the watchdog as for any body. |
 | Status | Hook only, no fragmentation model in v1. Still open for the physics design: trigger criteria, the mass and velocity distributions of fragments, and when a fragment's lifetime ends if it hits nothing. |
+| As built (step 5e, part 1) | **Kernel side.** `sim_core::fragments`. Slots are a struct of arrays in the `FragmentPool` resource, not pre-spawned entities: entities with `PointMass3` would join the body table and the main integrator, and a struct-of-arrays loop is what physics §7 R8 asked for. The pool is sized to `config.fragments.capacity` (default 30 000) at Tick 0 when the run has a `Fragmentable` body, and to nothing otherwise. `Fragmentable { model_id, expected_fragments }` names a model registered with `SimAppBuilder::add_fragmentation_model`; the trait is `FragmentationModel { id, setup(world, parents), triggers(&FragmentParent, t), generate(&FragmentParent, &mut RngStream, &mut FragmentWriter) }`, where `FragmentParent { sim_id, state, mass }`. `setup` lets a model read its parents' components at Tick 0. `FragmentWriter::push(mass, position, velocity)` returns the new `SimId` or `None` when the pool is full (counted as dropped). Breakups are checked at the end of every tick, after contact, parents in `SimId` order; each parent draws from its own stream `fragmentation/<SimId>`, so one parent's breakup never shifts another's draws. A parent is retired after its breakup: it keeps its `SimId` and last state (zero derivatives from the next tick) and leaves contact, gear and ray queries. Fragments move after the bodies in `Integrate`, once per tick with `config.integrator.fragments`, under gravity, drag from the parent's `FragmentDrag { mach, ballistic_coefficient }` (BC in kg/m² against Mach, linear, held at the ends; a parent without one gives drag-free fragments) and, in a rotating world frame, the Coriolis and centrifugal terms. Impacts are found in `Constraints` by casting each alive fragment's straight path over the tick against every non-retired collider, relative to each body's motion over the tick, and kept in memory as `FragmentImpact { time, tick, fragment, parent, target, point, point_body, relative_velocity, mass }`. Static colliders keep their own `SimId` as the target, not 0. `config.fragments.lifetime` (s, off by default) ends fragments that hit nothing. Events: `fragmentation` (value: fragments written, at the parent) and `fragments_dropped` (value: the number dropped). Claimed fragments join the state hash. A non-finite fragment, or a model writing one, ends the run `CrashedNaN`. The output side is step 5e-2 (next row). |
+| As built (step 5e, part 2) | **Outputs.** *Aggregates:* at Tick 0, right after the scenario is spawned and resolved and before any plugin starts (so a requirement set resolves signals on them), every `Fragmentable` body gets a `FragmentCloud` and, in a run with one, every entity with a `SimId` and a `CollisionShape` an `ImpactTally`. Both are updated at the end of every tick after impacts, expiry and breakups. `FragmentCloud { fragments, dropped, alive, impacted, expired, mass, centroid, velocity, covariance { xx, yy, zz, xy, xz, yz }, max_range, kinetic_energy }`: sums over the flying fragments (0 when none flies); mass-weighted means and covariance over them (two passes, so a cloud far from the origin keeps its spread), following the parent before the breakup and keeping their last values once nothing flies; `max_range` the largest distance from the breakup point of a flying fragment at a tick end, an impact point or where a fragment expired. `ImpactTally { count, mass, max_ke }` with `max_ke = ½ m |v_rel|²` against the surface hit. *Signals:* `entity(P).FragmentCloud.<field>` and `impacts(T).count`, `.mass`, `.max_ke` (short for `entity(T).ImpactTally.<field>`); `ModelMeta.signals` does not exist yet, so the components themselves are the declaration. *Inconclusive rule:* in a run that dropped fragments, every metric reading a `FragmentCloud` or `ImpactTally` signal is `NaN` and every requirement reading one (directly or through its metric) is `Inconclusive`; the rest are judged as usual. *Tier 1:* the summaries' `fragments_written`, `fragments_dropped`, `fragments_impacted`, `fragments_expired` columns, present when the scenario fragments; per-parent values reach the summaries as metrics over the cloud's signals (`Final`, `Max`, ...), since the number of parents varies by scenario. *Tier 3:* the parent's snapshot rows carry its cloud as `ch_frag_*` channels. *Recorder:* every frame carries the clouds (`TickFrame::fragments`), so crash streams are schema 2.0. *Impacts:* `sim_hpc` writes the run's `FragmentImpact`s as `*_impacts.parquet` rows when `[output] fragment_impacts` is on (default: on when the scenario has a `Fragmentable` body; preflight finds out at its Tick 0); `target_sim_id` is the target's own `SimId`, the ground's too. *Import:* `sim_models::import::fragment_drag` (IB-13). The standard library still registers no `FragmentationModel` (O1), so a scenario with a `Fragmentable` body runs only with a library that adds one. |
 
 ---
 
@@ -1959,6 +1949,8 @@ sequenceDiagram
 | Validation | `Core.Resolver` at Tick 0: shapes valid and non-degenerate, `max_contact_pairs` sized, compliant stability `ω·dt ≤ 2.0` (else `SetupError`, warning above 0.5), `0 ≤ e ≤ 1`, `μ ≥ 0`. |
 | Errors | Pair buffer overflow → `CrashedSolver(ContactCapacity)`; persistent penetration above `max_penetration` or energy gain across an impulse → watchdog crash; more than `max_events_per_tick` impacts → deferred and logged, run continues. |
 | As built (step 5d, part 1) | `CollisionShape { parts: Vec<ShapePart { shape, pose }> }` (several parts instead of `Compound`; `HalfSpace`, `HeightField { rows, cols, size_x, size_y, heights }` and `TriMesh { vertices, indices }` inline rather than in a sidecar, static only). `ContactMaterial` adds `damping_law` (`HuntCrossley` or `Linear`) and `slip_speed`. `ContactPoints { points: Vec<GearPoint> }`, each `GearPoint { attach, axis, stroke, material, rolling, forward, steer, rolling_resistance, brake, brake_friction }` with its own material only. Per-pair materials are `ContactOverrides { pairs: [ContactOverride { other, material }] }` on either entity; without one, two materials combine (series stiffness and damping, geometric-mean friction) and must share exponent and damping law. No `trait ContactForces`: the kernel's solver adds the forces. Events are the declared names `contact` (value: approach speed, with `other` and the point) and `contact_end` (value: peak normal force). `config.contact.max_contact_pairs` (default 1024) is in `sim_config_hash`. Stiffness warnings go to `ResolveReport.warnings`. `Impulsive`, `ContactDeferred`, `max_penetration` and the impulse energy check arrive with 5d-2. |
+| As built (step 5d, part 2) | `Impulsive` pairs (every material impulsive; geometric-mean restitution and friction, the larger rest speed) have impacts located inside the tick and resolved with Newton impulses and Coulomb friction in 32 fixed sweeps, falling back to Poisson's rule, then a plastic impact, when Newton would add energy; below `rest_speed` they rest on their compliance. Events: `impact` (value: approach speed, with the time of impact, the point and the other entity), `contact_deferred` (past `config.contact.max_events_per_tick`, default 4), `contact_projected` (overlap pushed out, at most `config.contact.max_projection` per tick, default 1 mm), and `contact` with its time for an `EventOnly` touch inside a tick. `SimEvent` gains `time`. Energy growth after the fallbacks ends the run `CrashedEnergy`. The persistent-penetration watchdog and range sensors are step 5d-3. Details in `physics-engine-tradeoffs.md` §9.7b. |
+| As built (step 5d, part 3) | `Dynamics::ray_cast(world, origin, direction, max, exclude) -> Option<RayHit { distance, point, normal, sim_id }>`: the first collider along a ray, statics included, skipping one `SimId`, without allocating; the `SensorPlugin`'s `RangeFinder` uses it. The persistent-penetration watchdog: `config.contact.max_penetration` (m, `None` by default, so off) and `config.contact.penetration_ticks` (default 10), both in `sim_config_hash`; a body pair overlapping deeper than the limit at the end of more than that many ticks in a row ends the run `CrashedSolver(Penetration)`. Gear points are not checked. Details in `physics-engine-tradeoffs.md` §9.7c. |
 
 ### IB-20 · 3D model assets (model files → sim_assets → Studio.Assets, new, D17)
 
@@ -2096,13 +2088,13 @@ D1–D8 were the open questions Q1–Q8 in v0.1. D9 settles the fixed-wing quest
 | D18 | Project name | The project is SABER (was SABERS), and identifiers follow: Python package `saber`, `saber-cli`, `~/.saber/`, `saber://` deep links, `saber.workspace.ron`, `FileHeader.saber_version` (Alex, 2026-11-02). | Renamed across all design docs; the code uses the new names from the first commit. |
 | D19 | Reaching the tick budget | What a run that reaches `max_ticks` still running ends as is a scenario setting, `at_max_ticks`, `Completed` by default: fixed-duration runs end `Completed` and get Pass/Fail verdicts; scenarios that expect an impact or landing set `Timeout`, so missing it is `Inconclusive` (Alex, 2026-11-02; first half of O8). | `SimConfig::at_max_ticks` and `MaxTicksOutcome` (§5.1); `SimStatus` 0 and 5 (§10.2); seq §6. Whether `Timeout` counts against the crash policy was O8, decided as D20. |
 | D20 | `Timeout` and the crash policy | A run that ends `Timeout` counts toward the campaign's crash-storm rule, and is `Inconclusive`, not a failure, in `saber.verify`'s statistics (Alex, 2026-11-03; was O8). | `sim_hpc::protocol::counts_toward_storm` (§5.6, step 4a); seq §8.2 and §11; `saber.verify` (step 4c). |
+| D21 | Pooled or per-set `Probability` | A `Probability` requirement is judged over all of a campaign's counted runs pooled (the chance over the sweep's sampled inputs) by default; judging each parameter set on its own and reporting the worst (an operating envelope) is available on request (Alex, 2026-11-03; was O9). | `saber.verify` default `by_param_set=False`, `by_param_set=True` per set (§5.7, step 4c, unchanged); seq §11. |
 
 ### Still open
 
 | # | Question | Where |
 |---|---|---|
 | O1 | Fragmentation physics: trigger criteria, fragment mass and velocity distributions, fragment lifetime when nothing is hit. | IB-16 (designed separately) |
-| O9 | Should a `Probability` requirement be judged over all of a campaign's runs pooled (the chance over the sweep's sampled inputs), or on each parameter set, failing if the worst set falls short (an operating envelope)? Step 4c pools by default and judges per set with `by_param_set=True`. | §5.7, seq §11 |
 
 ---
 

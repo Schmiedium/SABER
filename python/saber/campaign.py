@@ -207,11 +207,13 @@ class Checkpoint:
 @dataclass
 class Output:
     """`[output]`. `scratch_dir` and `shared_out` may use `${VAR}`; rank 0 writes the heartbeat
-    `campaign_status.json` to `shared_out` every `heartbeat_s` seconds (IB-15)."""
+    `campaign_status.json` to `shared_out` every `heartbeat_s` seconds (IB-15). `fragment_impacts`
+    writes `*_impacts.parquet` (IB-16); unset, it is on exactly when the scenario fragments."""
 
     shared_out: str
     scratch_dir: str = "${TMPDIR}"
     heartbeat_s: float = 15.0
+    fragment_impacts: bool | None = None
 
 
 @dataclass
@@ -485,6 +487,7 @@ _SUFFIX = {
     "summaries": "_summaries.parquet",
     "events": "_events.parquet",
     "snapshots": "_snapshots.parquet",
+    "impacts": "_impacts.parquet",
     "crashes": "_crashes.zst",
 }
 
@@ -535,7 +538,10 @@ class LocalRun:
         return self
 
     def files(self, table: str) -> list[Path]:
-        """The committed files of `summaries`, `events`, `snapshots` or `crashes`, by attempt, rank and part."""
+        """The committed files of `summaries`, `events`, `snapshots`, `impacts` or `crashes`, by attempt, rank and part.
+
+        `impacts` exists only in parts with a fragmenting run when `[output] fragment_impacts` is on (IB-16).
+        """
         if table not in _SUFFIX:
             raise ValueError(f"unknown table {table!r}; expected one of {', '.join(_SUFFIX)}")
         if self.manifest is None or self.shared_out is None:

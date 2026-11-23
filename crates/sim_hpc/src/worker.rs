@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use sim_core::{
-    FlightRecorder, LoggedEvent, RunOutput, RunSeed, SetupError, SimStatus, SimWorld,
-    SnapshotSample,
+    FlightRecorder, FragmentImpact, LoggedEvent, RunOutput, RunSeed, SetupError, SimStatus,
+    SimWorld, SnapshotSample,
 };
 use sim_schema::{
     CRASHES_FORMAT, CRASHES_SCHEMA_VERSION, CrashDump, CrashKind, CrashReason, EventRow,
-    IntegratorKind, ManifestRow, SnapshotRow, SummaryRow, Verdict,
+    FragmentCloudSnapshot, ImpactRow, IntegratorKind, ManifestRow, SnapshotRow, SummaryRow,
+    Verdict,
 };
 use sim_verify::run_verdicts;
 
@@ -28,6 +29,8 @@ pub struct RunRecord {
     pub events: Vec<EventRow>,
     /// Tier 3 snapshots.
     pub snapshots: Vec<SnapshotRow>,
+    /// Fragment impacts (IB-16), when the campaign writes them.
+    pub impacts: Vec<ImpactRow>,
     /// The crash dump, when the run crashed and the quota kept it.
     pub dump: Option<Box<CrashDump>>,
     /// Why Tick 0 failed, for a `SetupError` run (not written; the runner reports it).
@@ -243,6 +246,7 @@ impl<'a> Worker<'a> {
                     summary,
                     events: Vec::new(),
                     snapshots: Vec::new(),
+                    impacts: Vec::new(),
                     dump,
                     setup_error: None,
                 }
@@ -287,6 +291,11 @@ impl<'a> Worker<'a> {
             params: row.params.clone(),
             metrics: vec![f64::NAN; n_metrics],
             verdicts: vec![Verdict::Inconclusive; n_reqs],
+            fragments: if self.campaign.fragments {
+                vec![0; SummaryRow::FRAGMENT_COLUMNS.len()]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -307,6 +316,7 @@ impl<'a> Worker<'a> {
             summary,
             events: Vec::new(),
             snapshots: Vec::new(),
+            impacts: Vec::new(),
             dump: None,
             setup_error: Some(e.to_string()),
         }
@@ -345,10 +355,25 @@ impl<'a> Worker<'a> {
             s.metrics = v.metrics;
             s.verdicts = v.verdicts;
         }
+        if self.campaign.fragments
+            && let Some(f) = out.fragments
+        {
+            s.fragments = f.to_array().to_vec();
+        }
         s.wall_time_ms = elapsed_ms(started);
+        let fragments = self.campaign.fragments;
         RunRecord {
             events: out.events.iter().map(|e| event_row(row, e)).collect(),
-            snapshots: out.snapshots.iter().map(|x| snapshot_row(row, x)).collect(),
+            snapshots: out
+                .snapshots
+                .iter()
+                .map(|x| snapshot_row(row, x, fragments))
+                .collect(),
+            impacts: if self.campaign.fragment_impacts {
+                out.impacts.iter().map(|i| impact_row(row, i)).collect()
+            } else {
+                Vec::new()
+            },
             summary: s,
             dump: None,
             setup_error: None,
@@ -402,7 +427,9 @@ fn event_row(row: &ManifestRow, e: &LoggedEvent) -> EventRow {
     }
 }
 
-fn snapshot_row(row: &ManifestRow, s: &SnapshotSample) -> SnapshotRow {
+/// A snapshot row; with `fragments` it carries the fragment channels (`ch_frag_*`), `NaN` on a body
+/// that does not fragment.
+fn snapshot_row(row: &ManifestRow, s: &SnapshotSample, fragments: bool) -> SnapshotRow {
     SnapshotRow {
         param_set_id: row.param_set_id,
         run_id: row.run_id,
@@ -413,7 +440,30 @@ fn snapshot_row(row: &ManifestRow, s: &SnapshotSample) -> SnapshotRow {
         quat_wxyz: s.body.quat_wxyz,
         vel: s.body.lin_vel,
         angvel: s.body.ang_vel,
-        channels: Vec::new(),
+        channels: if fragments {
+            s.fragments
+                .map_or([f64::NAN; FragmentCloudSnapshot::CHANNELS.len()], |c| {
+                    c.channels()
+                })
+                .to_vec()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn impact_row(row: &ManifestRow, i: &FragmentImpact) -> ImpactRow {
+    ImpactRow {
+        run_id: row.run_id,
+        t_s: i.time,
+        tick: i.tick,
+        fragment_sim_id: i.fragment.0,
+        parent_sim_id: i.parent.0,
+        target_sim_id: Some(i.target.0),
+        point_world: i.point.to_array(),
+        point_target_body: i.point_body.map(|p| p.to_array()),
+        rel_vel: i.relative_velocity.to_array(),
+        fragment_mass: i.mass,
     }
 }
 

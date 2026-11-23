@@ -23,7 +23,10 @@
 //!
 //! Compliant contact forces (`contact::ContactSolver`, step 5d) are added after the force models
 //! in every stage; the solver's broad phase runs once per tick before the integrator, and its
-//! end-of-tick pass (`SimSet::Constraints`) reports the contacts and their events.
+//! end-of-tick pass (`SimSet::Constraints`) reports the contacts and their events. `Impulsive`
+//! impacts (step 5d, part 2) are located inside the tick: after integrating the whole tick,
+//! [`Dynamics`] re-integrates every body from the start of the interval to the times the solver
+//! probes, then to the impact, applies the impulses and integrates on (`contact::impact`).
 
 use std::ops::Range;
 
@@ -34,12 +37,13 @@ use sim_schema::{CrashKind, CrashReason};
 use crate::app::SetupError;
 use crate::body::{BodyState, BodyTable, Dof, PointMass3, RigidBody6, SimId};
 use crate::clock::SimClock;
-use crate::contact::{ContactConfig, ContactSolver};
+use crate::contact::{ContactConfig, ContactSolver, ImpactKind, Probe, RayHit};
 use crate::environment::{EnvSample, Environment, SimEnvironment};
 use crate::events::SimEvents;
 use crate::force::{ForceModel, Stage, Wrench};
 use crate::integrator::{
-    Integrator, IntegratorConfig, IntegratorStats, OdeSystem, StateClass, StateLayout,
+    Integrator, IntegratorConfig, IntegratorStats, OdeSystem, SolverFailure, StateClass,
+    StateLayout,
 };
 use crate::watchdog::RunStatus;
 
@@ -59,6 +63,13 @@ pub struct Dynamics {
     wrenches: Vec<Wrench>,
     tick_wrenches: Vec<Wrench>,
     contact: ContactSolver,
+    /// Impact location (step 5d-2): the packed state at the start of the current interval and a
+    /// trial state, and the bodies at the start, the end and a trial time.
+    y_start: Vec<f64>,
+    y_trial: Vec<f64>,
+    s_start: Vec<BodyState>,
+    s_end: Vec<BodyState>,
+    s_trial: Vec<BodyState>,
 }
 
 impl Default for Dynamics {
@@ -81,6 +92,11 @@ impl Dynamics {
             wrenches: Vec::new(),
             tick_wrenches: Vec::new(),
             contact: ContactSolver::default(),
+            y_start: Vec::new(),
+            y_trial: Vec::new(),
+            s_start: Vec::new(),
+            s_end: Vec::new(),
+            s_trial: Vec::new(),
         }
     }
 
@@ -169,6 +185,11 @@ impl Dynamics {
             }
         }
         self.y.resize(self.layout.dim(), 0.0);
+        self.y_start.resize(self.layout.dim(), 0.0);
+        self.y_trial.resize(self.layout.dim(), 0.0);
+        self.s_start.resize(n, BodyState::ZERO);
+        self.s_end.resize(n, BodyState::ZERO);
+        self.s_trial.resize(n, BodyState::ZERO);
         self.states.resize(n, BodyState::ZERO);
         self.env.resize(n, EnvSample::VACUUM);
         self.wrenches.resize(n, Wrench::ZERO);
@@ -177,10 +198,202 @@ impl Dynamics {
         Ok(())
     }
 
+    /// Retire the body in slot `i` (it fragmented, IB-16): its state is frozen from the next tick,
+    /// and its colliders and gear points leave contact and ray queries.
+    pub(crate) fn retire(&mut self, i: usize) {
+        self.bodies.retire(i);
+        self.contact.retire_body(i);
+    }
+
+    /// The contact solver.
+    pub(crate) fn contact(&self) -> &ContactSolver {
+        &self.contact
+    }
+
     /// The contacts at the World's current state into `Contacts`, with their events (the end of
     /// every tick, and Tick 0).
     pub(crate) fn contact_end_of_tick(&mut self, world: &mut World) {
         self.contact.end_of_tick(world, &self.bodies);
+    }
+
+    /// Integrate the packed state (`trial`: the trial copy) from `t0` to `t1`.
+    fn cross(
+        &mut self,
+        environment: &dyn Environment,
+        trial: bool,
+        t0: f64,
+        t1: f64,
+        first_stage: bool,
+    ) -> Result<(), SolverFailure> {
+        let Dynamics {
+            bodies,
+            models,
+            model_ranges,
+            integrator,
+            y,
+            y_trial,
+            states,
+            env,
+            wrenches,
+            tick_wrenches,
+            contact,
+            ..
+        } = self;
+        let y = if trial { y_trial } else { y };
+        let mut ode = BodyOde {
+            bodies,
+            models,
+            model_ranges,
+            dim: y.len(),
+            environment,
+            states,
+            env,
+            wrenches,
+            tick_wrenches,
+            contact,
+            first_stage,
+            frame_rotation: environment.frame_rotation(),
+        };
+        let integrator = integrator.as_mut().expect("Dynamics used before Tick 0");
+        if ode.dim() == 0 || t1 <= t0 {
+            Ok(())
+        } else {
+            integrator.advance_tick(&mut ode, t0, t1, y).map(|_| ())
+        }
+    }
+
+    /// Cross the tick `[t0, t1]`, locating and resolving `Impulsive` impacts inside it (physics
+    /// §9.4, `contact::impact`): integrate to the end; while some pair met on the way (at most
+    /// `max_events_per_tick` times), re-integrate every body to the earliest impact, apply the
+    /// impulses and integrate on from there; past the limit, resolve at the end (`contact_deferred`).
+    /// Returns a message when kinetic energy grew across an impact.
+    fn advance(
+        &mut self,
+        environment: &dyn Environment,
+        t0: f64,
+        t1: f64,
+    ) -> Result<Option<String>, SolverFailure> {
+        let impacts = self.contact.has_impacts();
+        if impacts {
+            self.y_start.copy_from_slice(&self.y);
+        }
+        // The adaptive controller's memory at the start of the stretch and at its end, so every
+        // re-integration takes the same steps and the tick ends where the last crossing left it.
+        let mut ctl_start = self.controller();
+        self.cross(environment, false, t0, t1, true)?;
+        if !impacts {
+            return Ok(None);
+        }
+        let mut ctl_end = self.controller();
+        let frame_rotation = environment.frame_rotation();
+        let max_events = self.contact.max_events();
+        let mut energy = None;
+        let mut check = |(before, after): (f64, f64), t: f64| {
+            if crate::contact::energy_grew(before, after) && energy.is_none() {
+                energy = Some(format!(
+                    "kinetic energy grew across the contact impulses at t = {t} s: {before} J to \
+                     {after} J"
+                ));
+            }
+        };
+        let mut t_s = t0;
+        let mut events = 0;
+        loop {
+            states_from_y(&self.bodies, &self.y_start, &mut self.s_start);
+            states_from_y(&self.bodies, &self.y, &mut self.s_end);
+            if events >= max_events {
+                let kinetic = self.contact.resolve(
+                    &mut self.s_end,
+                    &self.bodies,
+                    t1,
+                    ImpactKind::Deferred,
+                    frame_rotation,
+                );
+                check(kinetic, t1);
+                write_velocities(&self.bodies, &self.s_end, &mut self.y);
+                self.set_controller(ctl_end);
+                break;
+            }
+            let mut t_star = self
+                .contact
+                .touching_now(&self.s_start, frame_rotation)
+                .then_some(t_s);
+            if t_star.is_none() {
+                let n = self.contact.find_candidates(
+                    &self.s_start,
+                    &self.s_end,
+                    t_s,
+                    t1,
+                    frame_rotation,
+                );
+                for k in 0..n {
+                    if let Some(t) = t_star {
+                        self.contact.candidate(k).limit(t);
+                    }
+                    loop {
+                        let probe = self.contact.candidate(k).next();
+                        match probe {
+                            Probe::At(t) => {
+                                self.y_trial.copy_from_slice(&self.y_start);
+                                self.set_controller(ctl_start);
+                                self.cross(environment, true, t_s, t, false)?;
+                                states_from_y(&self.bodies, &self.y_trial, &mut self.s_trial);
+                                let (p, margin) = {
+                                    let c = self.contact.candidate(k);
+                                    (c.pair(), c.margin())
+                                };
+                                let s =
+                                    self.contact
+                                        .probe(p, t, &self.s_trial, margin, frame_rotation);
+                                self.contact.candidate(k).feed(s);
+                            }
+                            Probe::Found(t) => {
+                                t_star = Some(t_star.map_or(t, |b: f64| b.min(t)));
+                                break;
+                            }
+                            Probe::None => break,
+                        }
+                    }
+                }
+            }
+            let Some(t_star) = t_star else {
+                self.set_controller(ctl_end);
+                break;
+            };
+            // Every body to the impact, along the same path.
+            self.y.copy_from_slice(&self.y_start);
+            self.set_controller(ctl_start);
+            self.cross(environment, false, t_s, t_star, false)?;
+            states_from_y(&self.bodies, &self.y, &mut self.s_end);
+            let kinetic = self.contact.resolve(
+                &mut self.s_end,
+                &self.bodies,
+                t_star,
+                ImpactKind::Located,
+                frame_rotation,
+            );
+            check(kinetic, t_star);
+            write_velocities(&self.bodies, &self.s_end, &mut self.y);
+            events += 1;
+            self.y_start.copy_from_slice(&self.y);
+            ctl_start = self.controller();
+            t_s = t_star;
+            self.cross(environment, false, t_s, t1, false)?;
+            ctl_end = self.controller();
+        }
+        Ok(energy)
+    }
+
+    fn controller(&self) -> (f64, f64) {
+        self.integrator
+            .as_ref()
+            .map_or((f64::NAN, 0.0), Integrator::controller)
+    }
+
+    fn set_controller(&mut self, saved: (f64, f64)) {
+        if let Some(integrator) = &mut self.integrator {
+            integrator.set_controller(saved);
+        }
     }
 
     /// Copy the body components into the packed state.
@@ -347,6 +560,11 @@ impl OdeSystem for BodyOde<'_> {
         for (i, e) in self.bodies.entries().iter().enumerate() {
             let range = e.offset..e.offset + e.dof.state_len();
             let (y, d) = (&y[range.clone()], &mut dydt[range]);
+            if self.bodies.is_retired(i) {
+                // A body that fragmented stays where it broke up (IB-16).
+                d.fill(0.0);
+                continue;
+            }
             let w = self.wrenches[i];
             let rotating = self.frame_rotation != DVec3::ZERO;
             let mut accel = w.force * (1.0 / e.mass) + self.env[i].gravity;
@@ -408,40 +626,8 @@ pub(crate) fn integrate_system(world: &mut World) {
         d.contact.prepare(world, &d.bodies, t1 - t0);
         d.pack(world);
         let result = {
-            let Dynamics {
-                bodies,
-                models,
-                model_ranges,
-                integrator,
-                y,
-                states,
-                env,
-                wrenches,
-                tick_wrenches,
-                contact,
-                ..
-            } = d;
             let environment = world.resource::<SimEnvironment>().0.as_ref();
-            let mut ode = BodyOde {
-                bodies,
-                models,
-                model_ranges,
-                dim: y.len(),
-                environment,
-                states,
-                env,
-                wrenches,
-                tick_wrenches,
-                contact,
-                first_stage: true,
-                frame_rotation: environment.frame_rotation(),
-            };
-            let integrator = integrator.as_mut().expect("Dynamics used before Tick 0");
-            if ode.dim() == 0 {
-                Ok(())
-            } else {
-                integrator.advance_tick(&mut ode, t0, t1, y).map(|_| ())
-            }
+            d.advance(environment, t0, t1)
         };
         d.unpack(world);
         let tick = {
@@ -449,21 +635,34 @@ pub(crate) fn integrate_system(world: &mut World) {
             clock.advance();
             clock.tick
         };
-        if let Err(failure) = result {
-            // Groups past the bodies are model states, which name no body.
-            let sim_id = failure
-                .group
-                .and_then(|g| d.bodies.entries().get(g))
-                .map(|e| e.sim_id.0);
-            world.resource_mut::<RunStatus>().report_crash(CrashReason {
-                kind: failure.kind,
-                sim_id,
-                tick,
-                detail: format!(
-                    "{:?} in the step from t = {} s with h = {:e} s",
-                    failure.kind, failure.t, failure.h
-                ),
-            });
+        d.contact
+            .flush_events(&mut world.resource_mut::<SimEvents>());
+        match result {
+            Ok(None) => {}
+            Ok(Some(detail)) => {
+                world.resource_mut::<RunStatus>().report_crash(CrashReason {
+                    kind: CrashKind::EnergyBound,
+                    sim_id: None,
+                    tick,
+                    detail,
+                });
+            }
+            Err(failure) => {
+                // Groups past the bodies are model states, which name no body.
+                let sim_id = failure
+                    .group
+                    .and_then(|g| d.bodies.entries().get(g))
+                    .map(|e| e.sim_id.0);
+                world.resource_mut::<RunStatus>().report_crash(CrashReason {
+                    kind: failure.kind,
+                    sim_id,
+                    tick,
+                    detail: format!(
+                        "{:?} in the step from t = {} s with h = {:e} s",
+                        failure.kind, failure.t, failure.h
+                    ),
+                });
+            }
         }
     });
 }
