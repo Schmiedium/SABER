@@ -124,6 +124,8 @@ camera pivot (G7).
 v0.35 (2026-11-04, build step S3-3) records the kit's bundled symbol font (§5.5).
 v0.36 (2026-11-04, build step S4-1) records Crash Replay as built (§5.5): recorded frames only, no re-simulation
 (D15), with no change to IB-10.
+v0.37 (2026-11-23, build step S4-2) records re-simulation in the studio as built (§5.5, G9): a crash re-runs from
+Tick 0 and is checked bit for bit against its recorded frames; the ghost run; Open in Builder pins a run for Preview.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -783,8 +785,22 @@ crashed preview's frames from memory, and shows each `TickFrame` exactly as reco
 a dump from another build replays exactly (D15). The scenario is found by `scene_hash` among the workspace's
 scenarios and the files beside the stream, for its world frame and `watchdog.energy_max_j`; the Tick-0 resolver of
 `Architecture.md` §6.4 is not run, because the viewport draws snapshots directly. `Studio.Viewport` now reads a
-`ViewSource` resource that Preview or Crash Replay fills, so both screens share one viewport. Run Replay and
-re-simulation are step S4-2. Details in `sim_studio_ux.md` §7.9.1.
+`ViewSource` resource that Preview or Crash Replay fills, so both screens share one viewport. Details in
+`sim_studio_ux.md` §7.9.1.
+
+**As built (step S4-2).** Re-simulation (G9) is `sim_studio::rerun`: `Rerun` builds the run as `sim_hpc` and
+LocalRun do (scenario, `sim_models` library, `RunSeed`, the dump's parameter values; no `VerifyPlugin`, which
+reads state and does not change it) and steps it from Tick 0 in the background, 12 ms per frame. It keeps every
+tick of the recorded window and thins the ticks before it to stay under 20 000 frames and 1 000 000 body
+snapshots. Each recorded `TickFrame` is then compared bit for bit with the re-simulated one of the same tick; on
+the build that wrote the dump they match, which `sim_studio/tests/replay.rs` shows for a crash `sim_hpc
+--local` wrote. G9 as built runs from Tick 0 to the crash and shows those frames, instead of stopping at
+`crash_tick − K` and stepping live; the recorded frames stay one click away. A dump from another build re-runs
+as "approximate" (D15) and reports where it first differs from the recording; comparing by metrics waits for
+step 6b. The ghost run is the same parameter row with another replicate seed, kept at the replay's ticks. Open
+in Builder opens the run's scenario with its parameter row and seed pinned for Preview, which then reproduces
+the crash. IB-10 is unchanged. Run Replay of completed runs from Tier 3 snapshots is step S4-3. Details in
+`sim_studio_ux.md` §7.9.2.
 
 ### 5.6 `sim_hpc` — headless cluster runner
 
@@ -2051,7 +2067,7 @@ upgrades because the file format, not the Rust crate version, is the contract.
 | G6 | `CrashQuota` "first M" is per node and nondeterministic across reruns (thread race). | **Decided (2026-10-30):** the quota is campaign-wide. Rank 0 owns the counts, synced as deltas on `ChunkRequest`/`ChunkAssign`; each node's `Quota` is a view. Overshoot by a few dumps is accepted; replay and analysis show the `M` lowest-seed dumps, so the selection is stable across reruns. Plus a crash-storm abort (`[crash_policy]`, exit 6) with canary strided dispatch (IB-04, IB-05, seq §8). |
 | G7 | f64 → f32 `Transform` copy loses precision at ballistic ranges (10–100 km). | Floating origin in `RenderBridge` (camera-relative f64 subtraction before casting). |
 | G8 | Verlet integration only; no rotational dynamics, multibody or stiff contact. | **Decided (D13, 2026-11-01):** own kernel, RK4 for 6DOF and 3DOF; contact via Parry detection plus custom compliant/impulsive response (IB-19); multibody deferred with robotics. |
-| G9 | Crash replay shows only last K frames of a few bodies; no way to inspect earlier state. | Deterministic **re-simulation** in Studio (rebuild from params+seed, run to `crash_tick − K`, then step live). Ring buffer becomes the fallback when determinism can't be confirmed. |
+| G9 | Crash replay shows only last K frames of a few bodies; no way to inspect earlier state. | Deterministic **re-simulation** in Studio (rebuild from params+seed, run to `crash_tick − K`, then step live). Ring buffer becomes the fallback when determinism can't be confirmed. As built (S4-2, §5.5): re-runs from Tick 0 to the crash, keeps the frames, and checks them bit for bit against the ring buffer. |
 | G10 | `SimStatus`, `CrashReason`, `CrashDump`, `SimEvent` types referenced but undefined. | Defined in `sim_schema` (§5.4, IB-10). |
 | G11 | No checkpoint/resume: a walltime kill loses the whole campaign's tail. | **Decided (2026-10-30):** rolling parts committed every `checkpoint_interval_s` by IO.Stager, `--resume` as a new attempt that skips `run_id`s in committed summaries footers, `_MANIFEST.json` as the index, drain before walltime, optional `auto_resume` (IB-04, IB-07, seq §7, §12). |
 | G12 | Rank 0 is both dispatcher and worker under `Funneled`; dispatcher latency unspecified. | Dispatcher on thread 0 polls with `MPI_Iprobe`; pool on Rank 0 uses one fewer thread. |
