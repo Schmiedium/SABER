@@ -2,8 +2,8 @@
 //! GPU, driven by activating buttons the way a click does. Checks that the Launcher and the shell
 //! spawn, that their buttons are wired to the commands they name, that the shell fills its
 //! regions, that the Builder's panels edit, undo and export the scenario, that the Preview Run
-//! plays, steps, plots and stops, with its 3D viewport, and that a crashed preview scrubs in
-//! Crash Replay.
+//! plays, steps, plots and stops, with its 3D viewport, that a crashed preview scrubs in Crash
+//! Replay, and that the 3D Models tab imports, links and edits a model.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +19,8 @@ use bevy::winit::WinitPlugin;
 use sim_studio::actions::{
     BuilderDoc, BuilderTab, CurrentWorkspace, LiveCrash, PreviewState, ReqPanel, StudioCommand,
 };
-use sim_studio::builder::ReqItem;
+use sim_studio::builder::{LookField, ReqItem};
+use sim_studio::library::ModelPanel;
 use sim_studio::models::LookState;
 use sim_studio::preview::{ParamChoice, Speed};
 use sim_studio::replay::{
@@ -29,6 +30,7 @@ use sim_studio::rerun::Check;
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
+use sim_studio::ui::library::{LookFieldOf, Thumbs};
 use sim_studio::ui::models::{ModelRoot, SceneLooks};
 use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
 use sim_studio::ui::replay::{ReplayLive, ReplayTrack, TrackKind};
@@ -1412,4 +1414,133 @@ fn every_character_the_studio_writes_has_a_glyph() {
         0,
         "characters without a glyph among {text}"
     );
+}
+
+/// The built-in box (1 m) as a `.gltf` beside its `.bin`, 2 m in millimetres by a root node.
+fn gltf_in_mm(dir: &Path) -> PathBuf {
+    let glb = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim_assets/builtin/primitive/box/model.glb"),
+    )
+    .unwrap();
+    let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let mut json: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+    let bl = u32::from_le_bytes(glb[20 + jl..24 + jl].try_into().unwrap()) as usize;
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("crate.bin"), &glb[28 + jl..28 + jl + bl]).unwrap();
+    json["buffers"][0]["uri"] = serde_json::json!("crate.bin");
+    let roots = json["scenes"][0]["nodes"].clone();
+    let n = json["nodes"].as_array().unwrap().len();
+    json["nodes"].as_array_mut().unwrap().push(
+        serde_json::json!({ "name": "mm", "scale": [2000.0, 2000.0, 2000.0], "children": roots }),
+    );
+    json["scenes"][0]["nodes"] = serde_json::json!([n]);
+    let path = dir.join("crate.gltf");
+    std::fs::write(&path, json.to_string()).unwrap();
+    path
+}
+
+fn look_input(app: &mut App, field: LookField) -> Entity {
+    let mut q = app.world_mut().query::<(&LookFieldOf, &Children)>();
+    let (_, children) = q
+        .iter(app.world())
+        .find(|(f, _)| f.field == field)
+        .unwrap_or_else(|| panic!("no Appearance field {field:?}"));
+    children[0]
+}
+
+fn linked_id(app: &App) -> Option<String> {
+    let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+    doc.look(doc.slot_of(1).unwrap()).map(|m| m.asset.id)
+}
+
+/// The 3D Models tab (§7.11, step S5-2): the Library shows the built-ins as thumbnails; a
+/// built-in is linked to #1 from its details; Import model… on a `.gltf` with a separate `.bin`
+/// previews it, warns when the unit makes it 1 km long, and imports it into the workspace's
+/// `models/`; the new model is linked, and the Appearance section edits its scale in place and
+/// follows Undo.
+#[test]
+fn the_library_imports_links_and_edits_a_model() {
+    let dir = scratch("library");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let file = gltf_in_mm(&dir.join("src"));
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert!(
+        all_texts(&mut app)
+            .iter()
+            .any(|t| t == "default: quad_x · built-in"),
+        "the Appearance section shows the Domain Pack's default"
+    );
+
+    press(&mut app, "3D Models tab");
+    assert_eq!(app.world().resource::<ReqPanel>().tab, BuilderTab::Models);
+    let images = count::<ImageNode>(&mut app);
+    assert!(images >= 16, "a thumbnail per built-in, found {images}");
+    press(&mut app, "Select hex_x (Built-in)");
+    press(&mut app, "Link to #1");
+    assert_eq!(linked_id(&app).as_deref(), Some("rotorcraft/hex_x"));
+
+    press(&mut app, "+ Import model…");
+    let input = labelled(&mut app, "Import file path");
+    submit(&mut app, input, file.to_str().unwrap());
+    {
+        let panel = app.world().resource::<ModelPanel>();
+        let d = panel.import.as_ref().unwrap();
+        assert!(
+            d.candidate().is_some(),
+            "{:?}",
+            d.opened.as_ref().map(|o| o.as_ref().err())
+        );
+        assert_eq!(
+            d.settings.as_ref().unwrap().frame.unit,
+            sim_assets::Unit::Millimetre
+        );
+        assert_eq!(d.preview.as_ref().unwrap().bar_m, Some(1.0));
+    }
+    assert!(app.world().resource::<Thumbs>().preview.is_some());
+    assert!(all_texts(&mut app).iter().any(|t| t == "bar = 1.00 m"));
+    press(&mut app, "m");
+    assert!(
+        all_texts(&mut app)
+            .iter()
+            .any(|t| t.contains("in metres. Looks like millimetres.")),
+        "the unit warning"
+    );
+    press(&mut app, "mm");
+    press(&mut app, "Import");
+    assert!(app.world().resource::<ModelPanel>().import.is_none());
+    let model = ws.root.join("models/crate");
+    let glb = std::fs::read(model.join("model.glb")).unwrap();
+    let report = sim_assets::inspect(&glb, None).unwrap();
+    assert!(report.usable() && report.external.is_empty(), "{report:?}");
+    assert!(model.join("thumb.png").is_file());
+    assert_eq!(
+        app.world().resource::<ModelPanel>().selected,
+        Some((sim_assets::AssetSource::Workspace, "models/crate".into()))
+    );
+    press(&mut app, "Link to #1");
+    assert_eq!(linked_id(&app).as_deref(), Some("models/crate"));
+
+    // The Appearance section edits the scale in place; Undo puts it back in the same field.
+    let scale = look_input(&mut app, LookField::Scale);
+    assert_eq!(input_text(&app, scale), "1");
+    submit(&mut app, scale, "2");
+    let scale_of = |app: &App| {
+        let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        doc.look(doc.slot_of(1).unwrap()).unwrap().scale
+    };
+    assert_eq!(scale_of(&app), [2.0; 3]);
+    assert_eq!(
+        look_input(&mut app, LookField::Scale),
+        scale,
+        "updated in place"
+    );
+    press(&mut app, "Undo");
+    assert_eq!(scale_of(&app), [1.0; 3]);
+    assert_eq!(input_text(&app, scale), "1");
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }

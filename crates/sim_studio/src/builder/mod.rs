@@ -9,6 +9,7 @@
 
 pub mod fields;
 pub mod lint;
+pub mod looks;
 pub mod params;
 pub mod requirements;
 
@@ -23,6 +24,7 @@ use sim_core::{
 
 pub use fields::{FieldKind, FieldView};
 pub use lint::{LintItem, LintLevel};
+pub use looks::{Appearance, LookChoice, LookField, LookStatus};
 pub use params::{ParamKind, ParamRow};
 pub use requirements::{ReqField, ReqItem, ReqRow, RequirementDoc};
 
@@ -87,6 +89,11 @@ enum Change {
         before: SceneEntity,
         after: SceneEntity,
     },
+    /// The `visual:` section (looks only, outside `scene_hash`).
+    Visual {
+        before: Option<String>,
+        after: Option<String>,
+    },
 }
 
 /// The open scenario, being edited.
@@ -111,6 +118,8 @@ pub struct ScenarioDoc {
     /// Loaded from the autosave sidecar: unsaved until exported.
     restored: bool,
     lint: Vec<LintItem>,
+    /// The model catalogue, for the Appearance section and lint ([`ScenarioDoc::set_catalog`]).
+    catalog: Option<Arc<sim_assets::Catalog>>,
 }
 
 impl std::fmt::Debug for ScenarioDoc {
@@ -205,6 +214,7 @@ impl ScenarioDoc {
             saved: None,
             restored: false,
             lint: Vec::new(),
+            catalog: None,
         };
         doc.selected = doc.rows().first().map(|r| r.slot);
         doc.relint();
@@ -387,6 +397,9 @@ impl ScenarioDoc {
                     .try_clone(&self.registry.read())
                     .expect("copied once already");
                 self.entities[edit.slot] = copy;
+            }
+            Change::Visual { before, after } => {
+                self.visual = if forward { after } else { before }.clone();
             }
         }
         self.selected = Some(edit.slot);

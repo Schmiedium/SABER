@@ -54,10 +54,7 @@ fn wrap_row() -> impl bevy::scene::Scene {
 /// The tab row at the top of the left dock: Scene and Requirements.
 pub fn tabs(commands: &mut Commands, body: Entity, tab: BuilderTab) {
     let r = child(commands, body, wide_row());
-    for (name, t) in [
-        ("Scene", BuilderTab::Scene),
-        ("Requirements", BuilderTab::Requirements),
-    ] {
+    for (name, t) in super::library::TABS {
         let content: Box<dyn SceneList> = if t == tab {
             Box::new(bsn_list! { @status_text(Status::Running, format!("▸ {name}")) })
         } else {

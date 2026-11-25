@@ -18,9 +18,16 @@ pub struct Builtin {
     pub manifest: &'static str,
     /// Its `model.glb`, for the primitives (the fallback when the folder is not installed).
     pub glb: Option<&'static [u8]>,
+    /// Its `thumb.png`.
+    pub thumb: Option<&'static [u8]>,
 }
 
 include!(concat!(env!("OUT_DIR"), "/builtin.rs"));
+
+/// A built-in's embedded thumbnail, by id (`rotorcraft/quad_x`).
+pub fn thumb(id: &str) -> Option<&'static [u8]> {
+    BUILTINS.iter().find(|b| b.id == id).and_then(|b| b.thumb)
+}
 
 /// Environment variable naming the built-in folder, ahead of the installed and repository ones.
 pub const DIR_ENV: &str = "SABER_BUILTIN_MODELS";

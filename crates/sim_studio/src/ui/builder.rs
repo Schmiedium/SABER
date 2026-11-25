@@ -10,11 +10,69 @@ use sim_core::integrator::StepMode;
 use sim_studio_ui::dock::DockRegion;
 use sim_studio_ui::prelude::*;
 
+use super::library::{LookFieldOf, Thumbs};
 use super::requirements::ReqFieldOf;
 use super::{action, child};
-use crate::actions::{BuilderDoc, BuilderTab, DocChanged, ReqPanel, StudioCommand};
+use crate::actions::{
+    BuilderDoc, BuilderTab, CurrentWorkspace, DocChanged, ReqPanel, StudioCommand,
+};
 use crate::builder::{FieldRef, LintItem, LintLevel, ParamKind, RequirementDoc, ScenarioDoc};
+use crate::library::ModelPanel;
+use crate::models::ModelLibrary;
 use crate::state::AppState;
+use crate::workspace::Workspace;
+
+/// What the Builder's panels are drawn from.
+pub struct BuilderInputs<'a> {
+    /// The scene document.
+    pub doc: &'a ScenarioDoc,
+    /// The left-dock tab and the requirement set.
+    pub panel: &'a ReqPanel,
+    /// The console's history.
+    pub log: &'a ToastLog,
+    /// The 3D Models tab and the Import dialog.
+    pub models: &'a ModelPanel,
+    /// The model catalogue.
+    pub library: &'a ModelLibrary,
+    /// The thumbnails.
+    pub thumbs: &'a Thumbs,
+    /// The open workspace.
+    pub ws: Option<&'a Workspace>,
+}
+
+/// The resources the Builder's panels read.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct BuilderRes<'w> {
+    /// The scene document.
+    pub docs: Res<'w, BuilderDoc>,
+    /// The left-dock tab and the requirement set.
+    pub panel: Res<'w, ReqPanel>,
+    /// The console's history.
+    pub log: Res<'w, ToastLog>,
+    /// The 3D Models tab and the Import dialog.
+    pub models: Res<'w, ModelPanel>,
+    /// The model catalogue.
+    pub library: Res<'w, ModelLibrary>,
+    /// The thumbnails.
+    pub thumbs: Res<'w, Thumbs>,
+    /// The open workspace.
+    pub ws: Res<'w, CurrentWorkspace>,
+}
+
+impl BuilderRes<'_> {
+    /// The inputs, when a scenario is open.
+    pub fn inputs(&self) -> Option<BuilderInputs<'_>> {
+        Some(BuilderInputs {
+            doc: self.docs.0.as_ref()?,
+            panel: &self.panel,
+            log: &self.log,
+            models: &self.models,
+            library: &self.library,
+            thumbs: &self.thumbs,
+            ws: self.ws.0.as_ref(),
+        })
+    }
+}
 
 /// A dock region's content node, refilled when the document changes.
 #[derive(Component, Clone, Copy, Debug)]
@@ -188,11 +246,11 @@ pub fn parameters(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
     }
 }
 
-/// The Inspector: every component of the selected entity, a field per row.
-pub fn inspector(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
-    commands
-        .entity(body)
-        .insert(InspectorOf(doc.inspector_key()));
+/// The Inspector: every component of the selected entity, a field per row, and its Appearance
+/// (last on the Scene tab, first on the 3D Models tab).
+pub fn inspector(commands: &mut Commands, body: Entity, inputs: &BuilderInputs) {
+    let doc = inputs.doc;
+    commands.entity(body).insert(InspectorOf(right_key(inputs)));
     child(commands, body, heading("Inspector"));
     let Some(slot) = doc.selected else {
         child(commands, body, muted("Select an entity in the Outliner."));
@@ -220,6 +278,11 @@ pub fn inspector(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
     );
     if let Some(focus) = doc.focus.clone().filter(|f| f.slot == slot) {
         bind_menu(commands, body, doc, focus);
+    }
+    // On the 3D Models tab the Appearance section comes first; on the Scene tab, last.
+    let looks_first = inputs.panel.tab == BuilderTab::Models;
+    if looks_first {
+        super::library::appearance(commands, body, doc, slot, inputs.models, inputs.library);
     }
     for c in doc.components(slot) {
         let head = child(commands, body, wide_row());
@@ -302,6 +365,9 @@ pub fn inspector(commands: &mut Commands, body: Entity, doc: &ScenarioDoc) {
                 );
             }
         }
+    }
+    if !looks_first {
+        super::library::appearance(commands, body, doc, slot, inputs.models, inputs.library);
     }
     let addable = doc.addable(slot);
     if !addable.is_empty() {
@@ -631,10 +697,17 @@ fn lint_item(
     }
 }
 
-/// What the right dock shows: the Inspector's layout, or the requirement editor's.
-fn right_key(doc: &ScenarioDoc, panel: &ReqPanel) -> String {
+/// What the right dock shows: the Inspector's layout (with its Appearance section), or the
+/// requirement editor's.
+fn right_key(inputs: &BuilderInputs) -> String {
+    let (doc, panel) = (inputs.doc, inputs.panel);
     match panel.tab {
-        BuilderTab::Scene => doc.inspector_key(),
+        BuilderTab::Scene | BuilderTab::Models => format!(
+            "{}|{}|{}",
+            doc.inspector_key(),
+            super::library::appearance_key(doc, inputs.models),
+            panel.tab == BuilderTab::Models
+        ),
         BuilderTab::Requirements => panel.doc.as_ref().map_or_else(
             || "req:none".to_owned(),
             |d| format!("req:{}", d.editor_key()),
@@ -643,26 +716,32 @@ fn right_key(doc: &ScenarioDoc, panel: &ReqPanel) -> String {
 }
 
 /// Fill one dock region of the Builder for the tab that shows.
-pub fn fill(
-    commands: &mut Commands,
-    body: Entity,
-    kind: DockRegion,
-    doc: &ScenarioDoc,
-    panel: &ReqPanel,
-    log: &ToastLog,
-) {
+pub fn fill(commands: &mut Commands, body: Entity, kind: DockRegion, inputs: &BuilderInputs) {
+    let (doc, panel, log) = (inputs.doc, inputs.panel, inputs.log);
     let req = panel.doc.as_ref();
     match (kind, panel.tab) {
         (DockRegion::Left, tab) => {
             super::requirements::tabs(commands, body, tab);
-            if tab == BuilderTab::Scene {
-                outliner(commands, body, doc);
-                parameters(commands, body, doc);
-            } else {
-                super::requirements::list(commands, body, panel, doc);
+            match tab {
+                BuilderTab::Scene => {
+                    outliner(commands, body, doc);
+                    parameters(commands, body, doc);
+                }
+                BuilderTab::Requirements => super::requirements::list(commands, body, panel, doc),
+                BuilderTab::Models => {
+                    super::library::tab(
+                        commands,
+                        body,
+                        inputs.models,
+                        inputs.library,
+                        inputs.thumbs,
+                    );
+                }
             }
         }
-        (DockRegion::Right, BuilderTab::Scene) => inspector(commands, body, doc),
+        (DockRegion::Right, BuilderTab::Scene | BuilderTab::Models) => {
+            inspector(commands, body, inputs);
+        }
         (DockRegion::Right, BuilderTab::Requirements) => {
             super::requirements::editor(commands, body, req);
         }
@@ -670,6 +749,15 @@ pub fn fill(
         (DockRegion::Center, BuilderTab::Requirements) => {
             super::requirements::summary(commands, body, req);
         }
+        (DockRegion::Center, BuilderTab::Models) => super::library::center(
+            commands,
+            body,
+            doc,
+            inputs.models,
+            inputs.library,
+            inputs.thumbs,
+            inputs.ws,
+        ),
         (DockRegion::Bottom, _) => {
             lint(commands, body, doc, req);
             super::shell::console(commands, body, log);
@@ -685,27 +773,27 @@ pub fn refresh(
     mut changed: MessageReader<DocChanged>,
     mut commands: Commands,
     state: Res<State<AppState>>,
-    docs: Res<BuilderDoc>,
-    panel: Res<ReqPanel>,
+    res: BuilderRes,
     bodies: Query<(Entity, &RegionBody, Option<&InspectorOf>)>,
     fields: Query<(&InspectorField, &Children)>,
     req_fields: Query<(&ReqFieldOf, &Children)>,
+    look_fields: Query<(&LookFieldOf, &Children)>,
     mut texts: Query<&mut EditableText>,
-    log: Res<ToastLog>,
 ) {
     if changed.read().count() == 0 || *state.get() != AppState::ScenarioBuilder {
         return;
     }
-    let Some(doc) = &docs.0 else {
+    let Some(inputs) = res.inputs() else {
         return;
     };
-    let key = right_key(doc, &panel);
+    let (doc, panel) = (inputs.doc, inputs.panel);
+    let key = right_key(&inputs);
     for (body, RegionBody(kind), shown) in &bodies {
         if *kind == DockRegion::Right && shown.is_some_and(|s| s.0 == key) {
             continue;
         }
         commands.entity(body).despawn_related::<Children>();
-        fill(&mut commands, body, *kind, doc, &panel, &log);
+        fill(&mut commands, body, *kind, &inputs);
     }
     let mut sync = |children: &Children, value: &str| {
         for c in children.iter() {
@@ -726,6 +814,11 @@ pub fn refresh(
             .map(|f| f.text)
         {
             sync(children, &value);
+        }
+    }
+    for (field, children) in &look_fields {
+        if let Some(a) = doc.appearance(field.slot) {
+            sync(children, a.text(field.field));
         }
     }
     if let Some(req) = &panel.doc {

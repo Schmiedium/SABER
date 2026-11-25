@@ -9,10 +9,12 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::path::Path;
 
 use glam::{Quat, Vec3};
+use sim_assets::inspect::read;
 use sim_assets::manifest::{
     Bounds, DeriveMethod, FileSource, MANIFEST_SCHEMA_VERSION, ModelFrame, Origin,
     VisualAssetManifest,
 };
+use sim_assets::thumb::{THUMB_FILE, thumbnail};
 use sim_assets::write::{MaterialSpec, MeshData, NodeSpec, write_glb};
 use sim_assets::{ContentHash, inspect};
 
@@ -841,6 +843,8 @@ fn main() {
         };
         std::fs::write(dir.join("model.glb"), &glb).expect("write model.glb");
         std::fs::write(dir.join("model.ron"), manifest.to_ron()).expect("write model.ron");
+        let data = read(&glb, None).expect("the generated file reads");
+        std::fs::write(dir.join(THUMB_FILE), thumbnail(&data, &manifest)).expect("write thumb.png");
         licenses.push_str(&format!("| `{}` | {} | CC0-1.0 |\n", m.id, m.version));
         println!(
             "{:32} {:6} triangles {:7} bytes  {:.2} × {:.2} × {:.2} m",

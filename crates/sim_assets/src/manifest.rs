@@ -63,6 +63,17 @@ impl Unit {
             Unit::Foot => "foot",
         }
     }
+
+    /// Its symbol: `m`, `cm`, `mm`, `in`, `ft`.
+    pub fn short(self) -> &'static str {
+        match self {
+            Unit::Metre => "m",
+            Unit::Centimetre => "cm",
+            Unit::Millimetre => "mm",
+            Unit::Inch => "in",
+            Unit::Foot => "ft",
+        }
+    }
 }
 
 /// A signed coordinate axis of a model file.

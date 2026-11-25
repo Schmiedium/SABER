@@ -49,7 +49,8 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(severity: Severity, message: impl Into<String>) -> Self {
+    /// A finding.
+    pub fn new(severity: Severity, message: impl Into<String>) -> Self {
         Self {
             severity,
             message: message.into(),
@@ -264,7 +265,8 @@ fn unsupported(ext: &str) -> String {
     )
 }
 
-fn load_uri<'a>(uri: &'a str, folder: Option<&Path>) -> Result<Cow<'a, [u8]>, String> {
+/// The bytes a URI names: a base64 `data:` URI, or a file beside the model in `folder`.
+pub fn load_uri<'a>(uri: &'a str, folder: Option<&Path>) -> Result<Cow<'a, [u8]>, String> {
     if let Some(data) = uri.strip_prefix("data:") {
         let (head, payload) = data
             .split_once(',')
@@ -422,8 +424,14 @@ fn primitive_triangles(p: &gltf::Primitive<'_>) -> u64 {
 
 /// Every drawn triangle's corners, in the file's units and axes.
 pub fn triangles(data: &GltfData) -> Vec<[DVec3; 3]> {
-    use gltf::mesh::Mode;
     let mut out = Vec::new();
+    each_triangle(data, |t, _| out.push(t));
+    out
+}
+
+/// Call `f` with every drawn triangle's corners (the file's units and axes) and its primitive.
+pub fn each_triangle(data: &GltfData, mut f: impl FnMut([DVec3; 3], &gltf::Primitive<'_>)) {
+    use gltf::mesh::Mode;
     for (node, m) in drawn_nodes(&data.document) {
         let Some(mesh) = node.mesh() else { continue };
         for p in mesh.primitives() {
@@ -441,7 +449,7 @@ pub fn triangles(data: &GltfData) -> Vec<[DVec3; 3]> {
             let get = |i: usize| pos.get(i).copied();
             let mut push = |a: usize, b: usize, c: usize| {
                 if let (Some(a), Some(b), Some(c)) = (get(a), get(b), get(c)) {
-                    out.push([a, b, c]);
+                    f([a, b, c], &p);
                 }
             };
             match p.mode() {
@@ -462,7 +470,6 @@ pub fn triangles(data: &GltfData) -> Vec<[DVec3; 3]> {
             }
         }
     }
-    out
 }
 
 /// Inspect a glTF or GLB file's bytes (`folder`: where a `.gltf`'s separate files are).
@@ -662,10 +669,11 @@ pub fn guess_unit(bounds: &Bounds) -> Unit {
         .unwrap_or(Unit::Metre)
 }
 
-fn show_length(m: f64) -> String {
+/// A length for people: `2.40 m`, `0.50 m`, `35.00 mm`, `1.2 km` (metres from 0.1 m up).
+pub fn show_length(m: f64) -> String {
     if m >= 1000.0 {
         format!("{:.1} km", m / 1000.0)
-    } else if m >= 1.0 {
+    } else if m >= 0.1 {
         format!("{m:.2} m")
     } else {
         format!("{:.2} mm", m * 1000.0)

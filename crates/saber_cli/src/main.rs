@@ -12,14 +12,22 @@
 //! bindings' defaults, so setup errors show before a campaign is submitted. A requirement set is
 //! checked on its own, and with a scenario also compiled against that scenario's Tick-0 World
 //! (signals, events, custom checks). `--emit-req-json` prints the compiled JSON form Python reads
-//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector (`sim_assets`, IB-20):
+//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector and S5-2 the importer
+//! (`sim_assets`, IB-20):
 //!
 //! ```text
 //! saber-cli model inspect <model.glb | model.gltf> [--json]
+//! saber-cli model import <model.glb | model.gltf> [--name <name>] [--unit <unit>] [--up <axis>]
+//!     [--forward <axis>] [--origin file|centre|bottom|x,y,z] [--license <text>]
+//!     [--attribution <text>] [--workspace <dir> | --library <dir>] [--replace] [--json]
 //! ```
 //!
-//! It reports a glTF file's size, bounds, triangles, nodes and extensions and the import rules'
-//! findings, without rendering it; `import` and `convert` follow with the Import dialog.
+//! `inspect` reports a glTF file's size, bounds, triangles, nodes and extensions and the import
+//! rules' findings, without rendering it. `import` does what the studio's Import dialog does:
+//! packs a `.gltf` and its files into one `.glb`, writes `models/<slug>/{model.glb, model.ron,
+//! thumb.png}` in the workspace (or `<slug>/` in a library root) and prints the manifest's id and
+//! hash. Unit, axes and origin default as the dialog's do: the unit the size suggests, glTF's +Y up
+//! and +Z forward, the bounds' centre. `convert` (OBJ) is the stretch step S5-4.
 //!
 //! Exit codes follow IB-04: `0` valid, `2` invalid (or unreadable), `64` usage.
 
@@ -33,7 +41,11 @@ use sim_verify::{ReqError, RequirementSet, VerifyState};
 const USAGE: &str = "usage:
   saber-cli validate <scenario.scn.ron> [--req <set.req.ron>] [--json]
   saber-cli validate <set.req.ron> [--scenario <scenario.scn.ron>] [--json | --emit-req-json]
-  saber-cli model inspect <model.glb | model.gltf> [--json]";
+  saber-cli model inspect <model.glb | model.gltf> [--json]
+  saber-cli model import <model.glb | model.gltf> [--name <name>] [--unit m|cm|mm|in|ft]
+      [--up <axis>] [--forward <axis>] [--origin file|centre|bottom|x,y,z] [--license <text>]
+      [--attribution <text>] [--workspace <dir> | --library <dir>] [--replace] [--json]
+  (axes: +x, -x, +y, -y, +z, -z)";
 
 /// Parsed command line.
 #[derive(Default)]
@@ -349,10 +361,183 @@ fn validate_req(path: &str, scenario: Option<&str>, json: bool, emit: bool) -> R
     Ok(())
 }
 
+/// `saber-cli model inspect|import`.
+fn model_command(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("inspect") => model_inspect(args),
+        Some("import") => model_import(&args[1..]),
+        _ => {
+            eprintln!("{USAGE}");
+            ExitCode::from(64)
+        }
+    }
+}
+
+fn severity_name(s: sim_assets::Severity) -> &'static str {
+    match s {
+        sim_assets::Severity::Info => "info",
+        sim_assets::Severity::Warning => "warning",
+        sim_assets::Severity::Refused => "refused",
+    }
+}
+
+/// `saber-cli model import <file> [flags]`: exit 0 when the model was written, 2 when a rule or
+/// an existing folder refuses it, or the file is not glTF 2.0, 64 on a usage error.
+fn model_import(args: &[String]) -> ExitCode {
+    use sim_assets::import::{ImportError, OriginChoice, parse_axis, parse_unit};
+    use sim_assets::{Candidate, Severity};
+
+    let usage = || {
+        eprintln!("{USAGE}");
+        ExitCode::from(64)
+    };
+    let mut file = None;
+    let (mut json, mut replace) = (false, false);
+    let mut flags: Vec<(&str, &str)> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--replace" => replace = true,
+            "--name" | "--unit" | "--up" | "--forward" | "--origin" | "--license"
+            | "--attribution" | "--workspace" | "--library" => {
+                let Some(v) = it.next() else { return usage() };
+                flags.push((a.as_str(), v.as_str()));
+            }
+            s if s.starts_with("--") => return usage(),
+            s => {
+                if file.replace(s).is_some() {
+                    return usage();
+                }
+            }
+        }
+    }
+    let Some(file) = file else { return usage() };
+    let flag = |name: &str| {
+        flags
+            .iter()
+            .rev()
+            .find(|(f, _)| *f == name)
+            .map(|(_, v)| *v)
+    };
+    if flag("--workspace").is_some() && flag("--library").is_some() {
+        return usage();
+    }
+    let fail = |kind: &str, message: String| {
+        if json {
+            let out = serde_json::json!({
+                "ok": false,
+                "file": file,
+                "error": { "kind": kind, "message": message },
+            });
+            println!("{out}");
+        } else {
+            eprintln!("{file}: {message}");
+        }
+        ExitCode::from(2)
+    };
+    // Every flag's value is checked before the file is read: a usage error exits 64.
+    fn parsed<T>(v: Option<&str>, f: impl Fn(&str) -> Option<T>) -> Result<Option<T>, ()> {
+        v.map(|v| f(v).ok_or(())).transpose()
+    }
+    let (Ok(unit), Ok(up), Ok(forward), Ok(origin)) = (
+        parsed(flag("--unit"), parse_unit),
+        parsed(flag("--up"), parse_axis),
+        parsed(flag("--forward"), parse_axis),
+        parsed(flag("--origin"), OriginChoice::parse),
+    ) else {
+        return usage();
+    };
+    let candidate = match Candidate::open(std::path::Path::new(file)) {
+        Ok(c) => c,
+        Err(ImportError::Read(e)) => return fail("Io", e),
+        Err(e) => return fail("NotGltf", e.to_string()),
+    };
+    let mut s = candidate.defaults();
+    let guessed = unit.is_none();
+    if let Some(v) = flag("--name") {
+        s.name = v.to_owned();
+    }
+    s.frame.unit = unit.unwrap_or(s.frame.unit);
+    s.frame.up = up.unwrap_or(s.frame.up);
+    s.frame.forward = forward.unwrap_or(s.frame.forward);
+    s.origin = origin.unwrap_or(s.origin);
+    if let Some(v) = flag("--license") {
+        s.license = v.to_owned();
+    }
+    s.attribution = flag("--attribution").map(str::to_owned);
+    let (dest, prefix) = match (flag("--workspace"), flag("--library")) {
+        (_, Some(lib)) => (std::path::PathBuf::from(lib), ""),
+        (ws, None) => (
+            std::path::Path::new(ws.unwrap_or(".")).join("models"),
+            "models/",
+        ),
+    };
+    let problems = candidate.problems(&s);
+    let done = match candidate.commit(&s, &dest, prefix, replace) {
+        Ok(d) => d,
+        Err(ImportError::Exists(p)) => {
+            return fail(
+                "Exists",
+                format!("{} already exists; pass --replace or --name", p.display()),
+            );
+        }
+        Err(ImportError::Refused(why)) => return fail("Refused", why.join("; ")),
+        Err(e) => return fail("Invalid", e.to_string()),
+    };
+    let m = &done.manifest;
+    let size = m.bounds.size();
+    if json {
+        let out = serde_json::json!({
+            "ok": true,
+            "file": file,
+            "id": m.id,
+            "dir": done.dir.display().to_string(),
+            "content_hash": m.content_hash.to_string(),
+            "unit": m.frame.unit.name(),
+            "unit_guessed": guessed,
+            "up": m.frame.up.label(),
+            "forward": m.frame.forward.label(),
+            "origin": m.origin.offset().to_array(),
+            "bounds": { "min": m.bounds.min, "max": m.bounds.max },
+            "triangles": m.triangles,
+            "license": m.license,
+            "problems": problems.iter().map(|p| serde_json::json!({
+                "severity": severity_name(p.severity),
+                "message": p.message,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{out}");
+    } else {
+        println!("{file}: imported as {} in {}", m.id, done.dir.display());
+        println!("  hash        {}", m.content_hash);
+        println!(
+            "  frame       {}{}, up {}, forward {}",
+            m.frame.unit.name(),
+            if guessed {
+                " (guessed from the size)"
+            } else {
+                ""
+            },
+            m.frame.up.label(),
+            m.frame.forward.label()
+        );
+        println!(
+            "  size        {:.3} × {:.3} × {:.3} m (body frame), {} triangles",
+            size.x, size.y, size.z, m.triangles
+        );
+        println!("  license     {}", m.license);
+        for p in problems.iter().filter(|p| p.severity != Severity::Refused) {
+            println!("  {:8}    {}", severity_name(p.severity), p.message);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// `saber-cli model inspect <file> [--json]`: exit 0 when the file can be imported, 2 when a rule
 /// refuses it or it is not glTF 2.0, 64 on a usage error.
-fn model_command(args: &[String]) -> ExitCode {
-    use sim_assets::inspect::{Severity, guess_unit, inspect};
+fn model_inspect(args: &[String]) -> ExitCode {
+    use sim_assets::inspect::{guess_unit, inspect};
 
     let (json, rest): (Vec<&String>, Vec<&String>) = args.iter().partition(|a| *a == "--json");
     let json = !json.is_empty();
@@ -386,11 +571,7 @@ fn model_command(args: &[String]) -> ExitCode {
         Ok(r) => r,
         Err(e) => return fail("NotGltf", e.to_string()),
     };
-    let severity = |s: Severity| match s {
-        Severity::Info => "info",
-        Severity::Warning => "warning",
-        Severity::Refused => "refused",
-    };
+    let severity = severity_name;
     let unit = report.bounds.as_ref().map(guess_unit);
     if json {
         let out = serde_json::json!({
