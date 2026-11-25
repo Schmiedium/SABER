@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "environment/target_board",
+    version: 1,
+    display_name: "Target board (2 m)",
+    file: "model.glb",
+    content_hash: "blake3:4a9135a1ac005e66d6a8fd0bda9410d641bee7b82ffd720d69a490ba5a550c80",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.03999999910593033, -1.0, -1.0),
+        max: (0.03999999910593033, 1.0, 2.5),
+    ),
+    triangles: 48,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(BoundingBox),
+    license: "CC0-1.0",
+    attribution: None,
+)

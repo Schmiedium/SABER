@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "ballistics/ogive_projectile",
+    version: 1,
+    display_name: "Ogive projectile (155 mm)",
+    file: "model.glb",
+    content_hash: "blake3:928fc588949dd5875a7c69abca1bafca207614cb76599efafc11c3bd5276f97e",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.36000001430511475, -0.07919999957084656, -0.07919999957084656),
+        max: (0.4449999928474426, 0.07919999957084656, 0.07919999957084656),
+    ),
+    triangles: 2880,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(Capsule),
+    license: "CC0-1.0",
+    attribution: None,
+)

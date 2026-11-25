@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "rotorcraft/hex_x",
+    version: 1,
+    display_name: "Hexarotor X (0.50 m)",
+    file: "model.glb",
+    content_hash: "blake3:20ed112db6e649b72ad6c04db82d2f169b26f45915a47e2b6638aea0ef2e4a7d",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.31650634855031967, -0.3500000014901161, -0.04000000283122063),
+        max: (0.31650634855031967, 0.3500000014901161, 0.07999999821186066),
+    ),
+    triangles: 696,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(ConvexHull),
+    license: "CC0-1.0",
+    attribution: None,
+)

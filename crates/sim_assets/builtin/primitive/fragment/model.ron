@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/fragment",
+    version: 1,
+    display_name: "Fragment (1 cm)",
+    file: "model.glb",
+    content_hash: "blake3:3eb67f21d75aa981a45582f95d611c206a37404be893fa6d94568a56daad4ff1",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.004000000189989805, -0.004000000189989805, -0.0035000001080334187),
+        max: (0.006000000052154064, 0.004999999888241291, 0.003000000026077032),
+    ),
+    triangles: 8,
+    bindings: [],
+    lods: [],
+    suggested_collision: None,
+    license: "CC0-1.0",
+    attribution: None,
+)

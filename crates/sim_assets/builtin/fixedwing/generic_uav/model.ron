@@ -1,0 +1,27 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "fixedwing/generic_uav",
+    version: 1,
+    display_name: "Generic UAV (3 m span)",
+    file: "model.glb",
+    content_hash: "blake3:13ba76a07185c1da1efd1a5dae41b1fd23ff96fb5949cfc337da014c4e418938",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-1.1799999475479126, -1.5, -0.30000001192092896),
+        max: (0.949999988079071, 1.5, 0.20000000298023224),
+    ),
+    triangles: 348,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(ConvexDecomposition(
+        max_parts: 8,
+    )),
+    license: "CC0-1.0",
+    attribution: None,
+)

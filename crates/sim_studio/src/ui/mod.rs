@@ -4,6 +4,7 @@
 
 pub mod builder;
 pub mod launcher;
+pub mod models;
 pub mod preview;
 pub mod replay;
 pub mod requirements;

@@ -15,8 +15,10 @@ use bevy::scene::{CommandsSceneExt, bsn};
 use bevy::ui::widget::ViewportNode;
 use sim_studio_ui::prelude::*;
 
+use super::models::ModelRoot;
 use super::{action, child};
 use crate::actions::{PreviewState, StudioCommand};
+use crate::models::{HIDE_MARKER_PX, MIN_MODEL_PX};
 use crate::replay::{ReplayState, finite_kept, last_finite_position};
 use crate::state::AppState;
 use crate::viewport::{
@@ -58,6 +60,12 @@ pub struct HudText;
 /// One of the pooled distance labels.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridLabelSlot(pub usize);
+
+/// The sun lighting the models, lux.
+pub const SUN_ILLUMINANCE: f32 = 2_500.0;
+
+/// The ambient term lighting the models' shaded sides, cd/m².
+pub const AMBIENT_BRIGHTNESS: f32 = 400.0;
 
 /// The render layer of everything the viewport draws, so the UI camera draws none of it.
 pub const VIEW_LAYER: usize = 1;
@@ -161,6 +169,13 @@ pub fn spawn_camera(
                 ..default()
             },
             RenderTarget::Image(image.into()),
+            // Models are lit by one sun and an ambient term (step S5); the markers, ground and
+            // gizmos are unlit.
+            AmbientLight {
+                color: Color::WHITE,
+                brightness: AMBIENT_BRIGHTNESS,
+                affects_lightmapped_meshes: true,
+            },
             Tonemapping::None,
             DebandDither::Disabled,
             view_layer(),
@@ -172,6 +187,17 @@ pub fn spawn_camera(
         ))
         .id();
     commands.insert_resource(ViewportCamera(camera));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: SUN_ILLUMINANCE,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        // From high in the south-west of the display frame (render: x east, y up, −z north).
+        Transform::from_xyz(-0.6, 1.0, 0.8).looking_at(Vec3::ZERO, Vec3::Y),
+        view_layer(),
+        DespawnOnExit(state),
+    ));
     commands.spawn((
         Mesh3d(assets.plane.clone()),
         MeshMaterial3d(assets.paper.clone()),
@@ -376,8 +402,10 @@ pub fn step_camera(
     }
 }
 
-/// Place a sphere on every body, and draw velocity arrows and body axes.
-#[allow(clippy::too_many_arguments)]
+/// Place every body's model and marker sphere, and draw velocity arrows and body axes. A model
+/// under [`MIN_MODEL_PX`] across is hidden, and one over [`HIDE_MARKER_PX`] hides its marker, so a
+/// body far away is still a findable dot and a near one shows its shape (§7.11.6).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn draw_bodies(
     mut commands: Commands,
     source: Res<ViewSource>,
@@ -385,7 +413,8 @@ pub fn draw_bodies(
     state: Res<State<AppState>>,
     assets: Option<Res<ViewAssets>>,
     nodes: Query<&ComputedNode, With<ViewportView>>,
-    mut visuals: Query<(Entity, &BodyVisual, &mut Transform)>,
+    mut visuals: Query<(Entity, &BodyVisual, &mut Transform), Without<ModelRoot>>,
+    mut models: Query<(&ModelRoot, &mut Transform, &mut Visibility), Without<BodyVisual>>,
     mut gizmos: Gizmos<BodyGizmos>,
     colors: ThemeColors,
 ) {
@@ -396,6 +425,31 @@ pub fn draw_bodies(
     let projection = ViewProjection::new(&view.rig, view_size(&nodes));
     let origin = view.rig.pivot;
     let frame = &view.frame;
+    let mut big = Vec::new();
+    for (root, mut transform, mut visibility) in &mut models {
+        let b = bodies.iter().find(|b| b.sim_id == root.sim_id);
+        let p = b.map(|b| frame.position(b.pos)).unwrap_or(DVec3::NAN);
+        let q = b.map(|b| frame.attitude(b.quat_wxyz));
+        let (Some(q), true) = (q, p.is_finite() && q.is_some_and(|q| q.is_finite())) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        let px = root.extent_m / projection.pixel_size_at(p);
+        *transform = Transform {
+            translation: to_render(p, origin),
+            rotation: attitude_to_render(q),
+            scale: Vec3::ONE,
+        };
+        let shown = if px >= MIN_MODEL_PX {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        visibility.set_if_neq(shown);
+        if px >= HIDE_MARKER_PX {
+            big.push(root.sim_id);
+        }
+    }
     let mut shown = Vec::with_capacity(bodies.len());
     for (entity, BodyVisual(id), mut transform) in &mut visuals {
         let Some(b) = bodies.iter().find(|b| b.sim_id == *id) else {
@@ -404,7 +458,7 @@ pub fn draw_bodies(
         };
         shown.push(*id);
         let p = frame.position(b.pos);
-        if !p.is_finite() {
+        if !p.is_finite() || big.contains(id) {
             *transform = Transform::from_scale(Vec3::ZERO);
             continue;
         }

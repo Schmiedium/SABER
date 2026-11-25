@@ -321,6 +321,11 @@ impl PreviewRun {
         self.sim.tick()
     }
 
+    /// The scenario it runs.
+    pub fn scenario(&self) -> &Arc<Scenario> {
+        &self.scenario
+    }
+
     /// Simulated time, s.
     pub fn elapsed_s(&self) -> f64 {
         self.sim.tick() as f64 * self.sim.config().dt

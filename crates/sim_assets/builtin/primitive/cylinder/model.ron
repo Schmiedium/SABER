@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/cylinder",
+    version: 1,
+    display_name: "Cylinder (1 m, along x)",
+    file: "model.glb",
+    content_hash: "blake3:b09b23e52f770a57a72e0223e13d3e3aa3335f17576756050b84c4a74ddeee48",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.5, -0.5, -0.5),
+        max: (0.5, 0.5, 0.5),
+    ),
+    triangles: 128,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(Cylinder),
+    license: "CC0-1.0",
+    attribution: None,
+)

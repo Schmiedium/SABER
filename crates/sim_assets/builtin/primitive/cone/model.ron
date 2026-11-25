@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/cone",
+    version: 1,
+    display_name: "Cone (1 m, tip forward)",
+    file: "model.glb",
+    content_hash: "blake3:ec784783d28e55ffa78f388ef1cc2d8a0e6afbf887d0d3e2103ebe6135bc8c6d",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.5, -0.5, -0.5),
+        max: (0.5, 0.5, 0.5),
+    ),
+    triangles: 64,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(ConvexHull),
+    license: "CC0-1.0",
+    attribution: None,
+)

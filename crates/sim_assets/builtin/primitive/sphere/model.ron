@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/sphere",
+    version: 1,
+    display_name: "Sphere (1 m)",
+    file: "model.glb",
+    content_hash: "blake3:f5f7ae5c910cf1b2c95dca998b7127cdfbec3d1ec1c6c5bff49006740beae264",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.5, -0.5, -0.5),
+        max: (0.5, 0.5, 0.5),
+    ),
+    triangles: 960,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(ConvexHull),
+    license: "CC0-1.0",
+    attribution: None,
+)

@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "environment/launcher_rail",
+    version: 1,
+    display_name: "Launcher rail (6 m)",
+    file: "model.glb",
+    content_hash: "blake3:b123f73f74fd1eb720112eab5da32315129e621db5a0ab8951b307c90d908cab",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (0.0, -0.30000001192092896, 0.0),
+        max: (6.0, 0.30000001192092896, 0.75),
+    ),
+    triangles: 36,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(BoundingBox),
+    license: "CC0-1.0",
+    attribution: None,
+)
