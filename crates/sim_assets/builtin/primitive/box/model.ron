@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/box",
+    version: 1,
+    display_name: "Box (1 m)",
+    file: "model.glb",
+    content_hash: "blake3:fd40c6d6ffce3e05a87526593f9d338f8515ba20df9a5a79eb4fb2322f5b9921",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.5, -0.5, -0.5),
+        max: (0.5, 0.5, 0.5),
+    ),
+    triangles: 12,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(BoundingBox),
+    license: "CC0-1.0",
+    attribution: None,
+)

@@ -64,6 +64,11 @@ bevy = { version = "=0.20.1", default-features = false, features = [
     "bevy_mesh",
     "bevy_gizmos",
     "bevy_gizmos_render",
+    # Entities' 3D models (step S5): Bevy's glTF loader and the PNG and JPEG textures glTF files
+    # carry. Models are lit by one sun and an ambient term; tonemapping stays off.
+    "bevy_gltf",
+    "png",
+    "jpeg",
 ] }
 # Collision detection (D13). Only `sim_core::geometry` imports it (IB-19); pinned exactly because a new
 # version can move contact points, and it is part of `build_id`.
@@ -85,6 +90,23 @@ mpi = { version = "0.8.2", default-features = false }
 toml = "1.1.8"
 # SIGTERM/SIGINT in sim_hpc: a flag the main loop polls (step 4b; Unix only).
 signal-hook = { version = "0.4.6", default-features = false }
+# glTF 2.0 reading and writing without rendering (`sim_assets`, D17): the same release Bevy's glTF
+# loader uses, with the extensions it draws, without its image decoding (`import`), so `saber-cli`
+# stays free of image crates.
+gltf = { version = "1.4.1", default-features = false, features = [
+    "KHR_lights_punctual",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
+    "KHR_materials_specular",
+    "KHR_materials_transmission",
+    "KHR_materials_unlit",
+    "KHR_materials_volume",
+    "KHR_texture_transform",
+    "extensions",
+    "extras",
+    "names",
+    "utils",
+] }
 # Test-only: exact rational arithmetic for the tableau order conditions.
 num-bigint = "0.4.8"
 num-rational = "0.4.2"

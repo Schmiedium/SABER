@@ -6,7 +6,8 @@
 //! Builder's document ([`builder`]) with its Outliner, Inspector and Lint, S2-2 its Parameters and
 //! S2-3 its Requirements; S3-1 the Preview Run ([`preview`]), S3-2 its 3D [`viewport`], S4-1 Crash
 //! Replay ([`replay`]), S4-2 re-simulation ([`rerun`]), S4-3 Run Replay ([`runs`]) and S4-4 its
-//! requirement overlays ([`overlay`]). Models and Campaign Setup follow in S5 and S6.
+//! requirement overlays ([`overlay`]), and S5-1 the bodies' 3D [`models`]. Campaign Setup follows
+//! in S6.
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -18,6 +19,7 @@ pub mod builder;
 pub mod campaign;
 pub mod clock;
 pub mod crash;
+pub mod models;
 pub mod overlay;
 pub mod preview;
 pub mod recent;
@@ -105,7 +107,10 @@ const SHELL_STATES: [AppState; 5] = [
 
 impl Plugin for StudioUiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_gizmo_group::<ui::viewport::GridGizmos>()
+        app.init_resource::<models::ModelLibrary>()
+            .init_resource::<ui::models::SceneLooks>()
+            .init_resource::<ui::models::ModelStore>()
+            .init_gizmo_group::<ui::viewport::GridGizmos>()
             .init_gizmo_group::<ui::viewport::BodyGizmos>()
             .add_systems(Startup, (setup_ui, ui::viewport::setup))
             .add_systems(OnEnter(AppState::LocalRun), ui::viewport::spawn_camera)
@@ -133,11 +138,14 @@ impl Plugin for StudioUiPlugin {
                     ui::replay::display
                         .after(ui::replay::refresh)
                         .run_if(replay_shown),
+                    ui::models::refresh_library,
                     (
                         (
                             ui::viewport::preview_source.run_if(in_state(AppState::LocalRun)),
                             ui::viewport::replay_source.run_if(replay_shown),
                         ),
+                        ui::models::update_looks.after(ui::models::refresh_library),
+                        ui::models::spawn_models,
                         ui::viewport::step_camera,
                         ui::viewport::draw_bodies,
                         ui::viewport::draw_grid,

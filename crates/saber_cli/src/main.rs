@@ -12,21 +12,28 @@
 //! bindings' defaults, so setup errors show before a campaign is submitted. A requirement set is
 //! checked on its own, and with a scenario also compiled against that scenario's Tick-0 World
 //! (signals, events, custom checks). `--emit-req-json` prints the compiled JSON form Python reads
-//! instead of parsing RON (IB-03). Model commands follow with step S5.
+//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector (`sim_assets`, IB-20):
+//!
+//! ```text
+//! saber-cli model inspect <model.glb | model.gltf> [--json]
+//! ```
+//!
+//! It reports a glTF file's size, bounds, triangles, nodes and extensions and the import rules'
+//! findings, without rendering it; `import` and `convert` follow with the Import dialog.
 //!
 //! Exit codes follow IB-04: `0` valid, `2` invalid (or unreadable), `64` usage.
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use sim_assets as _;
 use sim_core::{RunSeed, Scenario, SceneError, SimAppBuilder, SimConfig, SimWorld};
 use sim_schema as _;
 use sim_verify::{ReqError, RequirementSet, VerifyState};
 
 const USAGE: &str = "usage:
   saber-cli validate <scenario.scn.ron> [--req <set.req.ron>] [--json]
-  saber-cli validate <set.req.ron> [--scenario <scenario.scn.ron>] [--json | --emit-req-json]";
+  saber-cli validate <set.req.ron> [--scenario <scenario.scn.ron>] [--json | --emit-req-json]
+  saber-cli model inspect <model.glb | model.gltf> [--json]";
 
 /// Parsed command line.
 #[derive(Default)]
@@ -69,6 +76,9 @@ fn parse_args(args: &[String]) -> Option<Args> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "model") {
+        return model_command(&args[1..]);
+    }
     let Some(args) = parse_args(&args) else {
         eprintln!("{USAGE}");
         return ExitCode::from(64);
@@ -337,4 +347,106 @@ fn validate_req(path: &str, scenario: Option<&str>, json: bool, emit: bool) -> R
         print_req(&set);
     }
     Ok(())
+}
+
+/// `saber-cli model inspect <file> [--json]`: exit 0 when the file can be imported, 2 when a rule
+/// refuses it or it is not glTF 2.0, 64 on a usage error.
+fn model_command(args: &[String]) -> ExitCode {
+    use sim_assets::inspect::{Severity, guess_unit, inspect};
+
+    let (json, rest): (Vec<&String>, Vec<&String>) = args.iter().partition(|a| *a == "--json");
+    let json = !json.is_empty();
+    let [cmd, file] = rest[..] else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(64);
+    };
+    if cmd != "inspect" || file.starts_with("--") {
+        eprintln!("{USAGE}");
+        return ExitCode::from(64);
+    }
+    let path = std::path::Path::new(file);
+    let fail = |kind: &str, message: String| {
+        if json {
+            let out = serde_json::json!({
+                "ok": false,
+                "file": file,
+                "error": { "kind": kind, "message": message },
+            });
+            println!("{out}");
+        } else {
+            eprintln!("{file}: {message}");
+        }
+        ExitCode::from(2)
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return fail("Io", e.to_string()),
+    };
+    let report = match inspect(&bytes, path.parent()) {
+        Ok(r) => r,
+        Err(e) => return fail("NotGltf", e.to_string()),
+    };
+    let severity = |s: Severity| match s {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Refused => "refused",
+    };
+    let unit = report.bounds.as_ref().map(guess_unit);
+    if json {
+        let out = serde_json::json!({
+            "ok": report.usable(),
+            "file": file,
+            "container": format!("{:?}", report.container).to_lowercase(),
+            "bytes": report.bytes,
+            "bounds": report.bounds.map(|b| serde_json::json!({"min": b.min, "max": b.max})),
+            "triangles": report.triangles,
+            "vertices": report.vertices,
+            "meshes": report.meshes,
+            "materials": report.materials,
+            "images": report.images,
+            "largest_image": report.largest_image,
+            "nodes": report.nodes,
+            "extensions_used": report.extensions_used,
+            "extensions_required": report.extensions_required,
+            "external": report.external,
+            "cameras": report.cameras,
+            "lights": report.lights,
+            "skins": report.skins,
+            "animations": report.animations,
+            "unit_guess": unit.map(|u| u.name()),
+            "problems": report.problems.iter().map(|p| serde_json::json!({
+                "severity": severity(p.severity),
+                "message": p.message,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{out}");
+    } else {
+        println!("{file}: {:?}, {} bytes", report.container, report.bytes);
+        if let Some(b) = report.bounds {
+            let s = b.size();
+            println!(
+                "  size        {:.4} × {:.4} × {:.4} file units (unit guess: {})",
+                s.x,
+                s.y,
+                s.z,
+                unit.map(|u| u.name()).unwrap_or("?")
+            );
+        }
+        println!(
+            "  triangles   {} ({} vertices), {} meshes, {} materials, {} images",
+            report.triangles, report.vertices, report.meshes, report.materials, report.images
+        );
+        println!("  nodes       {}", report.nodes.join(", "));
+        if !report.extensions_used.is_empty() {
+            println!("  extensions  {}", report.extensions_used.join(", "));
+        }
+        for p in &report.problems {
+            println!("  {:8}    {}", severity(p.severity), p.message);
+        }
+    }
+    if report.usable() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    }
 }

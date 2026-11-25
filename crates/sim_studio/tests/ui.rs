@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
@@ -19,6 +20,7 @@ use sim_studio::actions::{
     BuilderDoc, BuilderTab, CurrentWorkspace, LiveCrash, PreviewState, ReqPanel, StudioCommand,
 };
 use sim_studio::builder::ReqItem;
+use sim_studio::models::LookState;
 use sim_studio::preview::{ParamChoice, Speed};
 use sim_studio::replay::{
     Jump, ReplayJobs, ReplaySource, ReplayState, finite_body, last_finite_position,
@@ -27,12 +29,13 @@ use sim_studio::rerun::Check;
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
+use sim_studio::ui::models::{ModelRoot, SceneLooks};
 use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
 use sim_studio::ui::replay::{ReplayLive, ReplayTrack, TrackKind};
 use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::ui::viewport::{
-    BodyVisual, GridLabelSlot, HudPanel, HudText, ViewportCamera, ViewportView,
+    BodyVisual, GridLabelSlot, HudPanel, HudText, VIEW_LAYER, ViewportCamera, ViewportView,
 };
 use sim_studio::viewport::{FocusMode, FocusPhase, ViewSource, ViewportState};
 use sim_studio::workspace::{Pack, Workspace};
@@ -75,6 +78,13 @@ fn headless(recent: &Path) -> App {
         },
         StudioUiPlugin,
     ));
+    // What `App::run` does before the first frame: plugins' `finish` registers, among others,
+    // the glTF loader (step S5-1).
+    while app.plugins_state() == bevy::app::PluginsState::Adding {
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+    }
+    app.finish();
+    app.cleanup();
     for _ in 0..3 {
         app.update();
     }
@@ -1204,6 +1214,121 @@ fn the_viewport_follows_a_body_and_marks_the_ground() {
     assert_eq!(state(&app), AppState::ScenarioBuilder);
     assert_eq!(count::<BodyVisual>(&mut app), 0);
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
+
+/// Bodies are drawn with their 3D models (step S5-1, §7.11.6): a workspace model linked in the
+/// scenario's `visual:` section is loaded through the catalogue and spawned on the view layer at
+/// the body's pose, its node names intact; a link to a missing model leaves a placeholder.
+#[test]
+fn bodies_are_drawn_with_their_models() {
+    let dir = scratch("models");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let builtin =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim_assets/builtin/rotorcraft/hex_x");
+    let drone = ws.root.join("models/drone");
+    std::fs::create_dir_all(&drone).unwrap();
+    for f in ["model.glb", "model.ron"] {
+        std::fs::copy(builtin.join(f), drone.join(f)).unwrap();
+    }
+    let scenario = ws.root.join(ws.file.open_scenario.as_ref().unwrap());
+    let text = std::fs::read_to_string(&scenario).unwrap().replacen(
+        "    config: (",
+        r#"    visual: (
+        schema_version: "1.0.0",
+        models: {
+            1: (asset: (source: Workspace, id: "models/drone")),
+            100: (asset: (source: Workspace, id: "models/nothing")),
+        },
+    ),
+    config: ("#,
+        1,
+    );
+    std::fs::write(&scenario, text).unwrap();
+
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    press(&mut app, "Preview (F5)");
+    press(&mut app, "Pause");
+    let looks = app.world().resource::<SceneLooks>().looks.clone();
+    assert_eq!(looks.len(), 2);
+    assert_eq!(looks[0].model.asset.to_string(), "workspace:models/drone");
+    assert_eq!(looks[0].state, LookState::Model);
+    assert!(!looks[0].default);
+    assert_eq!(
+        looks[1].state,
+        LookState::Placeholder("workspace:models/nothing not found".into())
+    );
+    for _ in 0..600 {
+        app.update();
+        if count::<ModelRoot>(&mut app) == 1 {
+            break;
+        }
+    }
+    assert_eq!(count::<ModelRoot>(&mut app), 1, "the drone's model loads");
+    let rotors = {
+        let mut q = app.world_mut().query::<&Name>();
+        q.iter(app.world())
+            .filter(|n| n.as_str().starts_with("rotor_"))
+            .count()
+    };
+    assert_eq!(rotors, 6, "the file's nodes keep their names");
+    let off_layer = {
+        let mut q = app.world_mut().query::<(&Mesh3d, Option<&RenderLayers>)>();
+        q.iter(app.world())
+            .filter(|(_, l)| l.is_none_or(|l| !l.intersects(&RenderLayers::layer(VIEW_LAYER))))
+            .count()
+    };
+    assert_eq!(off_layer, 0, "every mesh is on the view layer");
+    until(&mut app, 5_000, |app| {
+        view(app).focus.phase == FocusPhase::Locked
+    });
+    app.update();
+    let (root, visibility) = {
+        let mut q = app
+            .world_mut()
+            .query::<(&ModelRoot, &Transform, &Visibility)>();
+        let (r, t, v) = q.single(app.world()).unwrap();
+        ((*r, *t), *v)
+    };
+    let body = preview(&app).run.as_ref().unwrap().bodies()[0];
+    let v = view(&app);
+    let want = sim_studio::viewport::to_render(v.frame.position(body.pos), v.rig.pivot);
+    assert_eq!(root.0.sim_id, 1);
+    assert!((root.0.extent_m - 0.70).abs() < 0.01, "{}", root.0.extent_m);
+    assert!(
+        (root.1.translation - want).length() < 1e-5,
+        "{:?} {want:?}",
+        root.1
+    );
+    assert_eq!(visibility, Visibility::Inherited, "near enough to draw");
+    // At 30 m the drone is about a dozen pixels: model and marker both show. Up close the model
+    // hides the marker; far out the model goes and the marker stays.
+    let marker = |app: &mut App| {
+        let mut q = app.world_mut().query::<(&BodyVisual, &Transform)>();
+        q.iter(app.world()).find(|(b, _)| b.0 == 1).unwrap().1.scale
+    };
+    let model_shown = |app: &mut App| {
+        let mut q = app.world_mut().query::<(&ModelRoot, &Visibility)>();
+        *q.single(app.world()).unwrap().1 == Visibility::Inherited
+    };
+    assert_ne!(marker(&mut app), Vec3::ZERO);
+    for (distance, model, marker_shown) in [(2.0, true, false), (5_000.0, false, true)] {
+        app.world_mut().resource_mut::<ViewportState>().rig.distance = distance;
+        app.update();
+        assert_eq!(model_shown(&mut app), model, "at {distance} m");
+        assert_eq!(
+            marker(&mut app) != Vec3::ZERO,
+            marker_shown,
+            "at {distance} m"
+        );
+    }
+
+    press(&mut app, "Stop");
+    assert_eq!(count::<ModelRoot>(&mut app), 0);
 }
 
 /// Every non-ASCII character in a string or character literal of the studio and its kit, in the

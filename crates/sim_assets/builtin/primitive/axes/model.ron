@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/axes",
+    version: 1,
+    display_name: "Axes (1 m: x red, y green, z blue)",
+    file: "model.glb",
+    content_hash: "blake3:aa09a3f88a7dc034829e0c94619eb5b355429a632c23b3af0f8b15e9f698913d",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.05000000074505806, -0.05000000074505806, -0.05000000074505806),
+        max: (1.0, 0.9999999403953552, 0.9999999403953552),
+    ),
+    triangles: 408,
+    bindings: [],
+    lods: [],
+    suggested_collision: None,
+    license: "CC0-1.0",
+    attribution: None,
+)

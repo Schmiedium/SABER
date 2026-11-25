@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "environment/windsock",
+    version: 1,
+    display_name: "Windsock (4 m pole)",
+    file: "model.glb",
+    content_hash: "blake3:26c6036eba55fde94af600afb7565c0d1b681b886bc09b237b530c76781fe3cc",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.03999999910593033, -0.20000000298023224, -4.200000002980232),
+        max: (1.2400000467896461, 0.20000000298023224, 0.0),
+    ),
+    triangles: 160,
+    bindings: [],
+    lods: [],
+    suggested_collision: None,
+    license: "CC0-1.0",
+    attribution: None,
+)

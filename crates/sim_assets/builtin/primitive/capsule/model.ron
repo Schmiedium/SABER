@@ -1,0 +1,25 @@
+VisualAssetManifest(
+    schema_version: "1.0.0",
+    id: "primitive/capsule",
+    version: 1,
+    display_name: "Capsule (1 m, along x)",
+    file: "model.glb",
+    content_hash: "blake3:3c551ac9964c12f64f8c5bf2dacbb35c1ba111b329b76f04c0cf2bb949711191",
+    source: Native,
+    frame: (
+        unit: Metre,
+        up: NegZ,
+        forward: PosX,
+    ),
+    origin: FileOrigin,
+    bounds: (
+        min: (-0.5, -0.25, -0.25),
+        max: (0.5, 0.25, 0.25),
+    ),
+    triangles: 1024,
+    bindings: [],
+    lods: [],
+    suggested_collision: Some(Capsule),
+    license: "CC0-1.0",
+    attribution: None,
+)

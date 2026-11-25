@@ -406,3 +406,105 @@ fn a_new_run_keeps_or_picks_the_focus() {
     let t = view.target_state(&bodies);
     assert!(t.is_none());
 }
+
+fn studio_scenario(text: &str) -> sim_core::Scenario {
+    let mut builder = sim_core::SimAppBuilder::new(sim_core::SimConfig::new(1.0, 1));
+    sim_models::add_library(&mut builder);
+    let registry = builder.type_registry();
+    sim_core::Scenario::from_ron(text, &registry.read(), sim_models::LIBRARY_VERSION).unwrap()
+}
+
+/// A body's model comes from the scenario's `visual:` section, else its Domain Pack's default;
+/// a missing model is a placeholder; every file is read once and hash-checked (§7.11.6, D17).
+#[test]
+fn looks_come_from_the_scenario_or_the_domain_pack() {
+    use sim_assets::{AssetSource, Catalog, VisualAssetRef, VisualModel, VisualSection};
+    use sim_studio::models::{LookState, asset_path, domain_default, resolve_looks};
+
+    let quad = include_str!("../templates/quad.scn.ron");
+    let shell = include_str!("../templates/shell.scn.ron");
+    let catalog = Catalog::with_builtins();
+
+    // Defaults: the quad starter's rotorcraft and the shell's projectile.
+    let q = studio_scenario(quad);
+    let r = resolve_looks(&q, &catalog);
+    assert!(r.problems.is_empty());
+    assert_eq!(r.looks.len(), 1, "the environment entity has no look");
+    let look = &r.looks[0];
+    assert_eq!((look.sim_id, look.default), (1, true));
+    assert_eq!(look.model.asset.to_string(), "builtin:rotorcraft/quad_x@1");
+    assert_eq!(look.state, LookState::Model);
+    assert!(look.warnings.is_empty());
+    let hash = look.hash.unwrap();
+    assert_eq!(look.asset_path().unwrap(), asset_path(hash));
+    assert!((look.extent_m() - 0.37).abs() < 0.01, "{}", look.extent_m());
+    assert_eq!(r.files.len(), 1);
+    assert_eq!(r.files[0].0, hash);
+    let s = studio_scenario(shell);
+    let r = resolve_looks(&s, &catalog);
+    assert_eq!(r.looks[0].model.asset.id, "ballistics/ogive_projectile");
+    let shell_body = s
+        .entities()
+        .iter()
+        .find(|e| e.sim_id().is_some_and(|i| i.0 == 1));
+    assert!(domain_default(shell_body.unwrap()).is_some());
+
+    // The scenario's own link wins over the default; a hidden model has no look; a missing one
+    // and a changed one are drawn anyway, as a placeholder and with a warning.
+    let with = |v: &VisualSection| {
+        let text = quad.replacen(
+            "    config: (",
+            &format!("    visual: {},\n    config: (", v.to_ron()),
+            1,
+        );
+        studio_scenario(&text)
+    };
+    let mut v = VisualSection::default();
+    v.models.insert(
+        1,
+        VisualModel::new(VisualAssetRef::builtin("rotorcraft/hex_x", 1)),
+    );
+    let r = resolve_looks(&with(&v), &catalog);
+    assert_eq!(
+        (r.looks[0].model.asset.id.as_str(), r.looks[0].default),
+        ("rotorcraft/hex_x", false)
+    );
+    v.models.get_mut(&1).unwrap().visible = false;
+    assert!(resolve_looks(&with(&v), &catalog).looks.is_empty());
+    let mut changed = VisualAssetRef::builtin("rotorcraft/quad_x", 1);
+    changed.content_hash = Some(sim_assets::ContentHash::of(b"an older quad"));
+    v.models.insert(1, VisualModel::new(changed));
+    v.models.insert(
+        100,
+        VisualModel::new(VisualAssetRef {
+            source: AssetSource::Workspace,
+            id: "models/hangar".into(),
+            version: 1,
+            content_hash: None,
+        }),
+    );
+    let r = resolve_looks(&with(&v), &catalog);
+    assert_eq!(r.looks.len(), 2);
+    assert_eq!(
+        r.looks[0].warnings,
+        ["rotorcraft/quad_x changed since it was linked"]
+    );
+    assert_eq!(r.looks[0].state, LookState::Model);
+    assert_eq!(
+        r.looks[1].state,
+        LookState::Placeholder("workspace:models/hangar not found".into())
+    );
+    assert_eq!(r.placeholders().count(), 1);
+    // Two bodies of one model share one file.
+    let mut v = VisualSection::default();
+    v.models.insert(
+        1,
+        VisualModel::new(VisualAssetRef::builtin("primitive/box", 1)),
+    );
+    v.models.insert(
+        100,
+        VisualModel::new(VisualAssetRef::builtin("primitive/box", 1)),
+    );
+    let r = resolve_looks(&with(&v), &catalog);
+    assert_eq!((r.looks.len(), r.files.len()), (2, 1));
+}
