@@ -4,7 +4,7 @@ VisualAssetManifest(
     version: 1,
     display_name: "Finned rocket (120 mm)",
     file: "model.glb",
-    content_hash: "blake3:eb28d3bd901cae3a7be7f58d3a603a77c5ad640a2aa5df63993a9f6fce2a6770",
+    content_hash: "blake3:0a265263411ea39fbbb82d7e0fcf6d7616be1605ff17f075ff9c2e448d4ebfa8",
     source: Native,
     frame: (
         unit: Metre,

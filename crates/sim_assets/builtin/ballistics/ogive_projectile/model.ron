@@ -4,7 +4,7 @@ VisualAssetManifest(
     version: 1,
     display_name: "Ogive projectile (155 mm)",
     file: "model.glb",
-    content_hash: "blake3:37b615bd217a9debdbfceda47e6bea41ec6ee0942bf1bf470e473048d98c5706",
+    content_hash: "blake3:928fc588949dd5875a7c69abca1bafca207614cb76599efafc11c3bd5276f97e",
     source: Native,
     frame: (
         unit: Metre,

@@ -191,13 +191,15 @@ fn arrow_x(length: f32, shaft: f32, head: f32) -> MeshData {
     )
 }
 
-/// A tangent ogive from `x0` (radius `r`) to a point at `x0 + len`, as profile points.
+/// A tangent ogive from `x0` (radius `r`) to a point at `x0 + len`, as profile points: the
+/// radius at `s` behind the base is `√(ρ² − s²) + r − ρ`, `ρ = (r² + len²) / 2r`, so it is `r`
+/// (and tangent to the body) at the base and 0 at the point.
 fn ogive(x0: f32, r: f32, len: f32, tip: f32, steps: u32) -> Vec<(f32, f32)> {
     let big = (r * r + len * len) / (2.0 * r);
     (0..=steps)
         .map(|k| {
             let s = len * k as f32 / steps as f32;
-            let y = (big * big - (len - s) * (len - s)).sqrt() + r - big;
+            let y = (big * big - s * s).max(0.0).sqrt() + r - big;
             (x0 + s, y.max(tip))
         })
         .collect()
