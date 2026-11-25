@@ -772,6 +772,196 @@ fn the_preview_runs_steps_plots_and_stops() {
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
 
+/// A quad workspace (`mass_q` swept, 400 ticks to `Completed`) and a two-row campaign of it run
+/// with `sim_hpc --local`, a snapshot every 50 ticks; returns the workspace and the output folder.
+fn quad_campaign(dir: &Path) -> (Workspace, PathBuf) {
+    use sim_schema::io::{Table, TableRow, write_parquet};
+    let ws = Workspace::create(&dir.join("ws"), "q", Pack::Multirotor).unwrap();
+    let (mut doc, _) =
+        sim_studio::builder::ScenarioDoc::open(&ws.root, "scenarios/quad.scn.ron").unwrap();
+    let v = doc.slot_of(1).unwrap();
+    doc.bind(
+        v,
+        "sim_core::body::MassProps",
+        ".mass",
+        "mass_q",
+        Some((1.0, 1.5)),
+    )
+    .unwrap();
+    doc.export().unwrap();
+    let quad = ws.root.join("scenarios/quad.scn.ron");
+    let text = std::fs::read_to_string(&quad).unwrap();
+    let short = text.replacen("max_ticks: 3000", "max_ticks: 400", 1);
+    assert_ne!(text, short);
+    std::fs::write(&quad, short).unwrap();
+    let camp = ws.root.join("campaigns/c1");
+    std::fs::create_dir_all(&camp).unwrap();
+    let rows: Vec<sim_schema::ManifestRow> = [(1.1, 7), (1.45, 8)]
+        .iter()
+        .enumerate()
+        .map(|(i, &(m, seed))| sim_schema::ManifestRow {
+            run_id: i as u64,
+            param_set_id: i as u32,
+            replicate_seed: seed,
+            params: vec![m],
+        })
+        .collect();
+    let batch = sim_schema::ManifestRow::to_batch(&rows, &["param_mass_q".to_owned()]).unwrap();
+    write_parquet(
+        std::fs::File::create(camp.join("sweep_manifest.parquet")).unwrap(),
+        Table::Manifest,
+        &Table::Manifest.header(),
+        &[batch],
+        &[],
+    )
+    .unwrap();
+    std::fs::write(
+        camp.join("campaign.toml"),
+        r#"
+[campaign]
+id = "c1"
+scene = "../../scenarios/quad.scn.ron"
+requirements = "../../requirements/quad.req.ron"
+manifest = "sweep_manifest.parquet"
+
+[execution]
+snapshot_policy = { base_every = 50, adaptive = false, max_per_run = 2000 }
+
+[output]
+scratch_dir = "scratch"
+shared_out = "out"
+"#,
+    )
+    .unwrap();
+    let campaign =
+        sim_hpc::Campaign::load(&camp.join("campaign.toml"), sim_hpc::standard_library).unwrap();
+    let report = sim_hpc::run_local(
+        &campaign,
+        &sim_hpc::RunOptions {
+            threads: Some(1),
+            stage_backoff: std::time::Duration::from_millis(1),
+            ..sim_hpc::RunOptions::default()
+        },
+    );
+    assert_eq!(report.runs, 2, "{report:?}");
+    (ws, camp.join("out"))
+}
+
+fn all_texts(app: &mut App) -> Vec<String> {
+    let mut q = app.world_mut().query::<&Text>();
+    q.iter(app.world()).map(|t| t.0.clone()).collect()
+}
+
+/// Run Replay (§7.9): a campaign's output folder lists its committed runs; opening one shows its
+/// snapshots, its verdicts and metrics, with no tracks and no alarms (snapshots keep no force or
+/// flags); re-simulating it at full rate matches every snapshot and fills in the frames; Back
+/// shows the list; the Launcher then offers the campaign's runs.
+#[test]
+fn a_campaign_run_replays_on_the_run_replay_screen() {
+    let replay = |app: &App| app.world().resource::<ReplayState>().clone();
+    let dir = scratch("run-replay");
+    let (ws, out) = quad_campaign(&dir);
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    app.world_mut()
+        .write_message(StudioCommand::OpenRuns(out.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::RunReplay);
+    assert_eq!(count::<ReplayTrack>(&mut app), 0, "the list, no run yet");
+    labelled(&mut app, "Open run 0");
+    press(&mut app, "Open run 1");
+    let r = replay(&app).replay.clone().unwrap();
+    assert!(r.is_run());
+    assert!(
+        matches!(r.source, ReplaySource::Run { run_id: 1, .. }),
+        "{:?}",
+        r.source
+    );
+    assert_eq!(r.frames.len(), 9);
+    assert!(r.rerun.is_some(), "matched by scene_hash");
+    assert_eq!(count::<ReplayTrack>(&mut app), 0, "no tracks on snapshots");
+    assert_eq!(count::<ViewportView>(&mut app), 1);
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(
+        position.starts_with("tick 0 · snapshot 1 of 9 · t = "),
+        "{position}"
+    );
+    assert!(!position.contains("energy"), "{position}");
+    assert!(
+        app.world().resource::<ViewSource>().alarms.is_empty(),
+        "no alarms on an unknown force"
+    );
+    let snapshot = live_replay(&mut app, ReplayLive::Snapshot);
+    assert!(!snapshot.contains("force"), "{snapshot}");
+    let entities = live_replay(&mut app, ReplayLive::Entities);
+    assert_eq!(entities, "  #1", "an unknown force is not non-finite");
+    let texts = all_texts(&mut app);
+    for want in [
+        "Requirements",
+        "R-hold-low: Fail",
+        "R-no-ground: Pass",
+        "Metrics",
+    ] {
+        assert!(texts.iter().any(|t| t.ends_with(want)), "{want:?} shown");
+    }
+    assert!(
+        texts.iter().any(|t| t.starts_with("z_final_m")),
+        "the metric's value"
+    );
+    key(&mut app, KeyCode::End);
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(
+        position.starts_with("tick 400 · snapshot 9 of 9"),
+        "{position}"
+    );
+
+    press(&mut app, "Re-simulate at full rate");
+    until(&mut app, 2_000, |app| {
+        app.world().resource::<ReplayJobs>().resim.is_none()
+            && replay(app).replay.as_ref().unwrap().resim.is_some()
+    });
+    let res = replay(&app).replay.as_ref().unwrap().resim.clone().unwrap();
+    assert_eq!(res.check, Check::Exact { frames: 9 });
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(
+        position.starts_with("tick 400 · frame 401 of 401 re-simulated"),
+        "{position}"
+    );
+    assert!(position.contains("energy"), "{position}");
+    assert!(count::<ReplayTrack>(&mut app) > 0, "tracks on full frames");
+    assert!(
+        all_texts(&mut app)
+            .iter()
+            .any(|t| t.contains("the snapshots") && t.contains("bit for bit")),
+        "the check says what it compared"
+    );
+    press(&mut app, "Show snapshots");
+    let position = live_replay(&mut app, ReplayLive::Position);
+    assert!(position.contains("snapshot 9 of 9"), "{position}");
+    press(&mut app, "Show re-simulated frames");
+
+    press(&mut app, "Back to the run list");
+    assert!(replay(&app).replay.is_none());
+    labelled(&mut app, "Open run 1");
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+
+    // The campaign is on the Launcher now, its runs one press away.
+    app.world_mut().write_message(StudioCommand::CloseWorkspace);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(state(&app), AppState::Launcher);
+    press(&mut app, "Replay a run of c1");
+    assert_eq!(state(&app), AppState::RunReplay);
+    labelled(&mut app, "Open run 0");
+}
+
 /// A stream of two dumps lists them with an Open button each; opening one shows its frames with
 /// the transport, jumps and tracks, and the list comes back.
 #[test]

@@ -4,8 +4,9 @@
 //! of the run ([`crate::rerun`], G9) that the screen labels and checks against the recording. A
 //! ghost run, another replicate of the same parameter row, can be laid over it by tick.
 //!
-//! The frames come from a crash dump in a `*_crashes.zst` stream (IB-10) or from a preview that
-//! crashed in the studio. The screens are in `crate::ui::replay`.
+//! The frames come from a crash dump in a `*_crashes.zst` stream (IB-10), from a preview that
+//! crashed in the studio, or, for Run Replay, from a campaign run's Tier 3 snapshots
+//! ([`crate::runs`]). The screens are in `crate::ui::replay`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,11 +14,12 @@ use std::sync::Arc;
 use sim_core::{RunSeed, Scenario, SimAppBuilder, SimConfig};
 use sim_schema::{
     BodySnapshot, CrashDump, CrashReason, FLAG_CLAMPED, FLAG_COLLIDING, FLAG_NAN_ORIGIN, Frame,
-    SimStatus, TickFrame,
+    SimStatus, SummaryRow, TickFrame, Verdict,
 };
 
 use crate::preview::PreviewCrash;
-use crate::rerun::{Check, RerunSource, SceneRef};
+use crate::rerun::{Check, Fields, RerunSource, SceneRef};
+use crate::runs::CampaignRuns;
 
 /// Playback rates, frames per second (§7.9).
 pub const FPS: [f64; 4] = [1.0, 2.0, 5.0, 25.0];
@@ -40,6 +42,17 @@ pub enum ReplaySource {
         param_set_id: u32,
         /// The scenario the dump was matched to by `scene_hash`, relative to the workspace or
         /// as found; `None` when none matched.
+        scenario: Option<String>,
+    },
+    /// A campaign run's Tier 3 snapshots (Run Replay).
+    Run {
+        /// The campaign's shared output folder.
+        dir: PathBuf,
+        /// The run.
+        run_id: u64,
+        /// Its parameter row.
+        param_set_id: u32,
+        /// The scenario the campaign was matched to by `scene_hash`, as for a dump.
         scenario: Option<String>,
     },
 }
@@ -79,6 +92,12 @@ pub struct Replay {
     pub resim: Option<Resimulated>,
     /// The ghost run laid over the replay.
     pub ghost: Option<Ghost>,
+    /// A campaign run's verdicts from its summary, by requirement id (empty for a crash).
+    pub verdicts: Vec<(String, Verdict)>,
+    /// A campaign run's metrics from its summary, by name (empty for a crash).
+    pub metrics: Vec<(String, f64)>,
+    /// Why a campaign run that did not crash ended: its stop condition.
+    pub stop_reason: Option<String>,
 }
 
 /// Which frames a replay shows.
@@ -150,6 +169,9 @@ impl Replay {
             }),
             resim: None,
             ghost: None,
+            verdicts: Vec::new(),
+            metrics: Vec::new(),
+            stop_reason: None,
         }
     }
 
@@ -188,6 +210,97 @@ impl Replay {
             rerun,
             resim: None,
             ghost: None,
+            verdicts: Vec::new(),
+            metrics: Vec::new(),
+            stop_reason: None,
+        }
+    }
+
+    /// A campaign run's snapshots, with the scenario the campaign was matched to, if any.
+    pub fn from_run(
+        runs: &CampaignRuns,
+        row: &SummaryRow,
+        frames: Vec<TickFrame>,
+        scenario: Option<ScenarioMatch>,
+    ) -> Self {
+        let params = runs.params_of(row);
+        let rerun = scenario.as_ref().map(|m| RerunSource {
+            scene: m.scene.clone(),
+            seed: RunSeed::new(row.param_set_id, row.replicate_seed),
+            params: params.clone(),
+        });
+        let (rel, frame, energy_max_j) = match scenario {
+            Some(m) => (Some(m.rel), m.frame, m.energy_max_j),
+            None => (None, Frame::Enu, None),
+        };
+        Self {
+            source: ReplaySource::Run {
+                dir: runs.dir.clone(),
+                run_id: row.run_id,
+                param_set_id: row.param_set_id,
+                scenario: rel,
+            },
+            replicate_seed: row.replicate_seed,
+            status: row.status,
+            reason: row.crash_reason.map(|kind| CrashReason {
+                kind,
+                sim_id: None,
+                tick: row.crash_tick.unwrap_or(row.total_ticks),
+                detail: String::new(),
+            }),
+            panic: None,
+            params,
+            frame,
+            energy_max_j,
+            other_build: runs.other_build(),
+            frames,
+            other: Vec::new(),
+            shown: Shown::Recorded,
+            rerun,
+            resim: None,
+            ghost: None,
+            verdicts: runs.verdicts_of(row),
+            metrics: runs.metrics_of(row),
+            stop_reason: row.stop_reason.clone(),
+        }
+    }
+
+    /// A campaign run's snapshots rather than a crash's recorded frames.
+    pub fn is_run(&self) -> bool {
+        matches!(self.source, ReplaySource::Run { .. })
+    }
+
+    /// What the recorded frames are called on screen.
+    pub fn recorded_noun(&self) -> &'static str {
+        if self.is_run() {
+            "the snapshots"
+        } else {
+            "the recorded frames"
+        }
+    }
+
+    /// The fields a re-simulation is checked on: all of a recorded frame, or what a snapshot
+    /// keeps.
+    pub fn fields(&self) -> Fields {
+        if self.is_run() {
+            Fields::Snapshot
+        } else {
+            Fields::Frame
+        }
+    }
+
+    /// The frames shown hold total energy, forces and flags: a crash's frames, or a
+    /// re-simulation's (snapshots hold none).
+    pub fn full_frames(&self) -> bool {
+        !self.is_run() || self.shown == Shown::Resimulated
+    }
+
+    /// What the frames shown keep.
+    pub fn shown_fields(&self) -> Fields {
+        if self.full_frames() {
+            Fields::Frame
+        } else {
+            Fields::Snapshot
         }
     }
 
@@ -242,6 +355,11 @@ impl Replay {
                 run_id,
                 param_set_id,
                 ..
+            }
+            | ReplaySource::Run {
+                run_id,
+                param_set_id,
+                ..
             } => format!(
                 "run {run_id} · set {param_set_id} · seed {}",
                 self.replicate_seed
@@ -258,10 +376,12 @@ impl Replay {
 
     /// Why, in words.
     pub fn why(&self) -> String {
-        let mut s = match &self.reason {
-            Some(r) if r.detail.is_empty() => format!("{:?}", r.kind),
-            Some(r) => format!("{:?}: {}", r.kind, r.detail),
-            None => "no watchdog reason".to_owned(),
+        let mut s = match (&self.reason, &self.stop_reason) {
+            (Some(r), _) if r.detail.is_empty() => format!("{:?}", r.kind),
+            (Some(r), _) => format!("{:?}: {}", r.kind, r.detail),
+            (None, Some(stop)) => format!("stopped by {stop}"),
+            (None, None) if self.is_run() => "ran to its end".to_owned(),
+            (None, None) => "no watchdog reason".to_owned(),
         };
         if let Some(p) = &self.panic {
             s.push_str(&format!(" · panic: {p}"));
@@ -497,13 +617,29 @@ impl Jump {
     }
 }
 
+/// The energy track starts on the log scale when an energy shown is not finite or above 1e6 J
+/// (snapshots hold no energy, so theirs starts linear).
+fn wants_log(replay: &Replay) -> bool {
+    replay.full_frames()
+        && replay
+            .frames
+            .iter()
+            .any(|f| !f.total_energy.is_finite() || f.total_energy.abs() > 1e6)
+}
+
 /// Every value in a body is finite.
 pub fn finite_body(b: &BodySnapshot) -> bool {
+    finite_kept(b, Fields::Frame)
+}
+
+/// Every value of `b` that frames of these `fields` keep is finite: a snapshot keeps no force,
+/// so its force (`NaN`, unknown) does not count.
+pub fn finite_kept(b: &BodySnapshot, fields: Fields) -> bool {
     b.pos.iter().all(|v| v.is_finite())
         && b.quat_wxyz.iter().all(|v| v.is_finite())
         && b.lin_vel.iter().all(|v| v.is_finite())
         && b.ang_vel.iter().all(|v| v.is_finite())
-        && b.force_mag.is_finite()
+        && (fields == Fields::Snapshot || b.force_mag.is_finite())
 }
 
 /// Every value in a frame is finite (energy and bodies).
@@ -647,11 +783,11 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 /// The entity list's order (§7.9): the crash's origin first, then flagged bodies (non-finite,
 /// in contact, clamped), then the rest by `SimId`.
-pub fn entity_order(frame: &TickFrame, origin: Option<u32>) -> Vec<BodySnapshot> {
+pub fn entity_order(frame: &TickFrame, origin: Option<u32>, fields: Fields) -> Vec<BodySnapshot> {
     let rank = |b: &BodySnapshot| {
         if Some(b.sim_id) == origin || b.flags & FLAG_NAN_ORIGIN != 0 {
             0
-        } else if !finite_body(b) {
+        } else if !finite_kept(b, fields) {
             1
         } else if b.flags & (FLAG_COLLIDING | FLAG_CLAMPED) != 0 {
             2
@@ -665,12 +801,12 @@ pub fn entity_order(frame: &TickFrame, origin: Option<u32>) -> Vec<BodySnapshot>
 }
 
 /// A body's flags as words: `NaN origin`, `non-finite`, `contact`, `clamped`.
-pub fn flag_words(b: &BodySnapshot) -> Vec<&'static str> {
+pub fn flag_words(b: &BodySnapshot, fields: Fields) -> Vec<&'static str> {
     let mut out = Vec::new();
     if b.flags & FLAG_NAN_ORIGIN != 0 {
         out.push("NaN origin");
     }
-    if !finite_body(b) {
+    if !finite_kept(b, fields) {
         out.push("non-finite");
     }
     if b.flags & FLAG_COLLIDING != 0 {
@@ -699,6 +835,10 @@ impl ReplayState {
     /// Show `replay` at its crashed state, with its origin (or first body) selected.
     pub fn open(&mut self, replay: Replay) {
         self.scrub = Scrubber::at_end(replay.frames.len());
+        if replay.is_run() {
+            // A completed run plays from its start; a crash opens on its crashed state.
+            self.scrub.seek(0, replay.frames.len());
+        }
         self.selected = replay.origin().or_else(|| {
             replay
                 .frames
@@ -706,10 +846,7 @@ impl ReplayState {
                 .and_then(|f| f.bodies.first())
                 .map(|b| b.sim_id)
         });
-        self.log_energy = replay
-            .frames
-            .iter()
-            .any(|f| !f.total_energy.is_finite() || f.total_energy.abs() > 1e6);
+        self.log_energy = wants_log(&replay);
         self.replay = Some(replay);
     }
 
@@ -725,6 +862,7 @@ impl ReplayState {
         }
         let i = tick.map_or(0, |t| replay.index_at(t));
         let len = replay.frames.len();
+        self.log_energy = wants_log(replay);
         self.scrub.span = None;
         self.scrub.seek(i, len);
         true
@@ -804,8 +942,10 @@ pub fn ghost_job(replay: &Replay, seed: u64) -> Result<crate::rerun::Rerun, Stri
     )
 }
 
-/// Start re-simulating `replay` from Tick 0 to its last recorded tick: every tick of the recorded
-/// window, thinned before it ([`crate::rerun::stride_for`]). Returns the stride with the run.
+/// Start re-simulating `replay` from Tick 0 to its last recorded tick: for a crash, every tick of
+/// the recorded window, thinned before it ([`crate::rerun::stride_for`]); for a campaign run,
+/// every tick within budget plus its snapshot ticks ([`crate::rerun::stride_for_run`]). Returns
+/// the stride with the run.
 pub fn resim_job(replay: &Replay) -> Result<(u64, crate::rerun::Rerun), String> {
     let source = replay
         .rerun
@@ -815,15 +955,20 @@ pub fn resim_job(replay: &Replay) -> Result<(u64, crate::rerun::Rerun), String> 
     let (Some(first), Some(last)) = (recorded.first(), recorded.last()) else {
         return Err("the replay has no frames".to_owned());
     };
-    let stride = crate::rerun::stride_for(first.tick, recorded.len(), last.bodies.len());
-    let run = crate::rerun::Rerun::new(
-        source,
-        source.seed,
-        last.tick,
-        crate::rerun::Keep::Every {
+    let (stride, keep) = if replay.is_run() {
+        let stride = crate::rerun::stride_for_run(last.tick, recorded.len(), last.bodies.len());
+        let ticks = recorded.iter().map(|f| f.tick).collect();
+        (stride, crate::rerun::Keep::StrideAnd { stride, ticks })
+    } else {
+        let stride = crate::rerun::stride_for(first.tick, recorded.len(), last.bodies.len());
+        (
             stride,
-            all_from: first.tick,
-        },
-    )?;
+            crate::rerun::Keep::Every {
+                stride,
+                all_from: first.tick,
+            },
+        )
+    };
+    let run = crate::rerun::Rerun::new(source, source.seed, last.tick, keep)?;
     Ok((stride, run))
 }

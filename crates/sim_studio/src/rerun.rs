@@ -2,8 +2,9 @@
 //! run is built again from its scenario, parameter values and seed, as `sim_hpc` builds it, and
 //! stepped in the background a few milliseconds per frame. A crash's re-simulation keeps a frame
 //! every so many ticks up to the recorded window and every tick inside it, so the crash can be
-//! scrubbed from Tick 0 and checked against what was recorded; a ghost run keeps the ticks the
-//! replay shows. On the build that wrote the frames the re-simulation is bit-identical (§10.1);
+//! scrubbed from Tick 0 and checked against what was recorded; a completed run's keeps every
+//! tick within budget and its snapshot ticks, checked against the snapshots; a ghost run keeps
+//! the ticks the replay shows. On the build that wrote the frames the re-simulation is bit-identical (§10.1);
 //! on another build it is approximate (D15).
 
 use std::sync::Arc;
@@ -58,6 +59,14 @@ pub enum Keep {
     },
     /// These ticks, ascending.
     Ticks(Vec<u64>),
+    /// Tick 0, every `stride`-th tick, and these ticks (ascending) whatever the stride: a
+    /// completed run's re-simulation keeps its snapshot ticks.
+    StrideAnd {
+        /// Ticks between kept frames (at least 1).
+        stride: u64,
+        /// Ticks kept whatever the stride.
+        ticks: Vec<u64>,
+    },
 }
 
 impl Keep {
@@ -67,6 +76,9 @@ impl Keep {
                 tick >= *all_from || tick.is_multiple_of((*stride).max(1))
             }
             Keep::Ticks(ticks) => ticks.binary_search(&tick).is_ok(),
+            Keep::StrideAnd { stride, ticks } => {
+                tick.is_multiple_of((*stride).max(1)) || ticks.binary_search(&tick).is_ok()
+            }
         }
     }
 }
@@ -78,6 +90,14 @@ pub fn stride_for(first: u64, window: usize, bodies: usize) -> u64 {
     let budget = (MAX_SNAPSHOTS / bodies.max(1)).min(MAX_FRAMES);
     let before = budget.saturating_sub(window).max(1) as u64;
     first.div_ceil(before).max(1)
+}
+
+/// The stride that keeps a completed run's re-simulation within budget: Tick 0 to `last`, with
+/// its `snapshots` snapshot ticks kept besides, and `bodies` bodies.
+pub fn stride_for_run(last: u64, snapshots: usize, bodies: usize) -> u64 {
+    let budget = (MAX_SNAPSHOTS / bodies.max(1)).min(MAX_FRAMES);
+    let free = budget.saturating_sub(snapshots).max(1) as u64;
+    (last + 1).div_ceil(free).max(1)
 }
 
 /// `params` as the kernel takes them.
@@ -215,6 +235,17 @@ impl Rerun {
     }
 }
 
+/// What a re-simulation is checked on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fields {
+    /// Everything a flight-recorder frame holds.
+    #[default]
+    Frame,
+    /// What a Tier 3 snapshot keeps: time, and each body's position, velocity, body rates and
+    /// attitude (no force, flags, total energy or fragment aggregates).
+    Snapshot,
+}
+
 /// How a re-simulation compares with the frames recorded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Check {
@@ -240,13 +271,18 @@ pub enum Check {
 impl Check {
     /// One line for the screen.
     pub fn describe(&self) -> String {
+        self.describe_against("the recorded frames")
+    }
+
+    /// One line for the screen, naming what it was checked against ("the snapshots").
+    pub fn describe_against(&self, what_recorded: &str) -> String {
         match self {
             Check::Exact { frames } => format!(
-                "matches the recorded frames bit for bit ({frames} frame{})",
+                "matches {what_recorded} bit for bit ({frames} frame{})",
                 if *frames == 1 { "" } else { "s" }
             ),
             Check::Diverged { tick, what } => {
-                format!("differs from the recorded frames from tick {tick} ({what})")
+                format!("differs from {what_recorded} from tick {tick} ({what})")
             }
             Check::Short { tick } => {
                 format!("ended before recorded tick {tick}")
@@ -263,8 +299,8 @@ fn same3<const N: usize>(a: [f64; N], b: [f64; N]) -> bool {
     a.iter().zip(b).all(|(x, y)| same(*x, y))
 }
 
-/// The first difference between two bodies, in words.
-fn body_diff(a: &BodySnapshot, b: &BodySnapshot) -> Option<String> {
+/// The first difference between two bodies, in words (`fields` says which are compared).
+fn body_diff(a: &BodySnapshot, b: &BodySnapshot, fields: Fields) -> Option<String> {
     let id = a.sim_id;
     if a.sim_id != b.sim_id {
         return Some(format!("#{} where #{} was recorded", b.sim_id, a.sim_id));
@@ -281,6 +317,9 @@ fn body_diff(a: &BodySnapshot, b: &BodySnapshot) -> Option<String> {
     if !same3(a.quat_wxyz, b.quat_wxyz) {
         return Some(format!("#{id} attitude"));
     }
+    if fields == Fields::Snapshot {
+        return None;
+    }
     if !same(a.force_mag, b.force_mag) {
         return Some(format!("#{id} force"));
     }
@@ -292,6 +331,11 @@ fn body_diff(a: &BodySnapshot, b: &BodySnapshot) -> Option<String> {
 
 /// The first difference between a recorded frame and a re-simulated one, in words.
 pub fn frame_diff(recorded: &TickFrame, rerun: &TickFrame) -> Option<String> {
+    diff(recorded, rerun, Fields::Frame)
+}
+
+/// The first difference in `fields` between a recorded frame and a re-simulated one, in words.
+pub fn diff(recorded: &TickFrame, rerun: &TickFrame, fields: Fields) -> Option<String> {
     if !same(recorded.t_s, rerun.t_s) {
         return Some("time".to_owned());
     }
@@ -299,9 +343,12 @@ pub fn frame_diff(recorded: &TickFrame, rerun: &TickFrame) -> Option<String> {
         return Some("body count".to_owned());
     }
     for (a, b) in recorded.bodies.iter().zip(&rerun.bodies) {
-        if let Some(d) = body_diff(a, b) {
+        if let Some(d) = body_diff(a, b, fields) {
             return Some(d);
         }
+    }
+    if fields == Fields::Snapshot {
+        return None;
     }
     if !same(recorded.total_energy, rerun.total_energy) {
         return Some("total energy".to_owned());
@@ -313,13 +360,13 @@ pub fn frame_diff(recorded: &TickFrame, rerun: &TickFrame) -> Option<String> {
     None
 }
 
-/// Compare every recorded frame with the re-simulated frame of the same tick.
-pub fn compare(recorded: &[TickFrame], rerun: &[TickFrame]) -> Check {
+/// Compare every recorded frame with the re-simulated frame of the same tick, on `fields`.
+pub fn compare(recorded: &[TickFrame], rerun: &[TickFrame], fields: Fields) -> Check {
     for r in recorded {
         let Ok(i) = rerun.binary_search_by_key(&r.tick, |f| f.tick) else {
             return Check::Short { tick: r.tick };
         };
-        if let Some(what) = frame_diff(r, &rerun[i]) {
+        if let Some(what) = diff(r, &rerun[i], fields) {
             return Check::Diverged { tick: r.tick, what };
         }
     }

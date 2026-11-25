@@ -5,7 +5,8 @@
 //! (title bar, activity rail, dock, status bar, notifications). Step S2-1 adds the Scenario
 //! Builder's document ([`builder`]) with its Outliner, Inspector and Lint, S2-2 its Parameters and
 //! S2-3 its Requirements; S3-1 the Preview Run ([`preview`]), S3-2 its 3D [`viewport`], S4-1 Crash
-//! Replay ([`replay`]). Run Replay and the other screens follow in S4-2 to S6.
+//! Replay ([`replay`]), S4-2 re-simulation ([`rerun`]) and S4-3 Run Replay ([`runs`]). Requirement
+//! overlays and the other screens follow in S4-4 to S6.
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -21,6 +22,7 @@ pub mod preview;
 pub mod recent;
 pub mod replay;
 pub mod rerun;
+pub mod runs;
 pub mod state;
 pub mod ui;
 pub mod viewport;
@@ -72,6 +74,7 @@ impl Plugin for StudioCorePlugin {
             .init_resource::<CurrentWorkspace>()
             .init_resource::<CurrentScenario>()
             .init_resource::<CurrentCrash>()
+            .init_resource::<actions::CurrentRuns>()
             .init_resource::<LauncherCampaigns>()
             .add_systems(OnEnter(AppState::Launcher), actions::refresh_campaigns)
             .add_systems(
@@ -80,8 +83,8 @@ impl Plugin for StudioCorePlugin {
                     actions::apply_commands,
                     actions::save_layout,
                     actions::run_preview.run_if(in_state(AppState::LocalRun)),
-                    actions::run_replay.run_if(in_state(AppState::CrashReplay)),
-                    actions::run_replay_jobs.run_if(in_state(AppState::CrashReplay)),
+                    actions::run_replay.run_if(replay_shown),
+                    actions::run_replay_jobs.run_if(replay_shown),
                 )
                     .chain(),
             );
@@ -106,6 +109,7 @@ impl Plugin for StudioUiPlugin {
             .add_systems(Startup, (setup_ui, ui::viewport::setup))
             .add_systems(OnEnter(AppState::LocalRun), ui::viewport::spawn_camera)
             .add_systems(OnEnter(AppState::CrashReplay), ui::viewport::spawn_camera)
+            .add_systems(OnEnter(AppState::RunReplay), ui::viewport::spawn_camera)
             .add_systems(
                 OnEnter(AppState::Launcher),
                 ui::launcher::spawn.after(actions::refresh_campaigns),
@@ -123,15 +127,15 @@ impl Plugin for StudioUiPlugin {
                         .after(actions::run_preview)
                         .run_if(in_state(AppState::LocalRun)),
                     actions::viewport_keys.run_if(viewport_shown),
-                    actions::replay_keys.run_if(in_state(AppState::CrashReplay)),
-                    ui::replay::refresh.after(actions::apply_commands),
+                    actions::replay_keys.run_if(replay_shown),
+                    ui::replay::refresh.after(actions::run_replay_jobs),
                     ui::replay::display
-                        .after(actions::run_replay)
-                        .run_if(in_state(AppState::CrashReplay)),
+                        .after(ui::replay::refresh)
+                        .run_if(replay_shown),
                     (
                         (
                             ui::viewport::preview_source.run_if(in_state(AppState::LocalRun)),
-                            ui::viewport::replay_source.run_if(in_state(AppState::CrashReplay)),
+                            ui::viewport::replay_source.run_if(replay_shown),
                         ),
                         ui::viewport::step_camera,
                         ui::viewport::draw_bodies,
@@ -140,7 +144,7 @@ impl Plugin for StudioUiPlugin {
                     )
                         .chain()
                         .after(actions::run_preview)
-                        .after(actions::run_replay)
+                        .after(actions::run_replay_jobs)
                         .run_if(viewport_shown),
                     ui::viewport::restyle,
                 ),
@@ -151,9 +155,17 @@ impl Plugin for StudioUiPlugin {
     }
 }
 
-/// Whether the state shows the 3D viewport: Preview Run and Crash Replay.
+/// Whether the state shows the 3D viewport: Preview Run, Crash Replay and Run Replay.
 fn viewport_shown(state: Res<State<AppState>>) -> bool {
-    matches!(state.get(), AppState::LocalRun | AppState::CrashReplay)
+    matches!(
+        state.get(),
+        AppState::LocalRun | AppState::CrashReplay | AppState::RunReplay
+    )
+}
+
+/// Whether the state is a replay screen: Crash Replay or Run Replay.
+fn replay_shown(state: Res<State<AppState>>) -> bool {
+    matches!(state.get(), AppState::CrashReplay | AppState::RunReplay)
 }
 
 fn setup_ui(mut commands: Commands) {

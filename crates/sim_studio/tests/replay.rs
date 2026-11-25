@@ -3,7 +3,9 @@
 //! through the studio's commands, matched to its scenario by `scene_hash` and shown frame for
 //! frame exactly as written. G9: a crash written by `sim_hpc` re-simulated in the studio from
 //! Tick 0 bit for bit, a ghost replicate laid over it, and the run opened in the Builder with its
-//! parameters pinned, where Preview crashes the same way.
+//! parameters pinned, where Preview crashes the same way. Run Replay: a campaign's committed runs
+//! listed from its summaries, one run's snapshots shown exactly as written, and its re-simulation
+//! at full rate matching them bit for bit.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -20,13 +22,16 @@ use sim_schema::{
     TickFrame,
 };
 use sim_studio::StudioCorePlugin;
-use sim_studio::actions::{BuilderDoc, PreviewState, StudioCommand};
+use sim_studio::actions::{BuilderDoc, CurrentRuns, PreviewState, StudioCommand};
 use sim_studio::builder::ScenarioDoc;
 use sim_studio::replay::{
     FPS, Jump, Replay, ReplayJobs, ReplaySource, ReplayState, Scrubber, Shown, energy_track,
     entity_order, events, flag_words, frame_at, growth, last_finite_position,
 };
-use sim_studio::rerun::{Check, Keep, MAX_FRAMES, Rerun, compare, frame_diff, stride_for};
+use sim_studio::rerun::{
+    Check, Fields, Keep, MAX_FRAMES, Rerun, compare, diff, frame_diff, stride_for, stride_for_run,
+};
+use sim_studio::runs::CampaignRuns;
 use sim_studio::state::AppState;
 use sim_studio::viewport::ViewportState;
 use sim_studio::workspace::{Pack, Workspace};
@@ -248,16 +253,30 @@ fn tracks_growth_and_entities_read_the_frames() {
 
     // The origin first, then flagged bodies, then by SimId.
     let last = f.last().unwrap();
-    let order: Vec<u32> = entity_order(last, Some(2))
+    let order: Vec<u32> = entity_order(last, Some(2), Fields::Frame)
         .iter()
         .map(|b| b.sim_id)
         .collect();
     assert_eq!(order, [2, 1]);
-    let order: Vec<u32> = entity_order(&f[0], None).iter().map(|b| b.sim_id).collect();
+    let order: Vec<u32> = entity_order(&f[0], None, Fields::Frame)
+        .iter()
+        .map(|b| b.sim_id)
+        .collect();
     assert_eq!(order, [1, 2]);
-    assert_eq!(flag_words(&last.bodies[1]), ["NaN origin", "non-finite"]);
-    assert_eq!(flag_words(&f[6].bodies[1]), ["clamped"]);
-    assert_eq!(flag_words(&f[6].bodies[0]), ["contact"]);
+    assert_eq!(
+        flag_words(&last.bodies[1], Fields::Frame),
+        ["NaN origin", "non-finite"]
+    );
+    assert_eq!(flag_words(&f[6].bodies[1], Fields::Frame), ["clamped"]);
+    assert_eq!(flag_words(&f[6].bodies[0], Fields::Frame), ["contact"]);
+    // A snapshot's force is unknown, not non-finite; its NaN position still is.
+    let mut snap = f[6].bodies[0];
+    snap.force_mag = f64::NAN;
+    snap.flags = 0;
+    assert_eq!(flag_words(&snap, Fields::Frame), ["non-finite"]);
+    assert!(flag_words(&snap, Fields::Snapshot).is_empty());
+    snap.pos[2] = f64::NAN;
+    assert_eq!(flag_words(&snap, Fields::Snapshot), ["non-finite"]);
     assert_eq!(
         last_finite_position(&f, 2),
         Some(f[6].bodies[1].pos),
@@ -506,12 +525,15 @@ fn re_simulations_are_thinned_and_compared() {
     );
 
     let f = frames();
-    assert_eq!(compare(&f[3..], &f), Check::Exact { frames: 5 });
-    assert_eq!(compare(&[], &f), Check::Exact { frames: 0 });
+    assert_eq!(
+        compare(&f[3..], &f, Fields::Frame),
+        Check::Exact { frames: 5 }
+    );
+    assert_eq!(compare(&[], &f, Fields::Frame), Check::Exact { frames: 0 });
     let mut other = f.clone();
     other[5].bodies[1].lin_vel[0] = f64::from_bits(40f64.to_bits() + 1);
     assert_eq!(
-        compare(&f[3..], &other),
+        compare(&f[3..], &other, Fields::Frame),
         Check::Diverged {
             tick: 105,
             what: "#2 vel".into()
@@ -525,12 +547,51 @@ fn re_simulations_are_thinned_and_compared() {
     let mut energy = f[4].clone();
     energy.total_energy = 101.0;
     assert_eq!(frame_diff(&f[4], &energy).as_deref(), Some("total energy"));
-    assert_eq!(compare(&f[3..], &f[..6]), Check::Short { tick: 106 });
+    assert_eq!(
+        compare(&f[3..], &f[..6], Fields::Frame),
+        Check::Short { tick: 106 }
+    );
     assert!(
         Check::Exact { frames: 2 }
             .describe()
             .contains("bit for bit")
     );
+
+    // A run's snapshots keep no force, flags or energy, so a comparison with them skips those.
+    let mut snap = f.clone();
+    for g in &mut snap {
+        g.total_energy = f64::NAN;
+        for b in &mut g.bodies {
+            b.force_mag = f64::NAN;
+            b.flags = 0;
+        }
+    }
+    assert!(matches!(
+        compare(&snap, &f, Fields::Frame),
+        Check::Diverged { tick: 100, .. }
+    ));
+    assert_eq!(
+        compare(&snap, &f, Fields::Snapshot),
+        Check::Exact { frames: 8 }
+    );
+    snap[2].bodies[0].quat_wxyz[1] = 1e-300;
+    assert_eq!(
+        compare(&snap, &f, Fields::Snapshot),
+        Check::Diverged {
+            tick: 102,
+            what: "#1 attitude".into()
+        }
+    );
+    assert!(
+        Check::Exact { frames: 8 }
+            .describe_against("the snapshots")
+            .contains("the snapshots")
+    );
+
+    // A completed run: every tick while it fits, its snapshot ticks kept whatever the stride.
+    assert_eq!(stride_for_run(400, 9, 1), 1);
+    let s = stride_for_run(10_000_000, 2_001, 1);
+    assert!(10_000_001 / s + 2_001 <= MAX_FRAMES as u64 + 1, "{s}");
 }
 
 const MASS: &str = "sim_core::body::MassProps";
@@ -555,6 +616,17 @@ fn bounded_quad(dir: &Path) -> Workspace {
 /// Run the bounded quad's two rows with `sim_hpc --local` (as R7 does) and return the crash
 /// stream it wrote.
 fn campaign_crashes(ws: &Workspace) -> PathBuf {
+    let out = run_campaign(ws, "flight_recorder_ticks = 50");
+    std::fs::read_dir(out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("_crashes.zst"))
+        .expect("a crash stream")
+}
+
+/// Run the quad workspace's two rows (`mass_q` 1.1 with seed 7, 1.45 with seed 8, parameter
+/// rows 3 and 4) with `sim_hpc --local` and these `[execution]` lines; return the output folder.
+fn run_campaign(ws: &Workspace, execution: &str) -> PathBuf {
     let dir = ws.root.join("campaigns");
     std::fs::create_dir_all(&dir).unwrap();
     let rows = [
@@ -582,7 +654,8 @@ fn campaign_crashes(ws: &Workspace) -> PathBuf {
     .unwrap();
     std::fs::write(
         dir.join("campaign.toml"),
-        r#"
+        format!(
+            r#"
 [campaign]
 id = "g9"
 scene = "../scenarios/quad.scn.ron"
@@ -590,12 +663,13 @@ requirements = "../requirements/quad.req.ron"
 manifest = "sweep_manifest.parquet"
 
 [execution]
-flight_recorder_ticks = 50
+{execution}
 
 [output]
 scratch_dir = "scratch"
 shared_out = "out"
-"#,
+"#
+        ),
     )
     .unwrap();
     let campaign =
@@ -609,11 +683,7 @@ shared_out = "out"
         },
     );
     assert_eq!(report.runs, 2, "{report:?}");
-    std::fs::read_dir(dir.join("out"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.to_string_lossy().ends_with("_crashes.zst"))
-        .expect("a crash stream")
+    dir.join("out")
 }
 
 fn until_jobs_done(app: &mut App) {
@@ -760,6 +830,191 @@ fn a_campaign_crash_re_simulates_bit_for_bit() {
     assert!(
         app.world().resource::<PreviewState>().pinned.is_none(),
         "unpinned"
+    );
+}
+
+/// A quad workspace with its mass swept as `mass_q` and no energy bound, flying 400 ticks to
+/// `Completed`.
+fn completing_quad(dir: &Path) -> Workspace {
+    let ws = Workspace::create(&dir.join("ws"), "q", Pack::Multirotor).unwrap();
+    let (mut doc, _) = ScenarioDoc::open(&ws.root, "scenarios/quad.scn.ron").unwrap();
+    let v = doc.slot_of(1).unwrap();
+    doc.bind(v, MASS, ".mass", "mass_q", Some((1.0, 1.5)))
+        .unwrap();
+    doc.export().unwrap();
+    let quad = ws.root.join("scenarios/quad.scn.ron");
+    let text = std::fs::read_to_string(&quad).unwrap();
+    let short = text.replacen("max_ticks: 3000", "max_ticks: 400", 1);
+    assert_ne!(text, short);
+    std::fs::write(&quad, short).unwrap();
+    ws
+}
+
+/// Run Replay: a campaign's committed runs listed from its summaries; one run opened from its
+/// Tier 3 snapshots exactly as written, matched to its scenario by `scene_hash`; its
+/// re-simulation at full rate matching every snapshot bit for bit; the snapshots back on request;
+/// the run list again on Back; a folder without committed parts refused.
+#[test]
+fn a_campaign_run_replays_from_its_snapshots() {
+    let dir = scratch("runs");
+    let ws = completing_quad(&dir);
+    let out = run_campaign(
+        &ws,
+        "snapshot_policy = { base_every = 50, adaptive = false, max_per_run = 2000 }",
+    );
+    let runs = CampaignRuns::open(&out).unwrap();
+    assert_eq!(runs.campaign_id(), "g9");
+    assert!(!runs.other_build());
+    assert_eq!(runs.params, ["mass_q"]);
+    assert_eq!(
+        runs.requirements,
+        ["R-hold-low", "R-hold-high", "R-no-ground"]
+    );
+    assert_eq!(runs.metrics, ["z_final_m"]);
+    assert_eq!(
+        runs.runs.iter().map(|r| r.run_id).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(runs.counts(), [(SimStatus::Completed, 2)]);
+    let row = runs.run(1).unwrap().clone();
+    assert_eq!((row.param_set_id, row.replicate_seed), (4, 8));
+    assert_eq!(runs.params_of(&row), [("mass_q".to_owned(), 1.45)]);
+    assert_eq!(row.total_ticks, 400);
+    let snaps = runs.frames(1).unwrap();
+    assert_eq!(
+        snaps.iter().map(|f| f.tick).collect::<Vec<_>>(),
+        (0..=400).step_by(50).collect::<Vec<u64>>(),
+        "every 50 ticks and the last"
+    );
+    assert!(
+        snaps
+            .iter()
+            .all(|f| f.bodies.len() == snaps[0].bodies.len())
+    );
+    assert!(snaps.iter().all(|f| {
+        f.total_energy.is_nan()
+            && f.bodies
+                .iter()
+                .all(|b| b.force_mag.is_nan() && b.flags == 0)
+    }));
+    assert_ne!(
+        snaps[8].bodies[0].pos, snaps[0].bodies[0].pos,
+        "the quad moved"
+    );
+    assert_ne!(
+        runs.frames(0).unwrap()[8].bodies[0].pos,
+        snaps[8].bodies[0].pos
+    );
+
+    let mut app = app(&dir.join("recent.ron"));
+    send(&mut app, StudioCommand::OpenWorkspace(ws.root.clone()));
+    send(&mut app, StudioCommand::OpenRuns(out.clone()));
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::RunReplay
+    );
+    assert!(
+        last_toast(&app).1.contains("2 committed runs"),
+        "{:?}",
+        last_toast(&app)
+    );
+    assert!(state(&app).replay.is_none(), "the run list first");
+    assert_eq!(
+        app.world()
+            .resource::<CurrentRuns>()
+            .0
+            .as_ref()
+            .map(|r| r.runs.len()),
+        Some(2)
+    );
+    send(&mut app, StudioCommand::OpenRun(7));
+    assert_eq!(last_toast(&app).0, ToastLevel::Error, "no run 7");
+    assert!(state(&app).replay.is_none());
+
+    send(&mut app, StudioCommand::OpenRun(1));
+    let r = state(&app).replay.clone().unwrap();
+    assert!(r.is_run());
+    assert_eq!(r.fields(), Fields::Snapshot);
+    assert!(!r.full_frames());
+    same_bits(&r.frames, &snaps);
+    assert_eq!(r.status, SimStatus::Completed);
+    assert!(r.reason.is_none());
+    assert_eq!(r.params, [("mass_q".to_owned(), 1.45)]);
+    assert_eq!(r.verdicts, runs.verdicts_of(&row));
+    assert_eq!(r.metrics, runs.metrics_of(&row));
+    let source = r.rerun.clone().expect("matched by scene_hash");
+    assert_eq!(source.seed, RunSeed::new(4, 8));
+    assert_eq!(state(&app).frame().unwrap().tick, 0, "opens at the start");
+    send(&mut app, StudioCommand::ReplayJump(Jump::Last));
+    assert_eq!(state(&app).frame().unwrap().tick, 400);
+
+    send(&mut app, StudioCommand::ReplayResimulate);
+    until_jobs_done(&mut app);
+    let r = state(&app).replay.clone().unwrap();
+    let res = r.resim.clone().unwrap();
+    assert_eq!(res.check, Check::Exact { frames: 9 }, "bit for bit");
+    assert!(!res.approximate);
+    assert_eq!(res.status, Some(SimStatus::Completed));
+    assert_eq!(res.tick, 400);
+    assert_eq!(res.stride, 1);
+    assert_eq!(r.shown, Shown::Resimulated);
+    assert!(r.full_frames());
+    assert_eq!(r.frames.len(), 401, "every tick from Tick 0");
+    assert!(r.frames.iter().all(|f| f.total_energy.is_finite()));
+    assert_eq!(
+        state(&app).frame().unwrap().tick,
+        400,
+        "the same tick shown"
+    );
+    same_bits(r.recorded(), &snaps);
+    for s in &snaps {
+        assert_eq!(
+            diff(s, &r.frames[s.tick as usize], Fields::Snapshot),
+            None,
+            "tick {}",
+            s.tick
+        );
+    }
+
+    send(&mut app, StudioCommand::ReplayShow(Shown::Recorded));
+    let r = state(&app).replay.clone().unwrap();
+    assert_eq!(r.shown, Shown::Recorded);
+    assert!(!r.full_frames());
+    assert_eq!(state(&app).frame().unwrap().tick, 400);
+
+    // A thinned re-run keeps the stride's ticks and every snapshot tick.
+    let keep = Keep::StrideAnd {
+        stride: 100,
+        ticks: vec![0, 30, 250],
+    };
+    let mut thin = Rerun::new(&source, source.seed, 300, keep).unwrap();
+    thin.finish();
+    let kept: Vec<u64> = thin.frames().iter().map(|f| f.tick).collect();
+    assert_eq!(kept, [0, 30, 100, 200, 250, 300]);
+    same_bits(&thin.frames()[2..3], &r.other[100..101]);
+
+    send(&mut app, StudioCommand::CloseRun);
+    assert!(state(&app).replay.is_none(), "back to the run list");
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::RunReplay
+    );
+    assert!(app.world().resource::<CurrentRuns>().0.is_some());
+
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    send(&mut app, StudioCommand::OpenRuns(empty));
+    let (level, text) = last_toast(&app);
+    assert_eq!(level, ToastLevel::Error);
+    assert!(text.contains("no committed summaries part"), "{text}");
+    assert_eq!(
+        app.world()
+            .resource::<CurrentRuns>()
+            .0
+            .as_ref()
+            .map(|r| r.runs.len()),
+        Some(2),
+        "the open campaign stays"
     );
 }
 

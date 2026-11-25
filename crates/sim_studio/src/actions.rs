@@ -25,6 +25,7 @@ use crate::replay::{
     find_scenario, ghost_job, resim_job,
 };
 use crate::rerun::param_values;
+use crate::runs::CampaignRuns;
 use crate::state::{AppState, Rail, RailContext, RailTarget};
 use crate::viewport::{FocusMode, ViewToggle, ViewportState};
 use crate::workspace::{Pack, Workspace, WorkspaceError};
@@ -185,6 +186,12 @@ pub enum StudioCommand {
     ReplayGhostOff,
     /// Open the run's scenario in the Builder with its parameters and seed pinned for Preview.
     ReplayOpenInBuilder,
+    /// List a campaign's committed runs in Run Replay (its shared output folder).
+    OpenRuns(PathBuf),
+    /// Open this run (`run_id`) of the listed campaign from its Tier 3 snapshots.
+    OpenRun(u64),
+    /// Close the run and show the campaign's run list again.
+    CloseRun,
 }
 
 /// The Preview Run screen (`sim_studio_ux.md` §7.5): the run and how it is driven.
@@ -316,6 +323,10 @@ pub struct CurrentScenario(pub Option<Result<ScenarioInfo, String>>);
 /// The open crash stream, if any.
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct CurrentCrash(pub Option<OpenCrash>);
+
+/// The campaign whose runs Run Replay lists, if any.
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct CurrentRuns(pub Option<CampaignRuns>);
 
 /// The recent list and where it is saved (`None`: not saved, as in tests).
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
@@ -456,6 +467,7 @@ pub struct CommandCx<'w> {
     workspace: ResMut<'w, CurrentWorkspace>,
     scenario: ResMut<'w, CurrentScenario>,
     crash: ResMut<'w, CurrentCrash>,
+    runs: ResMut<'w, CurrentRuns>,
     recent: ResMut<'w, Recent>,
     layout: ResMut<'w, DockLayout>,
     theme: ResMut<'w, StudioTheme>,
@@ -582,7 +594,7 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             StudioCommand::Rail(rail) => {
                 let rcx = RailContext {
                     workspace: cx.workspace.0.is_some(),
-                    run: false,
+                    run: cx.runs.0.is_some(),
                     crash: cx.crash.0.is_some() || cx.live_crash.0.is_some(),
                 };
                 match rail.target(rcx) {
@@ -625,6 +637,52 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             StudioCommand::CloseDump => {
                 cx.replay.replay = None;
                 *cx.jobs = ReplayJobs::default();
+                cx.replay_changed.write(ReplayChanged);
+            }
+            StudioCommand::OpenRuns(dir) => match CampaignRuns::open(dir) {
+                Ok(runs) => {
+                    let n = runs.runs.len();
+                    if runs.other_build() {
+                        cx.toasts.write(Toast::warning(format!(
+                            "{} was written by build {}; replay shows its snapshots, and re-simulating is approximate (D15)",
+                            dir.display(),
+                            runs.header.build_id
+                        )));
+                    }
+                    cx.toasts.write(Toast::info(format!(
+                        "Opened campaign {} with {n} committed run{}",
+                        runs.campaign_id(),
+                        if n == 1 { "" } else { "s" }
+                    )));
+                    // The Launcher lists a campaign by its heartbeat; a copied folder without one
+                    // is opened but not listed.
+                    if dir.join(crate::campaign::STATUS_FILE).is_file() {
+                        cx.recent
+                            .list
+                            .touch_campaign(dir, &runs.campaign_id(), clock::unix_now());
+                        cx.recent.save(&mut cx.toasts);
+                    }
+                    cx.runs.0 = Some(runs);
+                    if cx.replay.replay.as_ref().is_some_and(Replay::is_run) {
+                        cx.replay.replay = None;
+                        *cx.jobs = ReplayJobs::default();
+                    }
+                    cx.replay_changed.write(ReplayChanged);
+                    cx.next.set(AppState::RunReplay);
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e));
+                }
+            },
+            StudioCommand::OpenRun(run_id) => {
+                open_run(*run_id, &mut cx);
+                cx.replay_changed.write(ReplayChanged);
+            }
+            StudioCommand::CloseRun => {
+                if cx.replay.replay.as_ref().is_some_and(Replay::is_run) {
+                    cx.replay.replay = None;
+                    *cx.jobs = ReplayJobs::default();
+                }
                 cx.replay_changed.write(ReplayChanged);
             }
             StudioCommand::ReplaySeek(_)
@@ -1106,6 +1164,57 @@ fn open_dump(i: usize, cx: &mut CommandCx) {
     show_replay(replay, &mut cx.replay, &mut cx.jobs, &mut cx.view);
 }
 
+/// Open run `run_id` of the listed campaign from its snapshots, matched to its scenario by the
+/// campaign's `scene_hash` (the workspace's `scenarios/`, the output folder and the two folders
+/// above it).
+fn open_run(run_id: u64, cx: &mut CommandCx) {
+    let Some(runs) = &cx.runs.0 else {
+        return;
+    };
+    let Some(row) = runs.run(run_id).cloned() else {
+        cx.toasts.write(Toast::error(format!(
+            "Run {run_id} is not in a committed part of {}",
+            runs.dir.display()
+        )));
+        return;
+    };
+    let frames = match runs.frames(run_id) {
+        Ok(f) if f.is_empty() => {
+            cx.toasts.write(Toast::warning(format!(
+                "Run {run_id} has no snapshots: the campaign kept none (snapshot_policy.base_every = 0)"
+            )));
+            return;
+        }
+        Ok(f) => f,
+        Err(e) => {
+            cx.toasts.write(Toast::error(e));
+            return;
+        }
+    };
+    // The open workspace's scenarios, then the output folder, and up to three folders above it
+    // with their scenarios/ (a workspace's campaigns/<id>/out reaches the workspace's).
+    let mut dirs = Vec::new();
+    if let Some(ws) = &cx.workspace.0 {
+        dirs.push((ws.root.join("scenarios"), "scenarios/".to_owned()));
+    }
+    dirs.push((runs.dir.clone(), String::new()));
+    let mut prefix = String::new();
+    for up in runs.dir.ancestors().skip(1).take(3) {
+        prefix.push_str("../");
+        dirs.push((up.to_owned(), prefix.clone()));
+        dirs.push((up.join("scenarios"), format!("{prefix}scenarios/")));
+    }
+    let found = runs.header.scene_hash.and_then(|h| find_scenario(h, &dirs));
+    if found.is_none() {
+        cx.toasts.write(Toast::warning(
+            "No scenario here has this campaign's scene_hash: positions are shown as recorded, as if in ENU, and the run cannot be re-simulated",
+        ));
+    }
+    let replay = Replay::from_run(runs, &row, frames, found);
+    show_replay(replay, &mut cx.replay, &mut cx.jobs, &mut cx.view);
+    cx.next.set(AppState::RunReplay);
+}
+
 /// Open `replay` at its crashed state with the camera on the body that caused it.
 fn show_replay(
     replay: Replay,
@@ -1121,7 +1230,14 @@ fn show_replay(
         .map(|f| f.bodies.clone())
         .unwrap_or_default();
     view.show(replay.frame, &first);
-    if let Some(id) = replay.origin() {
+    // A crash follows its origin; a campaign run its first body.
+    let target = replay.origin().or_else(|| {
+        replay
+            .is_run()
+            .then(|| first.first().map(|b| b.sim_id))
+            .flatten()
+    });
+    if let Some(id) = target {
         // A body that is no longer finite holds the camera where it last was.
         if let Some(p) = crate::replay::last_finite_position(&replay.frames, id) {
             view.rig.pivot = view.frame.position(p);
@@ -1300,6 +1416,9 @@ fn open_in_builder(cx: &mut CommandCx) {
         ),
         ReplaySource::Dump {
             run_id, scenario, ..
+        }
+        | ReplaySource::Run {
+            run_id, scenario, ..
         } => (
             scenario
                 .clone()
@@ -1366,9 +1485,9 @@ pub fn run_replay_jobs(
         let tick = run.tick();
         let status = run.status();
         let frames = run.into_frames();
-        let check = crate::rerun::compare(replay.recorded(), &frames);
+        let check = crate::rerun::compare(replay.recorded(), &frames, replay.fields());
         let approximate = replay.other_build;
-        let line = check.describe();
+        let line = check.describe_against(replay.recorded_noun());
         let exact = matches!(check, crate::rerun::Check::Exact { .. });
         // A second re-simulation is refused, so the recorded frames are the ones shown here.
         replay.other = frames;

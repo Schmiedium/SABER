@@ -106,18 +106,7 @@ fn fresh(campaign: &Campaign) -> Result<(), Refusal> {
 }
 
 /// A part file's name: `node_{rank}_a{attempt}_p{part}_{table}`, with `.tmp` or `.partial` allowed.
-pub fn parse_part_name(name: &str) -> Option<(u32, u16, u32, &str)> {
-    let rest = name.strip_prefix("node_")?;
-    let (rank, rest) = rest.split_once("_a")?;
-    let (attempt, rest) = rest.split_once("_p")?;
-    let (part, table) = rest.split_once('_')?;
-    Some((
-        rank.parse().ok()?,
-        attempt.parse().ok()?,
-        part.parse().ok()?,
-        table,
-    ))
-}
+pub use sim_schema::io::parse_part_name;
 
 fn refuse(exit: ExitCode, kind: &str, error: String) -> Refusal {
     Refusal {
