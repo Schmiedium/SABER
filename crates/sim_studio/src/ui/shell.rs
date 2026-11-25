@@ -11,7 +11,7 @@ use sim_studio_ui::prelude::*;
 use super::builder::{Breadcrumb, RegionBody};
 use super::{action, child};
 use crate::actions::{
-    BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, LiveCrash, PreviewState, ReqPanel,
+    BuilderDoc, CurrentCrash, CurrentScenario, CurrentWorkspace, LiveCrash, PreviewState,
     StudioCommand,
 };
 use crate::state::{AppState, Rail, RailContext};
@@ -261,9 +261,7 @@ pub fn fill_regions(
     parents: Query<&ChildOf>,
     rp: super::replay::ReplayRes,
     scenario: Res<CurrentScenario>,
-    log: Res<ToastLog>,
-    docs: Res<BuilderDoc>,
-    panel: Res<ReqPanel>,
+    builder: super::builder::BuilderRes,
     preview: Res<PreviewState>,
     theme: Res<StudioTheme>,
     view: Res<crate::viewport::ViewportState>,
@@ -289,17 +287,18 @@ pub fn fill_regions(
             let body = child(&mut commands, region, region_body());
             commands.entity(body).insert(RegionBody(kind));
             if *state == AppState::ScenarioBuilder
-                && let Some(doc) = &docs.0
+                && let Some(inputs) = builder.inputs()
             {
-                super::builder::fill(&mut commands, body, kind, doc, &panel, &log);
+                super::builder::fill(&mut commands, body, kind, &inputs);
                 continue;
             }
+            let (docs, log) = (&*builder.docs, &*builder.log);
             if *state == AppState::LocalRun {
                 let inputs = super::preview::PanelInputs {
                     preview: &preview,
-                    docs: &docs,
+                    docs,
                     mode: theme.mode,
-                    log: &log,
+                    log,
                     view: &view,
                     camera: camera.as_ref().map(|c| c.0),
                 };
@@ -316,7 +315,7 @@ pub fn fill_regions(
                     view: &view,
                     camera: camera.as_ref().map(|c| c.0),
                     mode: theme.mode,
-                    log: &log,
+                    log,
                 };
                 super::replay::fill(&mut commands, &mut images, body, kind, &inputs);
                 continue;
@@ -346,7 +345,7 @@ pub fn fill_regions(
                     if let Some(Err(e)) = &scenario.0 {
                         child(&mut commands, body, status_text(Status::Fail, e.clone()));
                     }
-                    console(&mut commands, body, &log);
+                    console(&mut commands, body, log);
                 }
                 DockRegion::Center => center(&mut commands, body, *state),
             }

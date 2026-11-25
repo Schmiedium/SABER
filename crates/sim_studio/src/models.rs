@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use sim_assets::{
@@ -202,8 +203,8 @@ pub fn resolve_looks(scenario: &Scenario, catalog: &Catalog) -> Resolved {
 /// The catalogue for the open workspace: the built-ins, its `models/` and its library roots.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ModelLibrary {
-    /// Every model that can be linked.
-    pub catalog: Catalog,
+    /// Every model that can be linked, with the files that changed since import noted.
+    pub catalog: Arc<Catalog>,
     /// Bumped whenever the catalogue is rebuilt.
     pub generation: u64,
     built_for: Option<Option<(PathBuf, Vec<PathBuf>)>>,
@@ -216,21 +217,38 @@ impl ModelLibrary {
         if self.built_for.as_ref() == Some(&key) {
             return false;
         }
+        self.reload(ws);
+        true
+    }
+
+    /// Rebuild the catalogue now (after an import, a duplicate or a re-import).
+    pub fn reload(&mut self, ws: Option<&Workspace>) {
+        let key = ws.map(|w| (w.root.clone(), w.file.model_roots.clone()));
         let mut catalog = Catalog::with_builtins();
         if let Some(w) = ws {
             catalog.add_workspace(&w.root);
-            for r in &w.file.model_roots {
-                let root = if r.is_absolute() {
-                    r.clone()
-                } else {
-                    w.root.join(r)
-                };
+            for root in library_roots(w) {
                 catalog.add_library(&root);
             }
         }
-        self.catalog = catalog;
+        catalog.verify_files();
+        self.catalog = Arc::new(catalog);
         self.generation += 1;
         self.built_for = Some(key);
-        true
     }
+}
+
+/// A workspace's library roots (`model_roots`), relative ones under its folder.
+pub fn library_roots(ws: &Workspace) -> Vec<PathBuf> {
+    ws.file
+        .model_roots
+        .iter()
+        .map(|r| {
+            if r.is_absolute() {
+                r.clone()
+            } else {
+                ws.root.join(r)
+            }
+        })
+        .collect()
 }

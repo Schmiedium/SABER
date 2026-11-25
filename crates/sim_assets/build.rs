@@ -1,5 +1,5 @@
 //! Lists the built-in library (`builtin/<domain>/<slug>/model.ron`) for the binary: every
-//! manifest is embedded, and the primitives' `model.glb` too, as the fallback when the built-in
+//! manifest and thumbnail is embedded, and the primitives' `model.glb` too, as the fallback when the built-in
 //! folder is not installed (subsystems §5.10). Adding a built-in is adding a folder.
 
 use std::fmt::Write as _;
@@ -20,6 +20,10 @@ fn main() {
                 println!(
                     "cargo:rerun-if-changed={}",
                     model.join("model.glb").display()
+                );
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    model.join("thumb.png").display()
                 );
                 let rel = model.strip_prefix(&root).expect("under the root");
                 let id = rel
@@ -42,9 +46,15 @@ fn main() {
         } else {
             "None".to_owned()
         };
+        let thumb = dir.join("thumb.png");
+        let thumb = if thumb.is_file() {
+            format!("Some(include_bytes!({:?}))", thumb.display().to_string())
+        } else {
+            "None".to_owned()
+        };
         writeln!(
             out,
-            "    Builtin {{ id: {id:?}, manifest: include_str!({:?}), glb: {glb} }},",
+            "    Builtin {{ id: {id:?}, manifest: include_str!({:?}), glb: {glb}, thumb: {thumb} }},",
             manifest.display().to_string()
         )
         .expect("write to a string");

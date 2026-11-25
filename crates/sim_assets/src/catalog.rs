@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use crate::builtin;
 use crate::hash::ContentHash;
 use crate::manifest::{MANIFEST_FILE, VisualAssetManifest};
-use crate::visual::{AssetSource, VisualAssetRef};
+use crate::thumb::THUMB_FILE;
+use crate::visual::{AssetSource, VisualAssetRef, VisualSection};
 
 /// Where a model's file is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +48,36 @@ impl CatalogEntry {
             Location::Dir(dir) => Some(dir.join(&self.manifest.file)),
             Location::Embedded(_) => None,
         }
+    }
+
+    /// The thumbnail's path, when the model is in a folder (it may not exist yet).
+    pub fn thumb_path(&self) -> Option<PathBuf> {
+        match &self.location {
+            Location::Dir(dir) => Some(dir.join(THUMB_FILE)),
+            Location::Embedded(_) => None,
+        }
+    }
+
+    /// The thumbnail's PNG bytes: the file beside the model, else the one embedded for a
+    /// built-in.
+    pub fn thumb(&self) -> Option<Vec<u8>> {
+        if let Some(b) = self.thumb_path().and_then(|p| std::fs::read(p).ok()) {
+            return Some(b);
+        }
+        (self.source == AssetSource::Builtin)
+            .then(|| builtin::thumb(&self.manifest.id))
+            .flatten()
+            .map(<[u8]>::to_vec)
+    }
+
+    /// The entities that link this model, by `SimId`, in a `visual:` section.
+    pub fn users(&self, section: &VisualSection) -> Vec<u32> {
+        section
+            .models
+            .iter()
+            .filter(|(_, m)| m.asset.source == self.source && m.asset.id == self.manifest.id)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// The model file's bytes and whether they still match the manifest's hash.
@@ -118,6 +149,8 @@ pub struct Catalog {
     entries: Vec<CatalogEntry>,
     /// Folders that looked like models but could not be listed.
     pub skipped: Vec<Skipped>,
+    /// Models whose file no longer matches their manifest ([`Catalog::verify_files`]).
+    stale: Vec<(AssetSource, String)>,
 }
 
 impl Catalog {
@@ -217,6 +250,25 @@ impl Catalog {
                 Err(reason) => self.skipped.push(Skipped { dir: d, reason }),
             }
         }
+    }
+
+    /// Hash every model file on disk once, noting those that changed since they were imported
+    /// (or cannot be read), so the Library and lint can say so without reading files again.
+    pub fn verify_files(&mut self) {
+        self.stale = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.location, Location::Dir(_)))
+            .filter(|e| e.load().map_or(true, |l| !l.matches_manifest))
+            .map(|e| (e.source.clone(), e.manifest.id.clone()))
+            .collect();
+    }
+
+    /// Whether a model's file changed since it was imported, as of [`Catalog::verify_files`].
+    pub fn file_changed(&self, entry: &CatalogEntry) -> bool {
+        self.stale
+            .iter()
+            .any(|(s, id)| *s == entry.source && *id == entry.manifest.id)
     }
 
     /// Every model listed.

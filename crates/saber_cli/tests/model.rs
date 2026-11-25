@@ -1,5 +1,6 @@
-//! `saber-cli model inspect` (step S5-1, IB-20): a built-in reports its size, triangles and nodes
-//! and passes; a file the import rules refuse exits 2 with the reason; usage errors exit 64.
+//! `saber-cli model inspect` (step S5-1) and `model import` (S5-2, IB-20): a built-in reports its
+//! size, triangles and nodes and passes; a file the import rules refuse exits 2 with the reason; a
+//! `.gltf` imports into the workspace as one `.glb` with its manifest; usage errors exit 64.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,6 +71,108 @@ fn a_refused_file_exits_2_with_the_reason() {
     assert_eq!(code, 2);
     assert!(out.contains("\"NotGltf\""), "{out}");
 
-    assert_eq!(cli(&["model", "import", "x.glb"]).0, 64);
+    assert_eq!(cli(&["model", "convert", "x.obj"]).0, 64);
     assert_eq!(cli(&["model", "inspect"]).0, 64);
+    assert_eq!(
+        cli(&["model", "import", "x.glb", "--unit", "furlong"]).0,
+        64
+    );
+    assert_eq!(cli(&["model", "import", "x.glb", "--up"]).0, 64);
+    assert_eq!(cli(&["model", "import", "x.glb"]).0, 2, "no such file");
+}
+
+/// A built-in written as a `.gltf` with its buffer in a separate `.bin`, scaled to millimetres
+/// by a root node.
+fn gltf_beside_its_bin(dir: &Path) -> PathBuf {
+    let glb = std::fs::read(builtin("primitive/box")).unwrap();
+    let jl = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+    let mut json: serde_json::Value = serde_json::from_slice(&glb[20..20 + jl]).unwrap();
+    let bl = u32::from_le_bytes(glb[20 + jl..24 + jl].try_into().unwrap()) as usize;
+    std::fs::write(dir.join("crate.bin"), &glb[28 + jl..28 + jl + bl]).unwrap();
+    json["buffers"][0]["uri"] = serde_json::json!("crate.bin");
+    let roots = json["scenes"][0]["nodes"].clone();
+    let n = json["nodes"].as_array().unwrap().len();
+    json["nodes"].as_array_mut().unwrap().push(
+        serde_json::json!({ "name": "mm", "scale": [1000.0, 1000.0, 1000.0], "children": roots }),
+    );
+    json["scenes"][0]["nodes"] = serde_json::json!([n]);
+    let path = dir.join("crate.gltf");
+    std::fs::write(&path, json.to_string()).unwrap();
+    path
+}
+
+#[test]
+fn a_gltf_imports_into_the_workspace() {
+    let dir = std::env::temp_dir().join(format!("saber-cli-import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ws")).unwrap();
+    let file = gltf_beside_its_bin(&dir);
+    let ws = dir.join("ws");
+    let args = |extra: &[&str]| {
+        let mut a = vec!["model", "import", file.to_str().unwrap(), "--workspace"];
+        a.push(ws.to_str().unwrap());
+        a.extend_from_slice(extra);
+        a.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    };
+    let run = |a: Vec<String>| cli(&a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, out, err) = run(args(&[
+        "--name",
+        "Supply crate",
+        "--up",
+        "-z",
+        "--forward",
+        "+x",
+        "--origin",
+        "bottom",
+        "--license",
+        "CC0-1.0",
+        "--json",
+    ]));
+    assert_eq!(code, 0, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["id"], "models/supply_crate");
+    assert_eq!(v["unit"], "millimetre");
+    assert_eq!(v["unit_guessed"], true);
+    assert_eq!(
+        (v["up"].as_str(), v["forward"].as_str()),
+        (Some("−Z"), Some("+X"))
+    );
+    assert_eq!(
+        v["bounds"]["max"][2], 0.0,
+        "bottom centre: nothing below the origin"
+    );
+    let model = ws.join("models/supply_crate");
+    let glb = std::fs::read(model.join("model.glb")).unwrap();
+    assert!(glb.starts_with(b"glTF"));
+    let hash = v["content_hash"].as_str().unwrap();
+    let text = std::fs::read_to_string(model.join("model.ron")).unwrap();
+    assert!(text.contains(hash.trim_start_matches("blake3:")), "{text}");
+    assert!(model.join("thumb.png").is_file());
+    // The packed file inspects clean on its own.
+    let (code, out, _) = cli(&[
+        "model",
+        "inspect",
+        model.join("model.glb").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(r["external"].as_array().unwrap().len(), 0);
+    // Again: refused while the folder exists, unless replacing; text output names the id.
+    let (code, out, _) = run(args(&["--name", "Supply crate", "--json"]));
+    assert_eq!(code, 2);
+    assert!(out.contains("\"Exists\""), "{out}");
+    let (code, out, _) = run(args(&[
+        "--name",
+        "Supply crate",
+        "--replace",
+        "--unit",
+        "mm",
+    ]));
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("imported as models/supply_crate"), "{out}");
+    assert!(
+        out.contains("frame       millimetre, up +Y, forward +Z"),
+        "{out}"
+    );
 }

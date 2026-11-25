@@ -6,8 +6,9 @@
 //! Builder's document ([`builder`]) with its Outliner, Inspector and Lint, S2-2 its Parameters and
 //! S2-3 its Requirements; S3-1 the Preview Run ([`preview`]), S3-2 its 3D [`viewport`], S4-1 Crash
 //! Replay ([`replay`]), S4-2 re-simulation ([`rerun`]), S4-3 Run Replay ([`runs`]) and S4-4 its
-//! requirement overlays ([`overlay`]), and S5-1 the bodies' 3D [`models`]. Campaign Setup follows
-//! in S6.
+//! requirement overlays ([`overlay`]), S5-1 the bodies' 3D [`models`], and S5-2 the Library's 3D
+//! Models tab, the Inspector's Appearance section and the Import dialog ([`library`]). Campaign
+//! Setup follows in S6.
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -19,6 +20,7 @@ pub mod builder;
 pub mod campaign;
 pub mod clock;
 pub mod crash;
+pub mod library;
 pub mod models;
 pub mod overlay;
 pub mod preview;
@@ -67,6 +69,8 @@ impl Plugin for StudioCorePlugin {
             .add_message::<ReplayChanged>()
             .init_resource::<BuilderDoc>()
             .init_resource::<ReqPanel>()
+            .init_resource::<models::ModelLibrary>()
+            .init_resource::<library::ModelPanel>()
             .init_resource::<PreviewState>()
             .init_resource::<LiveCrash>()
             .init_resource::<viewport::ViewportState>()
@@ -107,8 +111,8 @@ const SHELL_STATES: [AppState; 5] = [
 
 impl Plugin for StudioUiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<models::ModelLibrary>()
-            .init_resource::<ui::models::SceneLooks>()
+        app.init_resource::<ui::models::SceneLooks>()
+            .init_resource::<ui::library::Thumbs>()
             .init_resource::<ui::models::ModelStore>()
             .init_gizmo_group::<ui::viewport::GridGizmos>()
             .init_gizmo_group::<ui::viewport::BodyGizmos>()
@@ -127,6 +131,11 @@ impl Plugin for StudioUiPlugin {
                     actions::builder_keys.run_if(in_state(AppState::ScenarioBuilder)),
                     ui::shell::fill_regions,
                     ui::shell::console_append,
+                    ui::library::drop_files.before(actions::apply_commands),
+                    ui::library::load_thumbs
+                        .after(actions::apply_commands)
+                        .before(ui::builder::refresh)
+                        .before(ui::shell::fill_regions),
                     (ui::builder::refresh, ui::builder::breadcrumb).after(actions::apply_commands),
                     ui::preview::refresh.after(actions::apply_commands),
                     ui::preview::display

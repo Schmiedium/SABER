@@ -240,6 +240,8 @@ sequenceDiagram
     end
 ```
 
+As built (step S5-2): the flow above for `.gltf` and `.glb`, with `Candidate::open` as `inspect(path)` and `Candidate::commit` as `commit` (subsystems §5.10). The preview and `thumb.png` are both drawn on the CPU by `sim_assets::thumb`, so the importer writes the thumbnail itself and `saber-cli model import` writes one too. The dialog opens from the 3D Models tab's **+ Import model…** or a file dropped on the window; origin is file origin, bounding-box centre or bottom centre (a picked point only through `--origin x,y,z`); the destination is the workspace's `models/` or a library root. After `commit` the studio reloads the catalogue (there is no `register` call) and selects the new model. OBJ waits for S5-4.
+
 ### 2.2 Linking a model to an entity and deriving collision
 
 Linking writes only to the scenario's `visual:` section. Deriving collision is a separate, explicit step that writes a `CollisionShape` into the sim section and therefore changes `scene_hash` (IB-19, IB-20).
@@ -294,6 +296,8 @@ sequenceDiagram
         end
     end
 ```
+
+As built (step S5-2): linking is the Appearance section's **Change…** picker or the 3D Models tab's **Link to ‹entity›** (no drag onto entities yet); each pick or field is one undoable change of the `visual:` section (`ScenarioDoc::set_look`, `set_look_field`, `set_look_visible`). Missing and changed models are lint warnings on the entity's `SimId`, so the Outliner shows ⚠; Preview and Replay resolve and draw the looks as built in S5-1. Align and Derive collision come with S5-3.
 
 ### 2.3 Models at export, on the cluster and in replay
 

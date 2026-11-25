@@ -4764,6 +4764,7 @@ dependencies = [
  "blake3",
  "glam",
  "gltf",
+ "png",
  "ron",
  "serde",
  "serde_json",

@@ -14,10 +14,14 @@ use sim_studio_ui::theme::{StudioTheme, ThemeMode};
 use sim_studio_ui::toast::Toast;
 
 use crate::builder::requirements::{pick, sets};
-use crate::builder::{FieldRef, LintLevel, ReqItem, RequirementDoc, ScenarioDoc};
+use crate::builder::{
+    FieldRef, LintLevel, LookChoice, LookField, ReqItem, RequirementDoc, ScenarioDoc,
+};
 use crate::campaign::CampaignCard;
 use crate::clock;
 use crate::crash::OpenCrash;
+use crate::library::{ImportDialog, ImportEdit, ModelKey, ModelPanel, SourceFilter, destinations};
+use crate::models::ModelLibrary;
 use crate::preview::{ParamChoice, PreviewCrash, PreviewRun, Speed, params_for, sweeps};
 use crate::recent::RecentList;
 use crate::replay::{
@@ -33,6 +37,39 @@ use crate::workspace::{Pack, Workspace, WorkspaceError};
 /// Something the user asked for.
 #[derive(Message, Clone, Debug, PartialEq)]
 pub enum StudioCommand {
+    /// Pick an entity's model (Appearance ▸ Model, or Link in the Library).
+    PickModel(usize, LookChoice),
+    /// Set one field of an entity's look from text.
+    SetLook {
+        /// The entity's document slot.
+        slot: usize,
+        /// The field.
+        field: LookField,
+        /// Its new text.
+        text: String,
+    },
+    /// Show or hide an entity's model.
+    LookVisible(usize, bool),
+    /// Open or close the Appearance section's model picker.
+    ModelPicker(bool),
+    /// The Library's search text.
+    LibraryQuery(String),
+    /// The Library's source filter.
+    LibrarySource(SourceFilter),
+    /// Select a model in the Library (`None`: clear).
+    LibrarySelect(Option<ModelKey>),
+    /// Copy a model into the workspace's `models/` (to customise a built-in).
+    LibraryDuplicate(ModelKey),
+    /// Accept a model whose file changed since it was imported.
+    LibraryReimport(ModelKey),
+    /// Open the Import dialog, on a file when one was dropped.
+    ImportOpen(Option<PathBuf>),
+    /// Change the Import dialog.
+    ImportSet(ImportEdit),
+    /// Import the dialog's file.
+    ImportCommit,
+    /// Close the Import dialog.
+    ImportCancel,
     /// Open the workspace at a folder (or its `saber.workspace.ron`).
     OpenWorkspace(PathBuf),
     /// Create a workspace in `root` from a pack, then open it.
@@ -267,6 +304,8 @@ pub enum BuilderTab {
     Scene,
     /// The requirement set and its editor (§7.4).
     Requirements,
+    /// The Library's 3D models (§7.11.1), with the Inspector beside them.
+    Models,
 }
 
 /// The Requirements tab: which tab shows, the open requirement set, and the workspace's sets.
@@ -406,6 +445,8 @@ fn opened(ws: Workspace, cx: &mut CommandCx, verb: &str) {
             "The open scenario does not load: {e}"
         )));
     }
+    cx.library.refresh(Some(&ws));
+    *cx.models = ModelPanel::default();
     open_docs(&ws, cx);
     cx.workspace.0 = Some(ws);
     cx.next.set(AppState::ScenarioBuilder);
@@ -484,6 +525,8 @@ pub struct CommandCx<'w> {
     replay: ResMut<'w, ReplayState>,
     replay_changed: MessageWriter<'w, ReplayChanged>,
     jobs: ResMut<'w, ReplayJobs>,
+    library: ResMut<'w, ModelLibrary>,
+    models: ResMut<'w, ModelPanel>,
 }
 
 /// Carry out the user's commands.
@@ -735,6 +778,191 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             | StudioCommand::Unjitter(..)
             | StudioCommand::AddComponent(..)
             | StudioCommand::RemoveComponent(..) => edit(command, &mut cx),
+            StudioCommand::PickModel(..)
+            | StudioCommand::SetLook { .. }
+            | StudioCommand::LookVisible(..)
+            | StudioCommand::ModelPicker(_)
+            | StudioCommand::LibraryQuery(_)
+            | StudioCommand::LibrarySource(_)
+            | StudioCommand::LibrarySelect(_)
+            | StudioCommand::LibraryDuplicate(_)
+            | StudioCommand::LibraryReimport(_)
+            | StudioCommand::ImportOpen(_)
+            | StudioCommand::ImportSet(_)
+            | StudioCommand::ImportCommit
+            | StudioCommand::ImportCancel => models_command(command, &mut cx),
+        }
+        sync_catalog(&mut cx);
+    }
+}
+
+/// Give the Builder's document the current model catalogue (after a workspace opens, or an
+/// import, duplicate or re-import changed it).
+fn sync_catalog(cx: &mut CommandCx) {
+    let current = cx.library.catalog.clone();
+    if let Some(doc) = cx.doc.0.as_ref()
+        && !doc
+            .catalog()
+            .is_some_and(|c| std::ptr::eq(c, Arc::as_ptr(&current)))
+    {
+        if let Some(doc) = cx.doc.0.as_mut() {
+            doc.set_catalog(current);
+        }
+        cx.changed.write(DocChanged);
+    }
+}
+
+/// The 3D models' commands: the Appearance section, the Library tab and the Import dialog
+/// (`sim_studio_ux.md` §7.11).
+fn models_command(command: &StudioCommand, cx: &mut CommandCx) {
+    let doc_edit = |cx: &mut CommandCx, f: &dyn Fn(&mut ScenarioDoc) -> Result<bool, String>| {
+        let Some(doc) = &mut cx.doc.0 else {
+            cx.toasts
+                .write(Toast::warning("No scenario is open in the Builder"));
+            return false;
+        };
+        match f(doc) {
+            Ok(changed) => changed,
+            Err(e) => {
+                cx.toasts.write(Toast::error(e));
+                false
+            }
+        }
+    };
+    match command {
+        StudioCommand::PickModel(slot, choice) => {
+            doc_edit(cx, &|d| d.set_look(&[*slot], choice));
+            cx.models.picking = false;
+        }
+        StudioCommand::SetLook { slot, field, text } => {
+            if !doc_edit(cx, &|d| d.set_look_field(*slot, *field, text)) {
+                return;
+            }
+        }
+        StudioCommand::LookVisible(slot, visible) => {
+            doc_edit(cx, &|d| d.set_look_visible(*slot, *visible));
+        }
+        StudioCommand::ModelPicker(open) => cx.models.picking = *open,
+        StudioCommand::LibraryQuery(q) => cx.models.query = q.trim().to_owned(),
+        StudioCommand::LibrarySource(f) => cx.models.source = f.clone(),
+        StudioCommand::LibrarySelect(k) => cx.models.selected = k.clone(),
+        StudioCommand::LibraryDuplicate((source, id)) => {
+            let Some(ws) = cx.workspace.0.clone() else {
+                cx.toasts.write(Toast::warning("No workspace is open"));
+                return;
+            };
+            let Some(entry) = cx.library.catalog.get(source, id).cloned() else {
+                cx.toasts
+                    .write(Toast::error(format!("{id} is not in the library")));
+                return;
+            };
+            let models = ws.root.join("models");
+            let base = entry.manifest.slug().to_owned();
+            let name = (1..)
+                .map(|k| {
+                    if k == 1 {
+                        base.clone()
+                    } else {
+                        format!("{base}_{k}")
+                    }
+                })
+                .find(|n| !models.join(n).exists())
+                .expect("a free name");
+            match sim_assets::import::duplicate(&entry, &models, &name, "models/") {
+                Ok(done) => {
+                    cx.library.reload(Some(&ws));
+                    cx.toasts.write(Toast::success(format!(
+                        "Copied {} to {}; link the copy to customise it",
+                        entry.manifest.id, done.manifest.id
+                    )));
+                    cx.models.selected =
+                        Some((sim_assets::AssetSource::Workspace, done.manifest.id));
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e.to_string()));
+                }
+            }
+        }
+        StudioCommand::LibraryReimport((source, id)) => {
+            let dir = cx
+                .library
+                .catalog
+                .get(source, id)
+                .and_then(|e| match &e.location {
+                    sim_assets::Location::Dir(d) => Some(d.clone()),
+                    sim_assets::Location::Embedded(_) => None,
+                });
+            let Some(dir) = dir else {
+                cx.toasts
+                    .write(Toast::error(format!("{id} has no folder to re-import")));
+                return;
+            };
+            match sim_assets::import::refresh(&dir) {
+                Ok(done) => {
+                    let ws = cx.workspace.0.clone();
+                    cx.library.reload(ws.as_ref());
+                    cx.toasts.write(Toast::success(format!(
+                        "Re-imported {}: the manifest now records {}; entities that link it keep the hash they were linked with until picked again",
+                        id, done.manifest.content_hash
+                    )));
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e.to_string()));
+                }
+            }
+        }
+        StudioCommand::ImportOpen(path) => {
+            cx.models.import = Some(ImportDialog::new(path.as_deref()));
+            cx.req.tab = BuilderTab::Models;
+        }
+        StudioCommand::ImportSet(edit) => match &mut cx.models.import {
+            Some(d) => d.apply(edit),
+            None => return,
+        },
+        StudioCommand::ImportCancel => cx.models.import = None,
+        StudioCommand::ImportCommit => import_model(cx),
+        _ => return,
+    }
+    cx.changed.write(DocChanged);
+}
+
+/// Import the dialog's file into its destination, select it, and close the dialog.
+fn import_model(cx: &mut CommandCx) {
+    let Some(ws) = cx.workspace.0.clone() else {
+        cx.toasts.write(Toast::warning("No workspace is open"));
+        return;
+    };
+    let Some(dialog) = &cx.models.import else {
+        return;
+    };
+    if let Some(why) = dialog.blocked() {
+        cx.toasts
+            .write(Toast::error(format!("Import refused: {why}")));
+        return;
+    }
+    let (Some(c), Some(s)) = (dialog.candidate(), &dialog.settings) else {
+        return;
+    };
+    let dests = destinations(&ws);
+    let Some(dest) = dests.get(dialog.dest).or(dests.first()) else {
+        return;
+    };
+    match c.commit(s, &dest.dir, dest.prefix, dialog.replace) {
+        Ok(done) => {
+            cx.library.reload(Some(&ws));
+            cx.toasts.write(Toast::success(format!(
+                "Imported {} into {} ({}, {} triangles)",
+                done.manifest.id,
+                dest.label,
+                done.manifest.content_hash.short(),
+                done.manifest.triangles
+            )));
+            cx.models.selected = Some((dest.source.clone(), done.manifest.id));
+            cx.models.import = None;
+        }
+        Err(e) => {
+            cx.toasts
+                .write(Toast::error(format!("Import refused: {e}")));
         }
     }
 }

@@ -2,7 +2,9 @@
 //!
 //! As built (step S2-1): the scene's own validation (`SimId`s, bindings, uncertainties), Tick 0's
 //! setup in a World (resolution and the setup checks, whose warnings are kept), and the timestep
-//! against time constants. Errors block Export, not editing.
+//! against time constants. Errors block Export, not editing. Step S5-2 adds looks: a `visual:`
+//! section that does not parse, and models that are missing or changed (warnings, never errors,
+//! since looks never change results).
 
 use sim_core::integrator::StepMode;
 
@@ -75,6 +77,7 @@ pub fn lint(doc: &ScenarioDoc) -> Vec<LintItem> {
         },
     }
     step_against_time_constants(doc, &mut out);
+    super::looks::lint(doc, &mut out);
 
     let rows = doc.rows();
     let bound = rows.iter().filter(|r| r.bound).count();
