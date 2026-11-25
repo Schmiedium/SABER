@@ -12,7 +12,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use bevy::math::{DMat3, DQuat, DVec2, DVec3, Quat, Vec3};
 use bevy::prelude::Resource;
-use sim_schema::{BodySnapshot, Frame};
+use sim_schema::{BodySnapshot, Frame, Verdict};
 
 /// Vertical field of view, rad.
 pub const FOV_Y: f64 = std::f64::consts::FRAC_PI_4;
@@ -871,6 +871,39 @@ pub struct ViewSource {
     /// A ghost run's bodies at the same tick (Crash Replay), drawn as grey rings tied to their
     /// counterparts.
     pub ghosts: Vec<BodySnapshot>,
+    /// Requirement levels on a body's position (Run Replay's overlays), drawn as squares around
+    /// the body in the verdict's color.
+    pub planes: Vec<LevelPlane>,
+}
+
+/// A requirement's level on one axis of a body's position: the plane `position[axis] = value`,
+/// world frame, drawn as a square around the body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelPlane {
+    /// The position axis the level is on (0 to 2).
+    pub axis: usize,
+    /// The level, m.
+    pub value: f64,
+    /// The body's position, world frame: the square is centred on its foot on the plane.
+    pub around: [f64; 3],
+    /// The run's verdict for the requirement.
+    pub verdict: Option<Verdict>,
+}
+
+impl LevelPlane {
+    /// The square's corners, world frame, `half` metres from its centre along the other two
+    /// axes, in order around it.
+    pub fn corners(&self, half: f64) -> [[f64; 3]; 4] {
+        let (u, v) = ((self.axis + 1) % 3, (self.axis + 2) % 3);
+        let mut centre = self.around;
+        centre[self.axis] = self.value;
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(a, b)| {
+            let mut c = centre;
+            c[u] += a * half;
+            c[v] += b * half;
+            c
+        })
+    }
 }
 
 /// The viewport's state: camera, focus and what is shown (one per studio window).

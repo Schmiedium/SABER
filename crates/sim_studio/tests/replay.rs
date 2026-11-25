@@ -1048,3 +1048,292 @@ fn another_builds_crash_re_runs_approximately() {
         last_toast(&app)
     );
 }
+
+const OVERLAY_SET: &str = r#"RequirementSet(
+    header: (magic: "SABER", format: "requirements", schema_version: "1.0.0"),
+    id: "OVL", version: "1",
+    metrics: {
+        "z_final": (signal: "entity(1).RigidBody6.position.z", reduce: Final),
+        "z_max": (signal: "entity(1).RigidBody6.position.z", reduce: Max),
+        "v_min": (signal: "entity(2).PointMass3.velocity.x", reduce: Min),
+        "hot": (signal: "entity(1).Thermal.temperature", reduce: TimeAbove(80.0)),
+        "work": (signal: "entity(1).Motor.power", reduce: Integral),
+        "hits": (event: "ground_impact", reduce: Count),
+    },
+    requirements: [
+        (id: "A", text: "Ends below", kind: Threshold(metric: "z_final", op: Le, value: -9.5)),
+        (id: "B", kind: Threshold(metric: "z_max", op: Lt, value: 0.0)),
+        (id: "C", kind: Threshold(metric: "z_max", op: Ge, value: -5.0)),
+        (id: "D", kind: Threshold(metric: "v_min", op: Ge, value: 1.0)),
+        (id: "E", kind: Threshold(metric: "hot", op: Le, value: 2.0)),
+        (id: "F", kind: Threshold(metric: "work", op: Le, value: 10.0)),
+        (id: "G", kind: Threshold(metric: "hits", op: Le, value: 0.0)),
+        (id: "H", kind: Envelope(signal: "entity(1).RigidBody6.body_rates.y", lo: -1.0, hi: 1.0, from_s: 0.5, to_s: 2.0)),
+        (id: "I", kind: Never(signal: "entity(1).RigidBody6.position.z", op: Ge, value: 0.0)),
+        (id: "J", kind: Eventually(signal: "entity(1).RigidBody6.attitude.w", op: Lt, value: 0.9, within_s: 3.0)),
+        (id: "K", kind: Never(event: "ground_impact")),
+        (id: "L", kind: Custom(name: "my_check")),
+    ],
+)"#;
+
+/// Requirement overlays (S4-4): each kind's signal, levels, window and scope; the samples that
+/// break it; the signals the frames keep; the planes on a body's position; a set found by hash.
+#[test]
+fn requirements_become_overlays() {
+    use sim_schema::Verdict;
+    use sim_studio::overlay::{
+        FrameField, Scope, find_set, frame_signal, overlays, planes, signals_to_sample,
+    };
+    use sim_verify::{Op, RequirementSet};
+
+    assert_eq!(
+        frame_signal("entity(1).RigidBody6.position.z"),
+        Some((1, FrameField::Position(2)))
+    );
+    assert_eq!(
+        frame_signal("entity(4).PointMass3.velocity.x"),
+        Some((4, FrameField::Velocity(0)))
+    );
+    assert_eq!(
+        frame_signal("entity(1).RigidBody6.body_rates.y"),
+        Some((1, FrameField::BodyRates(1)))
+    );
+    assert_eq!(
+        frame_signal("entity(1).RigidBody6.attitude.w"),
+        Some((1, FrameField::Attitude(0)))
+    );
+    for other in [
+        "entity(1).PointMass3.body_rates.y",
+        "entity(1).MassProps.mass",
+        "entity(1).RigidBody6.position",
+        "entity(1).RigidBody6.position.z.extra",
+        "impacts(3).count",
+        "nonsense",
+    ] {
+        assert_eq!(frame_signal(other), None, "{other}");
+    }
+
+    let set = RequirementSet::from_ron(OVERLAY_SET).unwrap();
+    let verdicts = vec![
+        ("A".to_owned(), Verdict::Fail),
+        ("B".to_owned(), Verdict::Pass),
+    ];
+    let o = overlays(&set, &verdicts);
+    assert_eq!(o.len(), 12);
+    let by = |id: &str| o.iter().find(|x| x.id == id).unwrap();
+    let a = by("A");
+    assert_eq!(a.verdict, Some(Verdict::Fail));
+    assert_eq!(a.text, "Ends below");
+    assert_eq!(
+        a.check,
+        "z_final (Final of entity(1).RigidBody6.position.z) ≤ -9.5"
+    );
+    assert_eq!(
+        (a.scope, a.levels.clone()),
+        (Scope::AtEnd, vec![(-9.5, Op::Le)])
+    );
+    assert_eq!(
+        by("B").scope,
+        Scope::EveryTick,
+        "max < v holds at every tick"
+    );
+    assert_eq!(by("C").scope, Scope::Once, "max ≥ v needs one tick");
+    assert_eq!(
+        by("D").scope,
+        Scope::EveryTick,
+        "min ≥ v holds at every tick"
+    );
+    assert_eq!(by("C").verdict, None, "no column for it");
+    let e = by("E");
+    assert_eq!(
+        (e.scope, e.levels.clone()),
+        (Scope::Derived, vec![(80.0, Op::Le)])
+    );
+    assert!(e.note.as_deref().unwrap().contains("time above"));
+    let f = by("F");
+    assert!(f.levels.is_empty() && f.signal.is_some() && f.scope == Scope::Derived);
+    assert!(by("G").signal.is_none() && by("G").note.as_deref().unwrap().contains("event"));
+    let h = by("H");
+    assert_eq!(h.levels, [(-1.0, Op::Ge), (1.0, Op::Le)]);
+    assert_eq!(h.window, Some((0.5, 2.0)));
+    assert!(h.breaks(1.0, 1.5) && h.breaks(1.0, -1.01));
+    assert!(
+        !h.breaks(1.0, 0.3) && !h.breaks(1.0, 1.0),
+        "the bounds pass"
+    );
+    assert!(
+        !h.breaks(0.2, 9.0) && !h.breaks(2.5, 9.0),
+        "outside the window"
+    );
+    assert!(!h.breaks(1.0, f64::NAN));
+    let i = by("I");
+    assert_eq!(i.levels, [(0.0, Op::Lt)], "Never(z ≥ 0) passes below 0");
+    assert!(i.breaks(5.0, 0.0) && !i.breaks(5.0, -0.1));
+    let j = by("J");
+    assert_eq!((j.scope, j.window), (Scope::Once, Some((0.0, 3.0))));
+    assert!(!j.breaks(1.0, 1.0), "a sample never breaks an Eventually");
+    assert!(by("K").signal.is_none() && by("L").note.as_deref().unwrap().contains("my_check"));
+    assert_eq!(
+        signals_to_sample(&o),
+        ["entity(1).Thermal.temperature", "entity(1).Motor.power"],
+        "only what the frames do not keep, once each"
+    );
+
+    // From frames, and as planes: only levels on a body's position.
+    let f = frames();
+    assert_eq!(
+        a.from_frames(&f).unwrap(),
+        f.iter().map(|x| x.bodies[0].pos[2]).collect::<Vec<_>>()
+    );
+    assert!(e.from_frames(&f).is_none());
+    assert_eq!(a.plane(), Some((1, 2)));
+    assert_eq!(h.plane(), None, "body rates are not a place");
+    let p = planes(&o, &f[0]);
+    assert_eq!(
+        p.iter().map(|q| (q.axis, q.value)).collect::<Vec<_>>(),
+        [(2, -9.5), (2, 0.0), (2, -5.0), (2, 0.0)],
+        "A, B, C, I: their levels, around body #1"
+    );
+    assert!(p.iter().all(|q| q.around == f[0].bodies[0].pos));
+    let mut lost = f[0].clone();
+    lost.bodies[0].pos[0] = f64::NAN;
+    assert!(planes(&o, &lost).is_empty(), "not around a NaN position");
+    let corners = p[0].corners(2.0);
+    assert!(corners.iter().all(|c| c[2] == -9.5));
+    assert_eq!(corners[0][0], f[0].bodies[0].pos[0] - 2.0);
+    assert_eq!(corners[2][1], f[0].bodies[0].pos[1] + 2.0);
+
+    // A set found by its hash, named by where it was found.
+    let dir = scratch("overlay-sets");
+    std::fs::create_dir_all(dir.join("requirements")).unwrap();
+    std::fs::write(dir.join("requirements/a.req.ron"), OVERLAY_SET).unwrap();
+    std::fs::write(dir.join("requirements/broken.req.ron"), "not ron").unwrap();
+    let dirs = [
+        (dir.clone(), String::new()),
+        (dir.join("requirements"), "../requirements/".to_owned()),
+    ];
+    let m = find_set(set.hash(), &dirs).unwrap();
+    assert_eq!(m.rel, "../requirements/a.req.ron");
+    assert_eq!(m.set, set);
+    assert!(find_set(set.hash() ^ 1, &dirs).is_none());
+}
+
+/// Requirement overlays end to end: a campaign's set found by `req_set_hash`, its requirements on
+/// the quad's altitude drawn from the snapshots and as planes, and one on its mass (which no
+/// frame keeps) drawn only from the re-simulation, which samples it bit for bit as the run had it.
+#[test]
+fn requirements_are_drawn_over_a_campaign_run() {
+    use sim_studio::overlay::Scope;
+    use sim_verify::Op;
+    let dir = scratch("overlays");
+    let ws = completing_quad(&dir);
+    let req = ws.root.join("requirements/quad.req.ron");
+    let text = std::fs::read_to_string(&req).unwrap();
+    let more = text.replacen(
+        "    ],\n)",
+        "        (id: \"R-mass\", text: \"At most 1.3 kg\",\n         kind: Envelope(signal: \"entity(1).MassProps.mass\", lo: 0.5, hi: 1.3)),\n    ],\n)",
+        1,
+    );
+    assert_ne!(text, more);
+    std::fs::write(&req, more).unwrap();
+    let out = run_campaign(
+        &ws,
+        "snapshot_policy = { base_every = 50, adaptive = false, max_per_run = 2000 }",
+    );
+
+    let mut app = app(&dir.join("recent.ron"));
+    send(&mut app, StudioCommand::OpenWorkspace(ws.root.clone()));
+    send(&mut app, StudioCommand::OpenRuns(out));
+    let runs = app.world().resource::<CurrentRuns>().0.clone().unwrap();
+    assert_eq!(runs.requirements.len(), 4);
+    let found = runs.set.clone().expect("found by req_set_hash");
+    assert_eq!(found.rel, "requirements/quad.req.ron");
+    send(&mut app, StudioCommand::OpenRun(1));
+    let r = state(&app).replay.clone().unwrap();
+    assert_eq!(r.req_set.as_deref(), Some("requirements/quad.req.ron"));
+    let ids: Vec<&str> = r.overlays.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(ids, ["R-hold-low", "R-hold-high", "R-no-ground", "R-mass"]);
+    for o in &r.overlays {
+        let v = r
+            .verdicts
+            .iter()
+            .find(|(id, _)| *id == o.id)
+            .map(|(_, v)| *v);
+        assert_eq!(o.verdict, v, "{}: the campaign's verdict", o.id);
+    }
+    assert_eq!(
+        r.overlays[3].verdict,
+        Some(sim_schema::Verdict::Fail),
+        "1.45 kg"
+    );
+    let low = &r.overlays[0];
+    assert_eq!(
+        (low.scope, low.levels.clone()),
+        (Scope::AtEnd, vec![(-9.5, Op::Le)])
+    );
+    let z: Vec<f64> = r.frames.iter().map(|f| f.bodies[0].pos[2]).collect();
+    assert_eq!(r.series(low).unwrap(), z, "from the snapshots");
+    assert_eq!(r.series(&r.overlays[3]), None, "no frame keeps the mass");
+    let last = r.frames.last().unwrap();
+    let p = sim_studio::overlay::planes(&r.overlays, last);
+    assert_eq!(
+        p.iter().map(|q| (q.axis, q.value)).collect::<Vec<_>>(),
+        [(2, -9.5), (2, -10.5), (2, 0.0)]
+    );
+
+    send(&mut app, StudioCommand::ReplayResimulate);
+    until_jobs_done(&mut app);
+    let r = state(&app).replay.clone().unwrap();
+    let res = r.resim.clone().unwrap();
+    assert_eq!(res.check, Check::Exact { frames: 9 });
+    assert_eq!(
+        res.signals
+            .iter()
+            .map(|(s, v)| (s.as_str(), v.len()))
+            .collect::<Vec<_>>(),
+        [("entity(1).MassProps.mass", 401)],
+        "the mass sampled at every kept tick"
+    );
+    let mass = r.series(&r.overlays[3]).unwrap();
+    assert_eq!(mass.len(), 401);
+    assert!(mass.iter().all(|m| m.to_bits() == 1.45f64.to_bits()));
+    assert!(r.overlays[3].breaks(r.frames[10].t_s, mass[10]));
+    let z: Vec<f64> = r.frames.iter().map(|f| f.bodies[0].pos[2]).collect();
+    assert_eq!(r.series(low).unwrap(), z, "from the re-simulated frames");
+    send(&mut app, StudioCommand::ReplayShow(Shown::Recorded));
+    let r = state(&app).replay.clone().unwrap();
+    assert_eq!(r.series(&r.overlays[3]), None, "the snapshots again");
+
+    // Sampling straight from a re-run: a field that is not there reads NaN.
+    let source = r.rerun.clone().unwrap();
+    let mut run = Rerun::new(
+        &source,
+        source.seed,
+        20,
+        Keep::Every {
+            stride: 10,
+            all_from: 100,
+        },
+    )
+    .unwrap()
+    .with_signals(&[
+        "entity(1).RigidBody6.position.z".to_owned(),
+        "entity(99).RigidBody6.position.z".to_owned(),
+    ]);
+    run.finish();
+    let (frames, signals) = run.into_parts();
+    assert_eq!(
+        frames.iter().map(|f| f.tick).collect::<Vec<_>>(),
+        [0, 10, 20]
+    );
+    let z: Vec<u64> = frames
+        .iter()
+        .map(|f| f.bodies[0].pos[2].to_bits())
+        .collect();
+    assert_eq!(
+        signals[0].1.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        z,
+        "the same value the frame holds"
+    );
+    assert!(signals[1].1.iter().all(|v| v.is_nan()) && signals[1].1.len() == 3);
+}

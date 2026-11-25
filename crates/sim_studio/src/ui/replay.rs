@@ -58,6 +58,8 @@ pub enum TrackKind {
     Energy,
     /// Contact, clamping and non-finite values per frame.
     Events,
+    /// One of a campaign run's requirements over it: the overlay at this index (S4-4).
+    Requirement(usize),
 }
 
 /// A track image under the timeline; clicking or dragging on it moves the playhead.
@@ -77,6 +79,8 @@ pub const TRACK_W: u32 = 720;
 pub const ENERGY_H: u32 = 56;
 /// The events track's height.
 pub const EVENTS_H: u32 = 14;
+/// A requirement track's height.
+pub const REQ_H: u32 = 40;
 /// Dumps listed at most in a stream's index (the rest are counted).
 pub const MAX_LISTED: usize = 100;
 /// Growth rows shown at most.
@@ -101,6 +105,8 @@ pub struct TrackColors {
     pub bad: [u8; 4],
     /// The ghost run's energy.
     pub ghost: [u8; 4],
+    /// A level of a requirement the run passed.
+    pub pass: [u8; 4],
 }
 
 /// The tracks' colors in a theme (the §10.1 status colors).
@@ -118,6 +124,7 @@ pub fn track_colors(mode: ThemeMode) -> TrackColors {
             clamped: [0xD2, 0x99, 0x22, 0xFF],
             bad: [0xF8, 0x51, 0x49, 0xFF],
             ghost: [0x8B, 0x94, 0x9E, 0xFF],
+            pass: [0x3F, 0xB9, 0x50, 0xFF],
         },
         ThemeMode::Light => TrackColors {
             plot: PlotColors {
@@ -131,6 +138,7 @@ pub fn track_colors(mode: ThemeMode) -> TrackColors {
             clamped: [0x9A, 0x67, 0x00, 0xFF],
             bad: [0xCF, 0x22, 0x2E, 0xFF],
             ghost: [0x6E, 0x77, 0x81, 0xFF],
+            pass: [0x1A, 0x7F, 0x37, 0xFF],
         },
     }
 }
@@ -272,12 +280,11 @@ fn run_right(commands: &mut Commands, body: Entity, replay: &Replay) {
         );
     }
     for (id, v) in &replay.verdicts {
-        let status = match v {
-            Verdict::Pass => Status::Pass,
-            Verdict::Fail => Status::Fail,
-            Verdict::Inconclusive => Status::Warning,
-        };
-        child(commands, body, status_text(status, format!("{id}: {v:?}")));
+        child(
+            commands,
+            body,
+            status_text(verdict_status(Some(*v)), format!("{id}: {v:?}")),
+        );
     }
     if !replay.metrics.is_empty() {
         child(commands, body, heading("Metrics"));
@@ -593,6 +600,7 @@ fn center(
                 "Snapshots hold no total energy, forces or flags: re-simulate the run to draw the energy and event tracks and to jump to contacts.",
             ),
         );
+        requirement_tracks(commands, images, body, inputs, replay);
         return;
     }
     let r = child(commands, body, wrap_row());
@@ -661,6 +669,95 @@ fn center(
         EVENTS_H,
         inputs.mode,
     );
+    requirement_tracks(commands, images, body, inputs, replay);
+}
+
+/// A verdict's status mark and color (none: neither pass nor fail).
+fn verdict_status(v: Option<Verdict>) -> Status {
+    match v {
+        Some(Verdict::Pass) => Status::Pass,
+        Some(Verdict::Fail) => Status::Fail,
+        Some(Verdict::Inconclusive) | None => Status::Inconclusive,
+    }
+}
+
+/// A campaign run's requirements over it (step S4-4): for each requirement on a signal, a line
+/// saying what it checks with the run's verdict, and a track with the signal, its levels and its
+/// window; the others say why they are not drawn.
+fn requirement_tracks(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    body: Entity,
+    inputs: &ReplayInputs,
+    replay: &Replay,
+) {
+    if !replay.is_run() || replay.verdicts.is_empty() && replay.overlays.is_empty() {
+        return;
+    }
+    child(commands, body, heading("Requirements over the run"));
+    let Some(set) = &replay.req_set else {
+        child(
+            commands,
+            body,
+            muted(
+                "No requirement set here has the campaign's req_set_hash: open the workspace that holds it to draw the requirements over the run.",
+            ),
+        );
+        return;
+    };
+    child(
+        commands,
+        body,
+        muted(format!(
+            "From {set}. Each signal against time; its levels dashed, green where the run passed, red where it failed; samples that break the requirement in red; time outside its window dimmed. The verdicts are the campaign's."
+        )),
+    );
+    let mut drawn = 0;
+    for (i, o) in replay.overlays.iter().enumerate() {
+        let verdict = o
+            .verdict
+            .map_or_else(|| "no verdict".to_owned(), |v| format!("{v:?}"));
+        child(
+            commands,
+            body,
+            status_text(
+                verdict_status(o.verdict),
+                format!("{}: {} ({verdict})", o.id, o.check),
+            ),
+        );
+        let why = match (&o.signal, replay.series(o)) {
+            (Some(_), Some(_)) if drawn < crate::overlay::MAX_TRACKS => {
+                if let Some(note) = &o.note {
+                    child(commands, body, muted(note.clone()));
+                }
+                track(
+                    commands,
+                    images,
+                    body,
+                    TrackKind::Requirement(i),
+                    REQ_H,
+                    inputs.mode,
+                );
+                drawn += 1;
+                continue;
+            }
+            (Some(_), Some(_)) => format!(
+                "Not drawn: at most {} requirement tracks.",
+                crate::overlay::MAX_TRACKS
+            ),
+            (Some(s), None) if replay.resim.is_some() => {
+                format!("{s} is not in the snapshots: show the re-simulated frames to draw it.")
+            }
+            (Some(s), None) => {
+                format!("{s} is not in the snapshots: re-simulate the run to draw it.")
+            }
+            (None, _) => format!(
+                "Not drawn: {}.",
+                o.note.as_deref().unwrap_or("it watches no signal")
+            ),
+        };
+        child(commands, body, muted(why));
+    }
 }
 
 /// Re-simulation, ghost run and Open in Builder (G9, D15).
@@ -900,6 +997,11 @@ pub fn draw_track(
                 draw_level(pixels, TRACK_W, height, y, colors.bound);
             }
         }
+        TrackKind::Requirement(i) => {
+            if let Some(o) = replay.overlays.get(i) {
+                draw_requirement(pixels, height, replay, o, colors);
+            }
+        }
         TrackKind::Events => {
             for px in pixels.chunks_exact_mut(4) {
                 px.copy_from_slice(&colors.plot.background);
@@ -925,6 +1027,92 @@ pub fn draw_track(
         for i in [a, b] {
             let x = column_of(i, n, TRACK_W);
             draw_column(pixels, TRACK_W, height, x, 0..height / 4, colors.cursor);
+        }
+    }
+}
+
+/// A requirement's track: the signal over the frames shown, its levels dashed in the verdict's
+/// color, the samples that break it in red and the frames outside its window dimmed.
+fn draw_requirement(
+    pixels: &mut [u8],
+    height: u32,
+    replay: &Replay,
+    o: &crate::overlay::Overlay,
+    colors: TrackColors,
+) {
+    let values = replay.series(o).unwrap_or_default();
+    let samples: Vec<[f64; 2]> = values
+        .iter()
+        .enumerate()
+        .map(|(k, v)| [k as f64, *v])
+        .collect();
+    let mut range = value_range(&samples);
+    for (level, _) in o.levels.iter().filter(|(l, _)| l.is_finite()) {
+        range = Some(match range {
+            Some((lo, hi)) => (lo.min(*level), hi.max(*level)),
+            None => (level - 1.0, level + 1.0),
+        });
+    }
+    let range = range.map(|(lo, hi)| {
+        let pad = (hi - lo) * 0.08;
+        (lo - pad, hi + pad)
+    });
+    draw_in(pixels, TRACK_W, height, &samples, range, colors.plot);
+    let Some(range) = range else {
+        return;
+    };
+    let n = replay.frames.len();
+    let span = (0.0, n.saturating_sub(1) as f64);
+    let broken: Vec<[f64; 2]> = samples
+        .iter()
+        .zip(&replay.frames)
+        .map(|(s, f)| {
+            if o.breaks(f.t_s, s[1]) {
+                *s
+            } else {
+                [s[0], f64::NAN]
+            }
+        })
+        .collect();
+    draw_series(pixels, TRACK_W, height, &broken, span, range, colors.bad);
+    let level = match o.verdict {
+        Some(Verdict::Pass) => colors.pass,
+        Some(Verdict::Fail) => colors.bad,
+        Some(Verdict::Inconclusive) | None => colors.clamped,
+    };
+    for (l, _) in &o.levels {
+        if let Some(y) = row_of(*l, height, range) {
+            draw_level(pixels, TRACK_W, height, y, level);
+        }
+    }
+    if o.scope == crate::overlay::Scope::AtEnd
+        && let Some(v) = values.last().copied()
+        && let Some(y) = row_of(v, height, range)
+    {
+        let x = column_of(n.saturating_sub(1), n, TRACK_W);
+        for dx in 0..3u32 {
+            let rows = y.saturating_sub(2)..(y + 3).min(height);
+            draw_column(pixels, TRACK_W, height, x.saturating_sub(dx), rows, level);
+        }
+    }
+    for (k, f) in replay.frames.iter().enumerate() {
+        if o.in_window(f.t_s) {
+            continue;
+        }
+        let x0 = column_of(k, n, TRACK_W);
+        let x1 = if k + 1 < n {
+            column_of(k + 1, n, TRACK_W)
+        } else {
+            TRACK_W
+        };
+        for x in x0..x1.max(x0 + 1).min(TRACK_W) {
+            for y in 0..height {
+                let i = ((y * TRACK_W + x) * 4) as usize;
+                for c in 0..3 {
+                    let z = u16::from(colors.plot.zero[c]);
+                    pixels[i + c] = ((u16::from(pixels[i + c]) + z) / 2) as u8;
+                }
+            }
         }
     }
 }
@@ -1151,6 +1339,7 @@ pub fn display(
         let height = match track.kind {
             TrackKind::Energy => ENERGY_H,
             TrackKind::Events => EVENTS_H,
+            TrackKind::Requirement(_) => REQ_H,
         };
         if let Some(mut image) = images.get_mut(&track.image)
             && let Some(data) = image.data.as_mut()

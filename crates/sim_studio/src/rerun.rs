@@ -10,7 +10,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sim_core::{FlightRecorder, ParamValues, RunSeed, Scenario, SimAppBuilder, SimWorld};
+use bevy::prelude::Entity;
+use sim_core::{
+    FieldPath, FlightRecorder, ParamValues, RunSeed, Scenario, SimAppBuilder, SimId,
+    SimTypeRegistry, SimWorld,
+};
 use sim_schema::{BodySnapshot, CrashReason, SimStatus, TickFrame};
 
 /// A scenario shared by a replay and the runs rebuilt from it. Equal when it is the same one.
@@ -117,6 +121,16 @@ pub struct Rerun {
     frames: Vec<TickFrame>,
     status: Option<SimStatus>,
     reason: Option<CrashReason>,
+    /// Signals sampled at the kept ticks.
+    signals: Vec<Sampled>,
+}
+
+/// A signal a re-simulation samples: its path, its field (none when it does not resolve) and
+/// its values, one per kept frame.
+struct Sampled {
+    signal: String,
+    field: Option<(Entity, FieldPath)>,
+    values: Vec<f64>,
 }
 
 impl std::fmt::Debug for Rerun {
@@ -149,9 +163,48 @@ impl Rerun {
             frames: Vec::new(),
             status: None,
             reason: None,
+            signals: Vec::new(),
         };
         run.record();
         Ok(run)
+    }
+
+    /// Also sample `signals` (`entity(SimId).Component.field`) at every tick it keeps, from the
+    /// frames kept so far on; a signal that does not resolve reads `NaN`.
+    pub fn with_signals(mut self, signals: &[String]) -> Self {
+        for s in signals {
+            let field = sim_verify::parse_signal(s).ok().and_then(|(id, path)| {
+                let world = self.sim.world();
+                let path = {
+                    let registry = world.resource::<SimTypeRegistry>().0.read();
+                    FieldPath::parse(&registry, &path).ok()?
+                };
+                let entity = self.sim.body(SimId(id))?;
+                path.read(world, entity).ok()?;
+                Some((entity, path))
+            });
+            self.signals.push(Sampled {
+                signal: s.clone(),
+                field,
+                values: Vec::new(),
+            });
+        }
+        for _ in 0..self.frames.len() {
+            self.sample();
+        }
+        self
+    }
+
+    fn sample(&mut self) {
+        let world = self.sim.world();
+        for s in &mut self.signals {
+            let v = s
+                .field
+                .as_ref()
+                .and_then(|(e, path)| path.read(world, *e).ok())
+                .unwrap_or(f64::NAN);
+            s.values.push(v);
+        }
     }
 
     fn record(&mut self) {
@@ -165,6 +218,7 @@ impl Rerun {
         };
         if self.keep.wants(f.tick) && self.frames.last().is_none_or(|l| l.tick < f.tick) {
             self.frames.push(f.clone());
+            self.sample();
         }
     }
 
@@ -232,6 +286,16 @@ impl Rerun {
     /// The frames kept, oldest first.
     pub fn into_frames(self) -> Vec<TickFrame> {
         self.frames
+    }
+
+    /// The frames kept, oldest first, and each sampled signal's values at them.
+    pub fn into_parts(self) -> (Vec<TickFrame>, Vec<(String, Vec<f64>)>) {
+        let signals = self
+            .signals
+            .into_iter()
+            .map(|s| (s.signal, s.values))
+            .collect();
+        (self.frames, signals)
     }
 }
 

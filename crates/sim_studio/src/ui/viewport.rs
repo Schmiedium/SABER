@@ -457,6 +457,32 @@ pub fn draw_bodies(
             }
         }
     }
+    // Requirement levels: a square about 320 px across in the plane, with two lines each way.
+    for plane in &source.planes {
+        let centre = frame.position(plane.around);
+        if !centre.is_finite() {
+            continue;
+        }
+        let half = 160.0 * projection.pixel_size_at(centre);
+        let color = match plane.verdict {
+            Some(sim_schema::Verdict::Pass) => colors.color(&token::STATUS_PASS),
+            Some(sim_schema::Verdict::Fail) => colors.color(&token::STATUS_FAIL),
+            _ => colors.color(&token::STATUS_WARN),
+        };
+        let c = plane
+            .corners(half)
+            .map(|p| to_render(frame.position(p), origin));
+        if !c.iter().all(|p| p.is_finite()) {
+            continue;
+        }
+        for k in 0..4 {
+            gizmos.line(c[k], c[(k + 1) % 4], color);
+        }
+        for f in [1.0 / 3.0, 2.0 / 3.0] {
+            gizmos.line(c[0].lerp(c[1], f), c[3].lerp(c[2], f), color);
+            gizmos.line(c[0].lerp(c[3], f), c[1].lerp(c[2], f), color);
+        }
+    }
     if !view.gizmos {
         return;
     }
@@ -637,6 +663,7 @@ pub fn preview_source(preview: Res<PreviewState>, mut source: ResMut<ViewSource>
         moving,
         alarms: Vec::new(),
         ghosts: Vec::new(),
+        planes: Vec::new(),
     };
 }
 
@@ -695,6 +722,11 @@ pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
         .filter(|b| b.flags & sim_schema::FLAG_NAN_ORIGIN != 0 || !finite_kept(b, fields))
         .filter_map(|b| last_finite_position(shown, b.sim_id))
         .collect();
+    let planes = replay
+        .replay
+        .as_ref()
+        .map(|r| crate::overlay::planes(&r.overlays, frame))
+        .unwrap_or_default();
     *source = ViewSource {
         bodies: frame.bodies.clone(),
         t_s: frame.t_s,
@@ -703,5 +735,6 @@ pub fn replay_source(replay: Res<ReplayState>, mut source: ResMut<ViewSource>) {
         moving: false,
         alarms,
         ghosts,
+        planes,
     };
 }

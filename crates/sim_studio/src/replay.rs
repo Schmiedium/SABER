@@ -17,6 +17,7 @@ use sim_schema::{
     SimStatus, SummaryRow, TickFrame, Verdict,
 };
 
+use crate::overlay::Overlay;
 use crate::preview::PreviewCrash;
 use crate::rerun::{Check, Fields, RerunSource, SceneRef};
 use crate::runs::CampaignRuns;
@@ -98,6 +99,11 @@ pub struct Replay {
     pub metrics: Vec<(String, f64)>,
     /// Why a campaign run that did not crash ended: its stop condition.
     pub stop_reason: Option<String>,
+    /// A campaign run's requirements drawn over it (empty for a crash, or when no requirement
+    /// set here has the campaign's `req_set_hash`).
+    pub overlays: Vec<Overlay>,
+    /// Where the requirement set was found, for the screen's notes.
+    pub req_set: Option<String>,
 }
 
 /// Which frames a replay shows.
@@ -123,6 +129,9 @@ pub struct Resimulated {
     pub status: Option<SimStatus>,
     /// The tick it ended at, or reached.
     pub tick: u64,
+    /// The signals it sampled for the requirement overlays, each with one value per
+    /// re-simulated frame.
+    pub signals: Vec<(String, Vec<f64>)>,
 }
 
 /// Another replicate of the same parameter row, re-simulated and laid over the replay by tick.
@@ -172,6 +181,8 @@ impl Replay {
             verdicts: Vec::new(),
             metrics: Vec::new(),
             stop_reason: None,
+            overlays: Vec::new(),
+            req_set: None,
         }
     }
 
@@ -213,6 +224,8 @@ impl Replay {
             verdicts: Vec::new(),
             metrics: Vec::new(),
             stop_reason: None,
+            overlays: Vec::new(),
+            req_set: None,
         }
     }
 
@@ -262,6 +275,12 @@ impl Replay {
             verdicts: runs.verdicts_of(row),
             metrics: runs.metrics_of(row),
             stop_reason: row.stop_reason.clone(),
+            overlays: runs
+                .set
+                .as_ref()
+                .map(|m| crate::overlay::overlays(&m.set, &runs.verdicts_of(row)))
+                .unwrap_or_default(),
+            req_set: runs.set.as_ref().map(|m| m.rel.clone()),
         }
     }
 
@@ -302,6 +321,25 @@ impl Replay {
         } else {
             Fields::Snapshot
         }
+    }
+
+    /// An overlay's signal at each frame shown: from the frames when they keep it, else from the
+    /// re-simulation's samples while its frames are shown.
+    pub fn series(&self, o: &Overlay) -> Option<Vec<f64>> {
+        if let Some(v) = o.from_frames(&self.frames) {
+            return Some(v);
+        }
+        let signal = o.signal.as_ref()?;
+        let resim = self
+            .resim
+            .as_ref()
+            .filter(|_| self.shown == Shown::Resimulated)?;
+        resim
+            .signals
+            .iter()
+            .find(|(s, _)| s == signal)
+            .map(|(_, v)| v.clone())
+            .filter(|v| v.len() == self.frames.len())
     }
 
     /// The frames as recorded, whichever are shown.
@@ -969,6 +1007,7 @@ pub fn resim_job(replay: &Replay) -> Result<(u64, crate::rerun::Rerun), String> 
             },
         )
     };
-    let run = crate::rerun::Rerun::new(source, source.seed, last.tick, keep)?;
+    let run = crate::rerun::Rerun::new(source, source.seed, last.tick, keep)?
+        .with_signals(&crate::overlay::signals_to_sample(&replay.overlays));
     Ok((stride, run))
 }
