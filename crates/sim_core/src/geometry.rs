@@ -19,6 +19,9 @@
 //!   new EPA, which allocates, whenever two polyhedra overlap.
 //!
 //! Every query works in f64 on poses built from the body's `DVec3` position and `DQuat` attitude.
+//!
+//! [`derive`] makes collision shapes from a 3D model's triangles at authoring time (D17), and
+//! estimates a shape's mass properties; the simulation never calls it.
 
 use glam::{DQuat, DVec3};
 use parry3d_f64::bounding_volume::BoundingVolume;
@@ -33,6 +36,10 @@ use parry3d_f64::utils::Array2;
 
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
+
+pub mod derive;
+
+pub use derive::{DeriveMethod, DerivedCollision};
 
 /// A rigid placement: `position` and the rotation from the part's axes to its parent's.
 #[derive(Reflect, Clone, Copy, Debug, PartialEq)]

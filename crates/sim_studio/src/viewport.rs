@@ -921,6 +921,8 @@ pub struct ViewportState {
     pub grid: bool,
     /// Velocity arrows and body axes are shown.
     pub gizmos: bool,
+    /// Collision shapes are outlined (Show collision, §7.11.2).
+    pub collision: bool,
 }
 
 impl Default for ViewportState {
@@ -932,6 +934,7 @@ impl Default for ViewportState {
             hud: true,
             grid: true,
             gizmos: true,
+            collision: false,
         }
     }
 }
@@ -996,4 +999,6 @@ pub enum ViewToggle {
     Grid,
     /// Velocity arrows and body axes.
     Gizmos,
+    /// Collision shapes' outlines.
+    Collision,
 }

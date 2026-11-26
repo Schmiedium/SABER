@@ -355,7 +355,7 @@ impl ScenarioDoc {
     }
 
     /// Change the `visual:` section with `f`, as one undoable edit. `Ok(false)`: nothing changed.
-    fn edit_visual(
+    pub(super) fn edit_visual(
         &mut self,
         slot: usize,
         f: impl FnOnce(&mut VisualSection) -> Result<(), String>,

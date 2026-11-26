@@ -299,6 +299,8 @@ sequenceDiagram
 
 As built (step S5-2): linking is the Appearance section's **Change…** picker or the 3D Models tab's **Link to ‹entity›** (no drag onto entities yet); each pick or field is one undoable change of the `visual:` section (`ScenarioDoc::set_look`, `set_look_field`, `set_look_visible`). Missing and changed models are lint warnings on the entity's `SimId`, so the Outliner shows ⚠; Preview and Replay resolve and draw the looks as built in S5-1. Align and Derive collision come with S5-3.
 
+As built (step S5-3): **Derive** opens from the Inspector's Collision section and calls `sim_assets::derive::derive(catalog, look, method, max_parts, on_body)` on `AsyncComputeTaskPool`; it reads the triangles through the catalogue (refused while the file no longer matches its manifest) and calls `sim_core::geometry::derive::derive`, which refuses a triangle mesh on a body (the dialog does not offer it there). The result carries the shape, its volume, the model's volume, how far the model sticks out of it and the `DerivedCollision` record that stands for `derived_from`; **Apply** writes both as one undoable edit of the sim section (`ScenarioDoc::apply_derived`). **Align** has no gizmo yet: quick steps edit the offset, the session is squashed into one undo step, and **Save as model default** calls `sim_assets::import::fold_offset` on the workspace model (duplicating a built-in first).
+
 ### 2.3 Models at export, on the cluster and in replay
 
 Model files never reach the cluster job. Only shapes derived from them do, as plain data in the scenario and its geometry sidecars.

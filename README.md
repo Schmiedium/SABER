@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S5-2. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S5-3. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -51,12 +51,17 @@ aircraft.
 > the scene as a run would. Its 3D Models tab lists the model library with thumbnails and imports a glTF or GLB
 > (preview, unit guessed from the size, axes and origin; packed into one `.glb` with a manifest, also as
 > `saber-cli model import`), and the Inspector's Appearance section picks an entity's model and edits its offset,
-> scale, tint and visibility without touching `scene_hash`; lint flags models that are missing or changed. F5 previews the scenario in the studio: one run built exactly as the cluster builds it
+> scale, tint and visibility without touching `scene_hash`; lint flags models that are missing or changed. Its
+> Collision section derives a collision shape from the model as drawn (bounding box, capsule, cylinder, convex
+> hull, convex decomposition, or a triangle mesh for static colliders) in the background, shown over the model before
+> it is applied, and records where it came from so lint says when the model has changed; it also estimates inertia
+> from the shape. Align turns or re-centres a model against the body's axes as one undo step and can save the offset
+> as the model's default. F5 previews the scenario in the studio: one run built exactly as the cluster builds it
 > (same final state hash), with parameter corners and seed, play, pause, step and speeds, live body states,
 > requirements and plots; a crash opens Crash Replay from memory. Its 3D viewport draws the bodies with their 3D
 > models (glTF from a built-in library of 16, the workspace's `models/` or a team library, linked in the scenario's
 > `visual:` section or defaulted from the body's physics model; `saber-cli model inspect` checks a file) and velocity
-> arrows over a graph-paper ground labelled every 10 m, a camera that frames, follows, chases or tracks a body, and
+> arrows, and on request every collision shape as a wireframe, over a graph-paper ground labelled every 10 m, a camera that frames, follows, chases or tracks a body, and
 > a large position and velocity read-out. Crash Replay scrubs a crash dump's or a crashed preview's recorded frames
 > exactly as written, with jumps to the first contact, the first ×10 growth, the first non-finite value and the
 > energy bound, energy and event tracks, a growth inspector and a red ring where the NaN started. A crash re-simulates

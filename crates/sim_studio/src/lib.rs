@@ -71,6 +71,7 @@ impl Plugin for StudioCorePlugin {
             .init_resource::<ReqPanel>()
             .init_resource::<models::ModelLibrary>()
             .init_resource::<library::ModelPanel>()
+            .init_resource::<library::DeriveJob>()
             .init_resource::<PreviewState>()
             .init_resource::<LiveCrash>()
             .init_resource::<viewport::ViewportState>()
@@ -114,6 +115,7 @@ impl Plugin for StudioUiPlugin {
         app.init_resource::<ui::models::SceneLooks>()
             .init_resource::<ui::library::Thumbs>()
             .init_resource::<ui::models::ModelStore>()
+            .init_resource::<ui::viewport::SceneShapes>()
             .init_gizmo_group::<ui::viewport::GridGizmos>()
             .init_gizmo_group::<ui::viewport::BodyGizmos>()
             .add_systems(Startup, (setup_ui, ui::viewport::setup))
@@ -132,6 +134,9 @@ impl Plugin for StudioUiPlugin {
                     ui::shell::fill_regions,
                     ui::shell::console_append,
                     ui::library::drop_files.before(actions::apply_commands),
+                    actions::poll_derive
+                        .after(actions::apply_commands)
+                        .before(ui::library::load_thumbs),
                     ui::library::load_thumbs
                         .after(actions::apply_commands)
                         .before(ui::builder::refresh)
@@ -157,6 +162,7 @@ impl Plugin for StudioUiPlugin {
                         ui::models::spawn_models,
                         ui::viewport::step_camera,
                         ui::viewport::draw_bodies,
+                        ui::viewport::draw_collision,
                         ui::viewport::draw_grid,
                         ui::viewport::draw_hud,
                     )

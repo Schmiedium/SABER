@@ -38,7 +38,7 @@ use crate::fragments::{
     FragmentPool, Fragmentable, FragmentationModel, ImpactTally, attach_outputs,
     fragment_integrate_system, fragment_system,
 };
-use crate::geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
+use crate::geometry::{CollisionShape, DeriveMethod, DerivedCollision, Pose, ShapeDesc, ShapePart};
 use crate::hash::{
     CONFIG_CONTEXT, RollingHash, RunIdentity, finish, rolling_hash_system, state_hash,
 };
@@ -433,6 +433,8 @@ impl SimAppBuilder {
             .register_type::<ShapeDesc>()
             .register_type::<ShapePart>()
             .register_type::<CollisionShape>()
+            .register_type::<DeriveMethod>()
+            .register_type::<DerivedCollision>()
             .register_type::<ContactModel>()
             .register_type::<DampingLaw>()
             .register_type::<ContactMaterial>()

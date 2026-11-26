@@ -3,7 +3,8 @@
 //! spawn, that their buttons are wired to the commands they name, that the shell fills its
 //! regions, that the Builder's panels edit, undo and export the scenario, that the Preview Run
 //! plays, steps, plots and stops, with its 3D viewport, that a crashed preview scrubs in Crash
-//! Replay, and that the 3D Models tab imports, links and edits a model.
+//! Replay, that the 3D Models tab imports, links and edits a model, and that a collision shape
+//! is derived from a model, aligned against and shown in the viewport.
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,8 @@ use sim_studio::ui::replay::{ReplayLive, ReplayTrack, TrackKind};
 use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::ui::viewport::{
-    BodyVisual, GridLabelSlot, HudPanel, HudText, VIEW_LAYER, ViewportCamera, ViewportView,
+    BodyVisual, GridLabelSlot, HudPanel, HudText, SceneShapes, VIEW_LAYER, ViewportCamera,
+    ViewportView,
 };
 use sim_studio::viewport::{FocusMode, FocusPhase, ViewSource, ViewportState};
 use sim_studio::workspace::{Pack, Workspace};
@@ -1542,5 +1544,133 @@ fn the_library_imports_links_and_edits_a_model() {
     press(&mut app, "Undo");
     assert_eq!(scale_of(&app), [1.0; 3]);
     assert_eq!(input_text(&app, scale), "1");
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
+
+/// Derive collision, Align and Show collision (§7.11.2, §7.11.4, §7.11.5; step S5-3): on the 3D
+/// Models tab the Collision section's dialog derives in the background from the model #1 shows
+/// (its Domain Pack default), offers a box first on a body and keeps the triangle mesh for static
+/// colliders; a convex hull is applied with its record and matches; Align turns the model as one
+/// undo step and leaves the shape; the Inspector shows the hull's points as one row; and the
+/// viewport's Collision toggle overlays the shape on the body.
+#[test]
+fn the_builder_derives_aligns_and_shows_collision() {
+    let dir = scratch("collision");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    press(&mut app, "3D Models tab");
+    press(&mut app, "Derive from model…");
+    let ready = |app: &App| {
+        app.world()
+            .resource::<ModelPanel>()
+            .derive
+            .as_ref()
+            .is_some_and(|d| d.result.is_some())
+    };
+    until(&mut app, 2_000, ready);
+    for _ in 0..2 {
+        app.update();
+    }
+    {
+        let panel = app.world().resource::<ModelPanel>();
+        let d = panel.derive.as_ref().unwrap();
+        assert_eq!(d.method, sim_core::DeriveMethod::BoundingBox, "a box first");
+        assert!(matches!(d.result, Some(Ok(_))), "{:?}", d.result);
+    }
+    let texts = all_texts(&mut app);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "Triangle mesh (static bodies only)"),
+        "{texts:?}"
+    );
+    assert!(texts.iter().any(|t| t == "it holds the whole model"));
+    press(&mut app, "Convex hull");
+    until(&mut app, 2_000, ready);
+    for _ in 0..2 {
+        app.update();
+    }
+    press(&mut app, "Apply");
+    let slot = |app: &App| {
+        let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        doc.slot_of(1).unwrap()
+    };
+    {
+        let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        let s = slot(&app);
+        let shape = doc.collision(s).unwrap();
+        assert!(
+            matches!(shape.parts[0].shape, sim_core::ShapeDesc::ConvexHull { .. }),
+            "{shape:?}"
+        );
+        let record = doc.derived(s).unwrap();
+        assert!(record.model.contains("rotorcraft/quad_x"), "{record:?}");
+        assert!(app.world().resource::<ModelPanel>().derive.is_none());
+    }
+    let texts = all_texts(&mut app);
+    assert!(texts.iter().any(|t| t == "✓ matches the model it shows"));
+    assert!(
+        texts.iter().any(|t| t.ends_with(" items")),
+        "the hull's points are one Inspector row"
+    );
+
+    // Align: a quarter turn of the model, one undo step; the shape stays.
+    let history = |app: &App| {
+        app.world()
+            .resource::<BuilderDoc>()
+            .0
+            .as_ref()
+            .unwrap()
+            .history()
+            .0
+    };
+    let before = history(&app);
+    press(&mut app, "Align…");
+    assert!(app.world().resource::<ModelPanel>().align.is_some());
+    press(&mut app, "Rotate +90° about z");
+    press(&mut app, "Rotate +90° about z");
+    press(&mut app, "Done");
+    assert!(app.world().resource::<ModelPanel>().align.is_none());
+    assert_eq!(history(&app), before + 1, "the session is one undo step");
+    let texts = all_texts(&mut app);
+    assert!(
+        texts.iter().any(|t| t == "quad_x · built-in")
+            && !texts.iter().any(|t| t == "default: quad_x · built-in"),
+        "aligning the default linked it"
+    );
+    let yaw = |app: &App| {
+        let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        doc.look(slot(app))
+            .map(|m| m.offset.rotation())
+            .unwrap_or_default()
+    };
+    let turned = yaw(&app);
+    assert!(
+        (turned.w.abs()).abs() < 1e-9,
+        "a half turn about z: {turned:?}"
+    );
+    press(&mut app, "Undo");
+    assert!(yaw(&app).w.abs() > 1.0 - 1e-9, "{:?}", yaw(&app));
+    {
+        let doc = app.world().resource::<BuilderDoc>().0.as_ref().unwrap();
+        assert!(doc.derived(slot(&app)).is_some(), "the shape stays");
+    }
+
+    // The viewport overlays the shape on the body when Collision is on.
+    press(&mut app, "Preview (F5)");
+    press(&mut app, "Pause");
+    assert!(!view(&app).collision);
+    press(&mut app, "Collision");
+    assert!(view(&app).collision);
+    let shapes = app.world().resource::<SceneShapes>();
+    let (id, on_body, wires) = &shapes.wires[0];
+    assert_eq!((*id, *on_body), (1, true));
+    assert!(wires.len() >= 12, "{} segments", wires.len());
+    press(&mut app, "Stop");
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }

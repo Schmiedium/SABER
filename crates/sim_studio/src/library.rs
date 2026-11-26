@@ -1,17 +1,23 @@
-//! The Library's 3D Models tab and the Import dialog (`sim_studio_ux.md` §7.11.1, §7.11.3;
-//! `sequence-diagrams.md` §2.1), as plain data: what the tab lists, which model is selected, and
-//! the dialog's file, settings, findings and preview. The screens are in `ui::library`; the
-//! importer itself is `sim_assets::import`.
+//! The Library's 3D Models tab, the Import dialog, the Derive collision dialog and Align mode
+//! (`sim_studio_ux.md` §7.11.1, §7.11.3–§7.11.5; `sequence-diagrams.md` §2.1, §2.2), as plain
+//! data: what the tab lists, which model is selected, the dialogs' settings, findings and
+//! pictures. The screens are in `ui::library`; the importer and the shape deriver are in
+//! `sim_assets`.
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
+use bevy::tasks::Task;
+use sim_assets::derive::{FromModel, entry_facets};
 use sim_assets::import::OriginChoice;
-use sim_assets::thumb::Drawn;
+use sim_assets::thumb::{Drawn, Extras, Segment, View, draw_over};
 use sim_assets::{
     AssetSource, Axis, Candidate, Catalog, CatalogEntry, ImportSettings, Problem, Severity, Unit,
 };
+use sim_core::DeriveMethod;
+use sim_core::geometry::derive::wireframe;
 
+use crate::builder::ScenarioDoc;
 use crate::models::library_roots;
 use crate::workspace::Workspace;
 
@@ -265,6 +271,87 @@ impl ImportDialog {
     }
 }
 
+/// Which way the centre's model picture looks (the Derive dialog and Align).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ModelView {
+    /// In front, to the left and above.
+    #[default]
+    ThreeQuarter,
+    /// From straight ahead.
+    Front,
+    /// From the right.
+    Side,
+    /// From above.
+    Top,
+}
+
+impl ModelView {
+    /// Every view, in the buttons' order.
+    pub const ALL: [ModelView; 4] = [
+        ModelView::ThreeQuarter,
+        ModelView::Front,
+        ModelView::Side,
+        ModelView::Top,
+    ];
+
+    /// Its button's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelView::ThreeQuarter => "3/4 view",
+            ModelView::Front => "Front view",
+            ModelView::Side => "Side view",
+            ModelView::Top => "Top view",
+        }
+    }
+
+    /// The picture's view.
+    pub fn view(self) -> View {
+        match self {
+            ModelView::ThreeQuarter => View::THUMB,
+            ModelView::Front => View::FRONT,
+            ModelView::Side => View::SIDE,
+            ModelView::Top => View::TOP,
+        }
+    }
+}
+
+/// The colour collision outlines are drawn in on the model pictures (the theme's `bound`).
+pub const OUTLINE: [u8; 4] = [232, 150, 40, 255];
+
+/// The model picture's edge in the Derive dialog and Align, px.
+pub const MODEL_PX: u32 = 320;
+
+/// The most outline segments a picture draws.
+const MAX_SEGMENTS: usize = 20_000;
+
+/// The Derive collision dialog (§7.11.5).
+#[derive(Clone, Debug)]
+pub struct DeriveDialog {
+    /// The entity's document slot.
+    pub slot: usize,
+    /// The method.
+    pub method: DeriveMethod,
+    /// The most parts a decomposition may make.
+    pub max_parts: u32,
+    /// The derivation asked for last; a result for an older one is dropped.
+    pub request: u64,
+    /// A derivation is running.
+    pub running: bool,
+    /// The last result.
+    pub result: Option<Result<FromModel, String>>,
+}
+
+/// Align mode on one entity (§7.11.4).
+#[derive(Clone, Debug)]
+pub struct AlignSession {
+    /// The entity's document slot.
+    pub slot: usize,
+    /// The undo stack's height when it started (the session becomes one undo step).
+    pub mark: usize,
+    /// The collision shape is drawn over the model.
+    pub collision: bool,
+}
+
 /// The Library tab and the Appearance picker's state.
 #[derive(Resource, Debug, Default)]
 pub struct ModelPanel {
@@ -278,9 +365,77 @@ pub struct ModelPanel {
     pub picking: bool,
     /// The Import dialog, while open.
     pub import: Option<ImportDialog>,
+    /// The Derive collision dialog, while open.
+    pub derive: Option<DeriveDialog>,
+    /// Align mode, while on.
+    pub align: Option<AlignSession>,
+    /// Which way the Derive dialog's and Align's picture looks.
+    pub view: ModelView,
+    /// That picture.
+    pub picture: Option<Drawn>,
+    /// Bumped whenever the picture is redrawn.
+    pub picture_rev: u64,
+}
+
+/// The running derivation (a decomposition can take a while, so it runs off the UI thread;
+/// dropping the task cancels it).
+#[derive(Resource, Default)]
+pub struct DeriveJob {
+    /// The request it answers, and the task.
+    pub task: Option<(u64, Task<Result<FromModel, String>>)>,
 }
 
 impl ModelPanel {
+    /// Close the centre's dialogs (Import, Derive, Align), keeping the Library's selection.
+    pub fn close_dialogs(&mut self) {
+        self.import = None;
+        self.derive = None;
+        self.align = None;
+        self.picture = None;
+    }
+
+    /// Redraw the Derive dialog's or Align's picture: the model where the entity draws it, the
+    /// body axes at its origin, and a collision outline (the derived shape, or in Align the
+    /// entity's own when shown).
+    pub fn redraw_picture(&mut self, doc: &ScenarioDoc) {
+        let (slot, shape) = if let Some(a) = &self.align {
+            (a.slot, a.collision.then(|| doc.collision(a.slot)).flatten())
+        } else if let Some(d) = &self.derive {
+            let shape = match &d.result {
+                Some(Ok(r)) => Some(r.derived.shape.clone()),
+                _ => None,
+            };
+            (d.slot, shape)
+        } else {
+            self.picture = None;
+            return;
+        };
+        let facets = doc
+            .shown_look(slot)
+            .zip(doc.catalog())
+            .and_then(|(look, catalog)| match catalog.resolve(&look.asset) {
+                sim_assets::Resolution::Found(entry, _) => entry_facets(entry, &look).ok(),
+                sim_assets::Resolution::Missing => None,
+            })
+            .unwrap_or_default();
+        let segments: Vec<Segment> = shape
+            .map(|s| wireframe(&s, MAX_SEGMENTS))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (s, OUTLINE))
+            .collect();
+        self.picture = Some(draw_over(
+            &facets,
+            &segments,
+            MODEL_PX,
+            self.view.view(),
+            Extras {
+                axes: true,
+                bar: true,
+            },
+        ));
+        self.picture_rev += 1;
+    }
     /// Whether an entry passes the search and the source filter (the search matches the id, the
     /// display name or the source, ignoring case).
     pub fn admits(&self, entry: &CatalogEntry) -> bool {

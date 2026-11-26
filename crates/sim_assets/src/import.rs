@@ -6,7 +6,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use glam::DVec3;
+use glam::{DMat3, DQuat, DVec3};
 use serde_json::{Value, json};
 
 use crate::catalog::CatalogEntry;
@@ -459,6 +459,76 @@ pub fn refresh(dir: &Path) -> Result<Imported, ImportError> {
     manifest.triangles = report.triangles;
     manifest.content_hash = ContentHash::of(&bytes);
     let thumb = thumb::draw(&corners, thumb::THUMB_PX, View::THUMB, Extras::default())
+        .picture
+        .png();
+    let w = |e: std::io::Error| ImportError::Write(format!("{}: {e}", dir.display()));
+    std::fs::write(dir.join(THUMB_FILE), thumb).map_err(w)?;
+    std::fs::write(dir.join(MANIFEST_FILE), manifest.to_ron()).map_err(w)?;
+    Ok(Imported {
+        dir: dir.to_owned(),
+        manifest,
+    })
+}
+
+/// Fold an instance's offset into a model's own frame and origin (Align ▸ Save as model
+/// default): afterwards the model drawn with no offset sits where `rotation` and then `shift`
+/// (body frame, metres, at the model's own scale) put it. Refused unless the rotation is a whole
+/// number of quarter turns about the body axes, since the manifest names its axes. The bounds
+/// and the thumbnail are redone; the file and its hash stay, so links stay current.
+pub fn fold_offset(dir: &Path, rotation: DQuat, shift: DVec3) -> Result<Imported, ImportError> {
+    let text = std::fs::read_to_string(dir.join(MANIFEST_FILE))
+        .map_err(|e| ImportError::Read(e.to_string()))?;
+    let mut manifest =
+        VisualAssetManifest::from_ron(&text).map_err(|e| ImportError::Invalid(e.to_string()))?;
+    let quarter = || {
+        ImportError::Refused(vec![
+            "only quarter turns about the body axes can be saved in the model; keep this \
+             rotation on the entity"
+                .into(),
+        ])
+    };
+    let f = manifest
+        .frame
+        .rotation()
+        .ok_or_else(|| ImportError::Invalid("the manifest's axes are on one line".into()))?;
+    let r = DMat3::from_quat(rotation.normalize());
+    let turned = r * f;
+    // Rows of `turned` are the file axes along body x, y and z.
+    let row = |k: usize| turned.row(k);
+    let axis_of = |v: DVec3| {
+        Axis::ALL
+            .into_iter()
+            .find(|a| (a.vector() - v).abs().max_element() < 1e-9)
+    };
+    let forward = axis_of(row(0)).ok_or_else(quarter)?;
+    let up = axis_of(-row(2)).ok_or_else(quarter)?;
+    let frame = ModelFrame {
+        unit: manifest.frame.unit,
+        up,
+        forward,
+    };
+    if frame
+        .rotation()
+        .is_none_or(|m| !(m - turned).abs().to_cols_array().iter().all(|v| *v < 1e-9))
+    {
+        return Err(quarter());
+    }
+    let origin = r * manifest.origin.offset() + shift;
+    manifest.frame = frame;
+    manifest.origin = Origin::Offset(origin.to_array().map(|v| if v == 0.0 { 0.0 } else { v }));
+    if manifest.origin.offset() == DVec3::ZERO {
+        manifest.origin = Origin::FileOrigin;
+    }
+    let bytes =
+        std::fs::read(dir.join(&manifest.file)).map_err(|e| ImportError::Read(e.to_string()))?;
+    let data = read(&bytes, Some(dir)).map_err(ImportError::Inspect)?;
+    let facets = thumb::body_facets(&data, &manifest);
+    manifest.bounds = Bounds::around(facets.iter().flat_map(|(t, _)| t.iter().copied()))
+        .ok_or_else(|| ImportError::Invalid("nothing in the file is drawn".into()))?;
+    manifest
+        .check()
+        .map_err(|e| ImportError::Invalid(e.to_string()))?;
+    let thumb = thumb::draw(&facets, thumb::THUMB_PX, View::THUMB, Extras::default())
         .picture
         .png();
     let w = |e: std::io::Error| ImportError::Write(format!("{}: {e}", dir.display()));

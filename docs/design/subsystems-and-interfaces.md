@@ -139,6 +139,11 @@ v0.41 (2026-11-25, build step S5-2) records import, thumbnails and the Appearanc
 importer packs with `serde_json` instead of a glTF writer, thumbnails and the import preview are drawn on the CPU
 so `saber-cli model import` writes a thumbnail too, and the catalogue checks folder models' hashes once per reload;
 IB-20 unchanged.
+v0.42 (2026-11-26, build step S5-3) records collision derived from a model and Align as built (§5.10): the record
+is a component of its own, `DerivedCollision`, beside the shape instead of a `derived_from` field, so scenes without
+one keep their hashes; triangle meshes stay inline in `.scn.ron` (no `.geom` sidecar yet); capsules and cylinders
+lie along the bounds' longest axis instead of the principal axis; Align is quick steps on a CPU picture, and Save as
+model default takes quarter turns and a uniform scale only; IB-20 unchanged.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -1334,6 +1339,38 @@ Appearance edits and their lint) and `sim_studio::ui::library`. UX as built is `
 - **Looks in the Builder.** `ScenarioDoc` keeps the `visual:` section as text beside the scene and edits it through
   `VisualSection`, one undoable change per pick or field; the scene and `scene_hash` are never touched. An entity
   with a Domain Pack default and no link shows that default; editing one of its fields first links it.
+
+**As built (step S5-3).** `Assets.ShapeDeriver` is `sim_assets::derive` over `sim_core::geometry::derive`; the
+studio's side is `sim_studio::builder::collision` (the scene edits and their lint), `sim_studio::library` (the
+dialog, the Align session and the background job) and `sim_studio::ui::library`. UX as built is `sim_studio_ux.md`
+§7.11.9.
+
+- **Placing the triangles.** `look_point(manifest, look, p)` = offset translation + offset rotation · (look scale ⊙
+  `manifest.to_body(p)`), the same order the viewport draws in; `entry_mesh` reads the file through the catalogue
+  and refuses one whose bytes no longer match the manifest ("re-import it first"), so a record always names a hash
+  the catalogue knows. `ModelMesh::from_triangles` merges bitwise-equal points and drops degenerate triangles.
+- **`sim_core::geometry::derive::derive(mesh, method, max_parts, on_body)`** returns the shape with its volume,
+  the furthest any model point lies outside it (`max_outside`), the capsule's or cylinder's axis and the hull's
+  point count. Box: the bounds, at least 1 mm thick. Capsule and cylinder: along the bounds' longest axis, the
+  radius holding every point. Hull: Parry's hull, reduced to ≤ 256 points by keeping the furthest point along
+  Fibonacci directions. Decomposition: V-HACD at resolution 64, each part's exact hull reduced to ≤ 64 points, and
+  pairs merged by least added hull volume until there are ≤ `max_parts` (Parry's `max_convex_hulls` is not a hard
+  bound). Triangle mesh: refused on a body; inline `ShapeDesc::TriMesh { vertices, indices }`, as the contact step
+  built it. Parts are in body axes about the body's origin on a body, in the world frame on a static collider.
+- **`DerivedCollision { model, content_hash, method, max_parts }`** is a registered scene component next to the
+  `CollisionShape` (D17's `derived_from`). The simulation never reads it, but it is in the sim section, so it moves
+  `scene_hash` together with the shape it describes. `sim_assets::derive::derived_notes` gives lint's warnings: the
+  entity shows another model or none, or the model's hash or file changed.
+- **`solid(shape, mass)`** gives volume, centroid and the inertia about the body's origin at uniform density
+  (Parry's mass properties per part, moved by the part's pose, summed and symmetrised): the Collision section's
+  **Estimate inertia from the shape**, one edit of `MassProps.inertia`. `wireframe(shape, max)` gives the segments
+  the Derive picture and the viewport's **Collision** overlay draw.
+- **Align and fold.** Align edits `VisualModel.offset` through the `visual:` section; the session is squashed into
+  one undo step when it ends. `sim_assets::import::fold_offset(dir, rotation, shift)` writes an offset into a
+  workspace model's manifest (new `frame` axes from the turn, `origin` moved, bounds and thumbnail redrawn, the file
+  untouched); a turn that is not a quarter turn about the body axes cannot be written as a `ModelFrame` and is
+  refused, as is a non-uniform scale. A built-in or library model is duplicated into `models/` first.
+- The derivation runs on `AsyncComputeTaskPool`; a newer request drops the older task.
 
 ## 6. The tick pipeline
 

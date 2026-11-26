@@ -44,6 +44,13 @@ impl FieldView {
     }
 }
 
+/// Rows a list of small items may take before it is shown as one row, `N items`, that is not
+/// edited here.
+pub const MAX_LIST_ROWS: usize = 64;
+
+/// Rows an item of such a list takes at most: a number, a point, a triangle, a quaternion.
+pub const SMALL_ITEM_ROWS: usize = 4;
+
 /// Every field of `value`, depth first, in declaration order.
 pub fn fields(value: &dyn PartialReflect) -> Vec<FieldView> {
     let mut out = Vec::new();
@@ -93,9 +100,24 @@ fn walk(value: &dyn PartialReflect, path: String, out: &mut Vec<FieldView>) {
             }
         }
         ReflectRef::List(l) => {
+            // A long list of small items (a hull's points, a mesh's triangles) is one row, not
+            // hundreds; a list of structs (control loops, rotors) is always listed.
+            let mut rows = Vec::new();
+            let mut small = true;
             for i in 0..l.len() {
-                walk(l.get(i).expect("in range"), format!("{path}[{i}]"), out);
+                let before = rows.len();
+                walk(
+                    l.get(i).expect("in range"),
+                    format!("{path}[{i}]"),
+                    &mut rows,
+                );
+                small &= rows.len() - before <= SMALL_ITEM_ROWS;
+                if small && rows.len() > MAX_LIST_ROWS {
+                    push(out, path, format!("{} items", l.len()), FieldKind::Fixed);
+                    return;
+                }
             }
+            out.extend(rows);
         }
         ReflectRef::Array(a) => {
             for i in 0..a.len() {

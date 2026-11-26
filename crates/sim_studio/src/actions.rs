@@ -8,19 +8,24 @@ use std::sync::Arc;
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::EditableText;
-use sim_core::{Scenario, SimAppBuilder, SimConfig};
+use sim_core::geometry::derive::MAX_PARTS;
+use sim_core::{DeriveMethod, Scenario, SimAppBuilder, SimConfig};
 use sim_studio_ui::dock::{DockLayout, DockLayoutChanged};
 use sim_studio_ui::theme::{StudioTheme, ThemeMode};
 use sim_studio_ui::toast::Toast;
 
 use crate::builder::requirements::{pick, sets};
 use crate::builder::{
-    FieldRef, LintLevel, LookChoice, LookField, ReqItem, RequirementDoc, ScenarioDoc,
+    AlignOp, FieldRef, LintLevel, LookChoice, LookField, ReqItem, RequirementDoc, ScenarioDoc,
+    shape_summary,
 };
 use crate::campaign::CampaignCard;
 use crate::clock;
 use crate::crash::OpenCrash;
-use crate::library::{ImportDialog, ImportEdit, ModelKey, ModelPanel, SourceFilter, destinations};
+use crate::library::{
+    AlignSession, DeriveDialog, DeriveJob, ImportDialog, ImportEdit, ModelKey, ModelPanel,
+    ModelView, SourceFilter, destinations,
+};
 use crate::models::ModelLibrary;
 use crate::preview::{ParamChoice, PreviewCrash, PreviewRun, Speed, params_for, sweeps};
 use crate::recent::RecentList;
@@ -70,6 +75,30 @@ pub enum StudioCommand {
     ImportCommit,
     /// Close the Import dialog.
     ImportCancel,
+    /// Open the Derive collision dialog for an entity (§7.11.5).
+    DeriveOpen(usize),
+    /// The Derive dialog's method.
+    DeriveSet(DeriveMethod),
+    /// The most parts a decomposition may make, as typed.
+    DeriveParts(String),
+    /// Write the Derive dialog's shape into its entity.
+    DeriveApply,
+    /// Close the Derive dialog.
+    DeriveCancel,
+    /// Fill an entity's inertia from its collision shape and mass.
+    EstimateInertia(usize),
+    /// Start Align mode on an entity (§7.11.4).
+    AlignOpen(usize),
+    /// One Align step.
+    AlignStep(AlignOp),
+    /// Draw the collision shape over the model in Align.
+    AlignCollision(bool),
+    /// Align ▸ Save as model default.
+    AlignSave,
+    /// Leave Align mode: the session is one undo step.
+    AlignDone,
+    /// Which way the Derive dialog's and Align's picture looks.
+    ModelView(ModelView),
     /// Open the workspace at a folder (or its `saber.workspace.ron`).
     OpenWorkspace(PathBuf),
     /// Create a workspace in `root` from a pack, then open it.
@@ -527,6 +556,7 @@ pub struct CommandCx<'w> {
     jobs: ResMut<'w, ReplayJobs>,
     library: ResMut<'w, ModelLibrary>,
     models: ResMut<'w, ModelPanel>,
+    derive_job: ResMut<'w, DeriveJob>,
 }
 
 /// Carry out the user's commands.
@@ -791,8 +821,38 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             | StudioCommand::ImportSet(_)
             | StudioCommand::ImportCommit
             | StudioCommand::ImportCancel => models_command(command, &mut cx),
+            StudioCommand::DeriveOpen(_)
+            | StudioCommand::DeriveSet(_)
+            | StudioCommand::DeriveParts(_)
+            | StudioCommand::DeriveApply
+            | StudioCommand::DeriveCancel
+            | StudioCommand::EstimateInertia(_)
+            | StudioCommand::AlignOpen(_)
+            | StudioCommand::AlignStep(_)
+            | StudioCommand::AlignCollision(_)
+            | StudioCommand::AlignSave
+            | StudioCommand::AlignDone
+            | StudioCommand::ModelView(_) => collision_command(command, &mut cx),
         }
         sync_catalog(&mut cx);
+        // A look changed under the Derive dialog or Align: derive again, or redraw.
+        if matches!(
+            command,
+            StudioCommand::SetLook { .. }
+                | StudioCommand::PickModel(..)
+                | StudioCommand::LookVisible(..)
+                | StudioCommand::Undo
+                | StudioCommand::Redo
+                | StudioCommand::SetField { .. }
+        ) {
+            if cx.models.derive.is_some() {
+                start_derive(&mut cx);
+            } else if cx.models.align.is_some()
+                && let Some(doc) = cx.doc.0.as_ref()
+            {
+                cx.models.redraw_picture(doc);
+            }
+        }
     }
 }
 
@@ -912,6 +972,8 @@ fn models_command(command: &StudioCommand, cx: &mut CommandCx) {
             }
         }
         StudioCommand::ImportOpen(path) => {
+            end_align(cx);
+            cx.models.close_dialogs();
             cx.models.import = Some(ImportDialog::new(path.as_deref()));
             cx.req.tab = BuilderTab::Models;
         }
@@ -924,6 +986,250 @@ fn models_command(command: &StudioCommand, cx: &mut CommandCx) {
         _ => return,
     }
     cx.changed.write(DocChanged);
+}
+
+/// Start a derivation for the Derive dialog off the UI thread; the answer for an older request
+/// is dropped, and starting one cancels the one before.
+fn start_derive(cx: &mut CommandCx) {
+    let (Some(doc), Some(d)) = (cx.doc.0.as_ref(), cx.models.derive.as_mut()) else {
+        return;
+    };
+    d.request += 1;
+    d.result = None;
+    d.running = true;
+    let catalog = cx.library.catalog.clone();
+    let look = doc.shown_look(d.slot);
+    let (method, parts, on_body) = (d.method, d.max_parts, doc.on_body(d.slot));
+    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        let look = look.ok_or("the entity has no model to derive a shape from; pick one first")?;
+        sim_assets::derive::derive(&catalog, &look, method, parts, on_body)
+    });
+    cx.derive_job.task = Some((d.request, task));
+}
+
+/// Leave Align mode, making its edits one undo step.
+fn end_align(cx: &mut CommandCx) {
+    if let (Some(a), Some(doc)) = (cx.models.align.take(), cx.doc.0.as_mut()) {
+        doc.squash_since(a.mark);
+    }
+}
+
+/// Derive collision, Estimate mass properties and Align (`sim_studio_ux.md` §7.11.4–§7.11.5).
+fn collision_command(command: &StudioCommand, cx: &mut CommandCx) {
+    if cx.doc.0.is_none() {
+        cx.toasts
+            .write(Toast::warning("No scenario is open in the Builder"));
+        return;
+    }
+    match command {
+        StudioCommand::DeriveOpen(slot) => {
+            end_align(cx);
+            cx.models.close_dialogs();
+            let doc = cx.doc.0.as_mut().expect("checked");
+            doc.selected = Some(*slot);
+            let (method, max_parts) = doc.derive_start(*slot);
+            cx.models.derive = Some(DeriveDialog {
+                slot: *slot,
+                method,
+                max_parts,
+                request: 0,
+                running: false,
+                result: None,
+            });
+            cx.req.tab = BuilderTab::Models;
+            start_derive(cx);
+        }
+        StudioCommand::DeriveSet(method) => {
+            let Some(d) = cx.models.derive.as_mut() else {
+                return;
+            };
+            if d.method == *method {
+                return;
+            }
+            d.method = *method;
+            start_derive(cx);
+        }
+        StudioCommand::DeriveParts(text) => {
+            let Some(d) = cx.models.derive.as_mut() else {
+                return;
+            };
+            match text.trim().parse::<u32>() {
+                Ok(n) if (1..=MAX_PARTS).contains(&n) => {
+                    if d.max_parts == n {
+                        return;
+                    }
+                    d.max_parts = n;
+                    start_derive(cx);
+                }
+                _ => {
+                    cx.toasts.write(Toast::error(format!(
+                        "{text:?}: give a whole number of parts from 1 to {MAX_PARTS}"
+                    )));
+                }
+            }
+        }
+        StudioCommand::DeriveApply => {
+            let Some(d) = cx.models.derive.clone() else {
+                return;
+            };
+            let fm = match &d.result {
+                Some(Ok(fm)) => fm,
+                Some(Err(e)) => {
+                    cx.toasts
+                        .write(Toast::error(format!("Nothing to apply: {e}")));
+                    return;
+                }
+                None => {
+                    cx.toasts.write(Toast::warning(
+                        "Still deriving; apply when the shape is shown",
+                    ));
+                    return;
+                }
+            };
+            let doc = cx.doc.0.as_mut().expect("checked");
+            match doc.apply_derived(d.slot, fm) {
+                Ok(()) => {
+                    cx.toasts.write(Toast::success(format!(
+                        "{}: collision is now {} from {} ({}); scene_hash changed",
+                        doc.label(d.slot),
+                        shape_summary(&fm.derived.shape),
+                        fm.record.model,
+                        fm.record.method.label().to_lowercase()
+                    )));
+                    cx.models.close_dialogs();
+                    cx.derive_job.task = None;
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e));
+                }
+            }
+        }
+        StudioCommand::DeriveCancel => {
+            cx.models.close_dialogs();
+            cx.derive_job.task = None;
+        }
+        StudioCommand::EstimateInertia(slot) => {
+            let doc = cx.doc.0.as_mut().expect("checked");
+            match doc.apply_inertia(*slot) {
+                Ok(s) => {
+                    let i = s.inertia;
+                    cx.toasts.write(Toast::success(format!(
+                        "{}: inertia from its collision shape (Ixx {:.4}, Iyy {:.4}, Izz {:.4} kg·m²); one edit, Ctrl+Z undoes it",
+                        doc.label(*slot),
+                        i.x_axis.x,
+                        i.y_axis.y,
+                        i.z_axis.z
+                    )));
+                    let off = s.centroid.length();
+                    if off > 1e-3 {
+                        cx.toasts.write(Toast::warning(format!(
+                            "The shape's centroid is {} from the body's origin (its centre of mass); the inertia is taken about the origin",
+                            sim_assets::inspect::show_length(off)
+                        )));
+                    }
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e));
+                }
+            }
+        }
+        StudioCommand::AlignOpen(slot) => {
+            end_align(cx);
+            cx.models.close_dialogs();
+            let doc = cx.doc.0.as_mut().expect("checked");
+            if doc.shown_look(*slot).is_none() {
+                cx.toasts
+                    .write(Toast::warning("Pick a model before aligning it"));
+                return;
+            }
+            doc.selected = Some(*slot);
+            cx.models.align = Some(AlignSession {
+                slot: *slot,
+                mark: doc.history_mark(),
+                collision: true,
+            });
+            cx.req.tab = BuilderTab::Models;
+        }
+        StudioCommand::AlignStep(op) => {
+            let Some(a) = cx.models.align.clone() else {
+                return;
+            };
+            let doc = cx.doc.0.as_mut().expect("checked");
+            if let Err(e) = doc.align(a.slot, *op) {
+                cx.toasts.write(Toast::error(e));
+                return;
+            }
+        }
+        StudioCommand::AlignCollision(on) => match cx.models.align.as_mut() {
+            Some(a) => a.collision = *on,
+            None => return,
+        },
+        StudioCommand::AlignSave => {
+            let Some(a) = cx.models.align.clone() else {
+                return;
+            };
+            let models = cx.workspace.0.as_ref().map(|ws| ws.root.join("models"));
+            let doc = cx.doc.0.as_mut().expect("checked");
+            match doc.save_look_as_default(a.slot, models.as_deref()) {
+                Ok(saved) => {
+                    let ws = cx.workspace.0.clone();
+                    cx.library.reload(ws.as_ref());
+                    doc.set_catalog(cx.library.catalog.clone());
+                    cx.toasts.write(Toast::success(if saved.duplicated {
+                        format!(
+                            "Copied the model to {} with this offset as its default, and linked {} to it",
+                            saved.model.id,
+                            doc.label(a.slot)
+                        )
+                    } else {
+                        format!(
+                            "Saved the offset into {}; every entity using it gets it, and this one's offset is back to none",
+                            saved.model.id
+                        )
+                    }));
+                }
+                Err(e) => {
+                    cx.toasts.write(Toast::error(e));
+                }
+            }
+        }
+        StudioCommand::AlignDone => end_align(cx),
+        StudioCommand::ModelView(v) => cx.models.view = *v,
+        _ => return,
+    }
+    if let Some(doc) = cx.doc.0.as_ref() {
+        cx.models.redraw_picture(doc);
+    }
+    cx.changed.write(DocChanged);
+}
+
+/// Take a finished derivation into the Derive dialog and redraw its picture.
+pub fn poll_derive(
+    mut job: ResMut<DeriveJob>,
+    mut models: ResMut<ModelPanel>,
+    doc: Res<BuilderDoc>,
+    mut changed: MessageWriter<DocChanged>,
+) {
+    let Some((request, task)) = job.task.as_mut() else {
+        return;
+    };
+    let Some(result) = bevy::tasks::futures::check_ready(task) else {
+        return;
+    };
+    let request = *request;
+    job.task = None;
+    let Some(d) = models.derive.as_mut() else {
+        return;
+    };
+    if d.request != request {
+        return;
+    }
+    d.result = Some(result);
+    d.running = false;
+    if let Some(doc) = doc.0.as_ref() {
+        models.redraw_picture(doc);
+    }
+    changed.write(DocChanged);
 }
 
 /// Import the dialog's file into its destination, select it, and close the dialog.
@@ -1356,6 +1662,7 @@ fn view_command(command: &StudioCommand, cx: &mut CommandCx) {
         StudioCommand::ToggleView(ViewToggle::Hud) => view.hud = !view.hud,
         StudioCommand::ToggleView(ViewToggle::Grid) => view.grid = !view.grid,
         StudioCommand::ToggleView(ViewToggle::Gizmos) => view.gizmos = !view.gizmos,
+        StudioCommand::ToggleView(ViewToggle::Collision) => view.collision = !view.collision,
         _ => return,
     }
     cx.preview_changed.write(PreviewChanged);

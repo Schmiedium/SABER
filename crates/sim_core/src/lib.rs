@@ -78,7 +78,7 @@ pub use fragments::{
     FragmentDrag, FragmentImpact, FragmentParent, FragmentPool, FragmentState, FragmentTotals,
     FragmentWriter, Fragmentable, FragmentationModel, ImpactTally, ParentSummary,
 };
-pub use geometry::{CollisionShape, Pose, ShapeDesc, ShapePart};
+pub use geometry::{CollisionShape, DeriveMethod, DerivedCollision, Pose, ShapeDesc, ShapePart};
 pub use hash::{RollingHash, RunIdentity, state_hash};
 pub use parametric::{
     Apply, ParamBinding, ParamBindings, ParamValues, ResolveReport, ResolvedValue, Uncertainties,
