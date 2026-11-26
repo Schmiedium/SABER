@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S5-3. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S5-4. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -48,9 +48,9 @@ aircraft.
 > scene (validation, Tick-0 setup, step against time constants) and exports the `.scn.ron`. Its bind menu sweeps
 > any number as a parameter or draws it per replicate, and components are added and removed there too. Its
 > Requirements tab edits the scenario's `.req.ron` (metrics, requirements, campaign rules) and compiles it against
-> the scene as a run would. Its 3D Models tab lists the model library with thumbnails and imports a glTF or GLB
-> (preview, unit guessed from the size, axes and origin; packed into one `.glb` with a manifest, also as
-> `saber-cli model import`), and the Inspector's Appearance section picks an entity's model and edits its offset,
+> the scene as a run would. Its 3D Models tab lists the model library with thumbnails and imports a glTF, GLB or OBJ
+> (preview, unit guessed from the size, axes and origin; packed or converted into one `.glb` with a manifest, also
+> as `saber-cli model import`; `saber-cli model convert` turns an OBJ and its materials into a `.glb`), and the Inspector's Appearance section picks an entity's model and edits its offset,
 > scale, tint and visibility without touching `scene_hash`; lint flags models that are missing or changed. Its
 > Collision section derives a collision shape from the model as drawn (bounding box, capsule, cylinder, convex
 > hull, convex decomposition, or a triangle mesh for static colliders) in the background, shown over the model before

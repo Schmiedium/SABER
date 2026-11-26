@@ -180,9 +180,8 @@ impl ImportDialog {
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         self.opened = Some(match ext.as_str() {
-            "glb" | "gltf" => Candidate::open(p).map_err(|e| e.to_string()),
-            "obj" => Err("OBJ files are converted by step S5-4 (stretch); export glTF or GLB from your tool for now".into()),
-            _ => Err("choose a .glb or .gltf file".into()),
+            "glb" | "gltf" | "obj" => Candidate::open(p).map_err(|e| e.to_string()),
+            _ => Err("choose a .glb, .gltf or .obj file".into()),
         });
         self.settings = self
             .opened
@@ -215,14 +214,17 @@ impl ImportDialog {
             }
             ImportEdit::Unit(u) => {
                 s.frame.unit = *u;
+                s.chosen.unit = true;
                 true
             }
             ImportEdit::Up(a) => {
                 s.frame.up = *a;
+                s.chosen.up = true;
                 true
             }
             ImportEdit::Forward(a) => {
                 s.frame.forward = *a;
+                s.chosen.forward = true;
                 true
             }
             ImportEdit::Origin(o) => {
@@ -260,7 +262,7 @@ impl ImportDialog {
     /// Why Import is not offered, or `None` when it is.
     pub fn blocked(&self) -> Option<String> {
         match &self.opened {
-            None => return Some("Choose a .glb or .gltf file.".into()),
+            None => return Some("Choose a .glb, .gltf or .obj file.".into()),
             Some(Err(e)) => return Some(e.clone()),
             Some(Ok(_)) => {}
         }

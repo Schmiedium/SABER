@@ -110,6 +110,8 @@ gltf = { version = "1.4.1", default-features = false, features = [
 # PNG thumbnails of models, drawn on the CPU (`sim_assets::thumb`): the release Bevy's image
 # loading already pulls in, alone, so `saber-cli` needs no image crates beyond it.
 png = "0.18.1"
+# OBJ and MTL reading for the OBJ converter (sim_assets, D17 stretch goal); no ahash.
+tobj = { version = "4.0.5", default-features = false }
 # Test-only: exact rational arithmetic for the tableau order conditions.
 num-bigint = "0.4.8"
 num-rational = "0.4.2"

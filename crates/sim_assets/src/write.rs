@@ -1,6 +1,7 @@
-//! Writing GLB files: the built-in library's generator, and later the OBJ converter and the
-//! importer's `.gltf` packing (subsystems §5.10). Output is deterministic: the same meshes give the
-//! same bytes, so the same content hash.
+//! Writing GLB files: the built-in library's generator and the OBJ converter (subsystems §5.10).
+//! Output is deterministic: the same meshes give the same bytes, so the same content hash. Keys a
+//! file does not use (texture coordinates, textures, blending, scale) are left out, so the
+//! built-ins' bytes do not depend on them.
 
 use serde_json::{Value, json};
 
@@ -13,6 +14,8 @@ pub struct MeshData {
     pub normals: Vec<[f32; 3]>,
     /// Three indices per triangle, counter-clockwise seen from outside.
     pub indices: Vec<u32>,
+    /// Texture coordinates, one per position, or none (glTF's: v down from the top).
+    pub uvs: Vec<[f32; 2]>,
 }
 
 impl MeshData {
@@ -21,6 +24,7 @@ impl MeshData {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&other.positions);
         self.normals.extend_from_slice(&other.normals);
+        self.uvs.extend_from_slice(&other.uvs);
         self.indices.extend(other.indices.iter().map(|i| i + base));
     }
 
@@ -30,8 +34,8 @@ impl MeshData {
     }
 }
 
-/// A metallic-roughness material with a flat colour.
-#[derive(Clone, Debug, PartialEq)]
+/// A metallic-roughness material with a flat colour, or a texture.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MaterialSpec {
     /// Its name in the file.
     pub name: String,
@@ -41,6 +45,23 @@ pub struct MaterialSpec {
     pub metallic: f32,
     /// 0 mirror, 1 matte.
     pub roughness: f32,
+    /// The base colour texture: an index into the images.
+    pub texture: Option<usize>,
+    /// Blend by the base colour's alpha (`alphaMode: BLEND`).
+    pub blend: bool,
+    /// Draw both sides of each triangle.
+    pub double_sided: bool,
+}
+
+/// An image stored in the file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageSpec {
+    /// Its name in the file.
+    pub name: String,
+    /// `image/png` or `image/jpeg`.
+    pub mime: &'static str,
+    /// The encoded image.
+    pub bytes: Vec<u8>,
 }
 
 /// A node: a name, a pose relative to its parent, its triangles and its children.
@@ -52,6 +73,8 @@ pub struct NodeSpec {
     pub translation: [f32; 3],
     /// Rotation from the parent, `(x, y, z, w)`.
     pub rotation: [f32; 4],
+    /// Scale, applied before the rotation; `None` is 1.
+    pub scale: Option<[f32; 3]>,
     /// Triangle lists with the index of their material.
     pub primitives: Vec<(MeshData, usize)>,
     /// Child nodes.
@@ -139,6 +162,22 @@ impl Writer {
         self.accessors.len() - 1
     }
 
+    fn vec2(&mut self, data: &[[f32; 2]]) -> usize {
+        let bytes: Vec<u8> = data
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let view = self.view(&bytes, ARRAY_BUFFER);
+        self.accessors.push(json!({
+            "bufferView": view,
+            "componentType": FLOAT,
+            "count": data.len(),
+            "type": "VEC2",
+        }));
+        self.accessors.len() - 1
+    }
+
     fn indices(&mut self, data: &[u32]) -> usize {
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
         let view = self.view(&bytes, ELEMENT_ARRAY_BUFFER);
@@ -160,6 +199,9 @@ impl Writer {
         if n.rotation != [0.0, 0.0, 0.0, 1.0] {
             node["rotation"] = json!(n.rotation);
         }
+        if let Some(scale) = n.scale {
+            node["scale"] = json!(scale);
+        }
         if !n.primitives.is_empty() {
             let prims: Vec<Value> = n
                 .primitives
@@ -167,9 +209,13 @@ impl Writer {
                 .map(|(m, material)| {
                     let pos = self.vec3(&m.positions, true);
                     let nor = self.vec3(&m.normals, false);
+                    let mut attributes = json!({ "POSITION": pos, "NORMAL": nor });
+                    if !m.uvs.is_empty() {
+                        attributes["TEXCOORD_0"] = json!(self.vec2(&m.uvs));
+                    }
                     let idx = self.indices(&m.indices);
                     json!({
-                        "attributes": { "POSITION": pos, "NORMAL": nor },
+                        "attributes": attributes,
                         "indices": idx,
                         "material": material,
                     })
@@ -189,6 +235,16 @@ impl Writer {
 
 /// A GLB file of these nodes (one scene) and materials.
 pub fn write_glb(materials: &[MaterialSpec], roots: &[NodeSpec], generator: &str) -> Vec<u8> {
+    write_glb_with(materials, &[], roots, generator)
+}
+
+/// A GLB file of these nodes, materials and images (stored after the meshes).
+pub fn write_glb_with(
+    materials: &[MaterialSpec],
+    images: &[ImageSpec],
+    roots: &[NodeSpec],
+    generator: &str,
+) -> Vec<u8> {
     let mut w = Writer {
         bin: Vec::new(),
         views: Vec::new(),
@@ -197,23 +253,49 @@ pub fn write_glb(materials: &[MaterialSpec], roots: &[NodeSpec], generator: &str
         nodes: Vec::new(),
     };
     let roots: Vec<usize> = roots.iter().map(|n| w.node(n)).collect();
+    let images: Vec<Value> = images
+        .iter()
+        .map(|i| {
+            while !w.bin.len().is_multiple_of(4) {
+                w.bin.push(0);
+            }
+            let offset = w.bin.len();
+            w.bin.extend_from_slice(&i.bytes);
+            w.views.push(json!({
+                "buffer": 0,
+                "byteOffset": offset,
+                "byteLength": i.bytes.len(),
+            }));
+            json!({ "name": i.name, "bufferView": w.views.len() - 1, "mimeType": i.mime })
+        })
+        .collect();
     while !w.bin.len().is_multiple_of(4) {
         w.bin.push(0);
     }
     let materials: Vec<Value> = materials
         .iter()
         .map(|m| {
-            json!({
+            let mut v = json!({
                 "name": m.name,
                 "pbrMetallicRoughness": {
                     "baseColorFactor": m.base_color,
                     "metallicFactor": m.metallic,
                     "roughnessFactor": m.roughness,
                 },
-            })
+            });
+            if let Some(t) = m.texture {
+                v["pbrMetallicRoughness"]["baseColorTexture"] = json!({ "index": t });
+            }
+            if m.blend {
+                v["alphaMode"] = json!("BLEND");
+            }
+            if m.double_sided {
+                v["doubleSided"] = json!(true);
+            }
+            v
         })
         .collect();
-    let doc = json!({
+    let mut doc = json!({
         "asset": { "version": "2.0", "generator": generator },
         "scene": 0,
         "scenes": [{ "nodes": roots }],
@@ -224,6 +306,15 @@ pub fn write_glb(materials: &[MaterialSpec], roots: &[NodeSpec], generator: &str
         "bufferViews": w.views,
         "buffers": [{ "byteLength": w.bin.len() }],
     });
+    if !images.is_empty() {
+        // One texture per image, with the default sampler (repeat, linear).
+        doc["textures"] = json!(
+            (0..images.len())
+                .map(|i| json!({ "source": i }))
+                .collect::<Vec<_>>()
+        );
+        doc["images"] = json!(images);
+    }
     let text = serde_json::to_vec(&doc).expect("a glTF document serialises");
     glb_container(&text, &w.bin)
 }

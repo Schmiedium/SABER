@@ -144,6 +144,10 @@ is a component of its own, `DerivedCollision`, beside the shape instead of a `de
 one keep their hashes; triangle meshes stay inline in `.scn.ron` (no `.geom` sidecar yet); capsules and cylinders
 lie along the bounds' longest axis instead of the principal axis; Align is quick steps on a CPU picture, and Save as
 model default takes quarter turns and a uniform scale only; IB-20 unchanged.
+v0.43 (2026-11-26, build step S5-4) records the OBJ converter as built (§5.10): `tobj` without its `ahash`
+feature and the crate's own GLB writer instead of `gltf-json`; a missing or out-of-folder materials file or texture
+is a warning with the file left out, not a refusal; the workspace always stores `.glb` (`.gltf` only from
+`saber-cli model convert`); LOD files move to a later step; IB-20 unchanged.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -1371,6 +1375,27 @@ dialog, the Align session and the background job) and `sim_studio::ui::library`.
   untouched); a turn that is not a quarter turn about the body axes cannot be written as a `ModelFrame` and is
   refused, as is a non-uniform scale. A built-in or library model is duplicated into `models/` first.
 - The derivation runs on `AsyncComputeTaskPool`; a newer request drops the older task.
+
+**As built (step S5-4).** `Assets.ObjConverter` is `sim_assets::obj`. UX as built is `sim_studio_ux.md` §7.11.10.
+
+- **`convert(path, frame)` / `convert_bytes(obj, folder, frame)`** read the OBJ with `tobj` (single index,
+  triangulated, points and lines ignored; default features off, so no `ahash`) and write one GLB through
+  `sim_assets::write` (`write_glb_with`: texture coordinates, base colour textures stored in the binary chunk,
+  `alphaMode: BLEND`, `doubleSided` and node scale are written only when used, so the built-ins' bytes are
+  unchanged). One node per `o`/`g`, named as in the file; v flipped to glTF's texture origin; flat normals made by
+  giving each triangle its own vertices where the file has none; faces without a material get `obj_default`
+  (grey). The MTL is read through `tobj`'s loader callback, so the folder rule applies to it as to textures:
+  `uri_problem` refuses URLs, absolute paths and `..`, and such a file, or one that is missing or not PNG or JPEG,
+  is left out with a warning. The same OBJ always gives the same bytes. With a frame, the nodes hang under a root
+  `obj_frame` whose rotation (glTF axes from the file's) and scale (the unit) put the file in glTF's frame.
+- **Import.** `Candidate::open` converts an `.obj` first (`ImportError::Convert` when it does not parse or has no
+  faces) and keeps `converted_from: (Obj, hash of the OBJ)`; the manifest's `source` is `Converted { format: Obj,
+  hash, converter: "sim_assets <version> (tobj)" }`. `ImportSettings.chosen` (`FrameChosen`) records which of
+  unit, up and forward were given: all for glTF, none for an OBJ, whose import is refused until all three are.
+- **`saber-cli model convert <obj> --unit --up --forward [-o out.glb|out.gltf] [--replace] [--json]`**: exit 0
+  written, 2 when it cannot be converted or the output exists, 64 on usage (any of the three missing).
+  `import::unpack` splits a GLB into `.gltf` text and the `.bin` it names. `model import` and `model inspect`
+  take an OBJ too.
 
 ## 6. The tick pipeline
 
