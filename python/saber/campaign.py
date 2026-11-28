@@ -438,6 +438,8 @@ class Preflight:
     """Runs earlier attempts committed."""
     missing_runs: int | None = None
     """Runs the attempt would run (`runs - committed_runs`)."""
+    shared_out: str | None = None
+    """`output.shared_out` as `sim_hpc` resolves it: where the parts and the heartbeat go."""
 
 
 def _resume_flags(resume: bool, override_crash_policy: bool) -> list[str]:
@@ -480,6 +482,7 @@ def preflight(
         attempt=int(j.get("attempt", 0)),
         committed_runs=int(j.get("committed_runs", 0)),
         missing_runs=int(j["missing_runs"]) if j.get("missing_runs") is not None else None,
+        shared_out=j.get("shared_out"),
     )
 
 

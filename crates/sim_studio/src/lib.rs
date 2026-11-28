@@ -99,6 +99,7 @@ impl Plugin for StudioCorePlugin {
                     actions::run_replay_jobs.run_if(replay_shown),
                     setup::apply,
                     setup::poll,
+                    setup::poll_local,
                 )
                     .chain(),
             );
@@ -157,7 +158,9 @@ impl Plugin for StudioUiPlugin {
                     actions::viewport_keys.run_if(viewport_shown),
                     actions::replay_keys.run_if(replay_shown),
                     ui::replay::refresh.after(actions::run_replay_jobs),
-                    ui::setup::refresh.after(setup::poll),
+                    (ui::setup::refresh, ui::setup::live)
+                        .chain()
+                        .after(setup::poll_local),
                     ui::replay::display
                         .after(ui::replay::refresh)
                         .run_if(replay_shown),

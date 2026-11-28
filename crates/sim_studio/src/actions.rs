@@ -415,7 +415,8 @@ impl Recent {
         Self { path, list }
     }
 
-    fn save(&self, toasts: &mut MessageWriter<Toast>) {
+    /// Save to its file, with a warning toast when that fails.
+    pub(crate) fn save(&self, toasts: &mut MessageWriter<Toast>) {
         if let Some(p) = &self.path
             && let Err(e) = self.list.save(p)
         {

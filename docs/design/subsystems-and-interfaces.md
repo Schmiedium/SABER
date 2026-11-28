@@ -158,6 +158,10 @@ v0.45 (2026-11-28, build step S6-1) records Campaign Setup as built (§5.5 `Stud
 `saber.study`): the studio writes the study it set up as `campaigns/<id>/study.json` (format `saber.study`,
 version 1) and builds the campaign with `python -m saber.study … --preflight --json`, so `saber.sweep` draws every
 sweep and the studio never samples; execution targets and submission are S6-2.
+v0.46 (2026-11-28, build step S6-2) records **Run here** as built (§5.5): a written campaign runs on the
+workstation as `sim_hpc --local` in a child process, with its progress from the heartbeat. `sim_hpc` gains
+`--heartbeat S`, and `--validate-only --json` reports the resolved `shared_out`, which `saber.campaign.Preflight`
+and `saber.study` pass on (IB-04, §5.7). Cluster profiles and **Submit…** move to S6-3.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -870,6 +874,20 @@ needs come from the one-sided Clopper–Pearson bound with every run passing, po
 when unset. Execution targets, `submit_campaign.pbs` and **Submit…** are S6-2; `Studio.Handoff`'s `OpenCampaign`
 after a submit waits for `sim_explorer` (6b). Details in `sim_studio_ux.md` §7.6.1.
 
+**As built (step S6-2), Run here.** `sim_studio::setup::local` runs a written, preflighted campaign on the
+workstation: `sim_hpc --campaign <dir>/campaign.toml --local --json --heartbeat 1 [--resume]` as a child process,
+the command each cluster node runs, with standard output and error going to `<dir>/jobs/report-local-<stamp>.json`
+and `job-local-<stamp>.log` (a cluster job keeps `report-JOBID.json` and `job-JOBID.log` there), so the run
+outlives the studio. `sim_hpc` is `SABER_SIM_HPC`, else the binary beside the studio, else `PATH`. The output
+folder comes from preflight's `shared_out`; the studio reads `campaign_status.json` there every 250 ms (only a
+heartbeat started after the launch counts, so a resume does not show the attempt before it) and the report when
+the process exits. The campaign joins the Launcher's recent campaigns when it starts, so the Launcher's card shows
+the heartbeat. **Stop** sends `SIGTERM` (through `kill`, since the workspace forbids `unsafe`; on Windows it ends
+the process), on which `sim_hpc` abandons the runs in flight and commits the finished ones (exit 5); a second
+**Stop** kills it. **Resume here** reruns with `--resume`. One campaign runs here at a time, and Write refuses the
+campaign that is running. Cluster profiles, the job script and **Submit…** are S6-3. Details in `sim_studio_ux.md`
+§7.6.2.
+
 ### 5.6 `sim_hpc` — headless cluster runner
 
 ```mermaid
@@ -1057,7 +1075,8 @@ which Python does not read. `Study.read(path)` reads it, `build(study, directory
 `python -m saber.study <study.json> [--dir DIR] [--preflight] [--json]` does both and, with `--preflight`, runs
 `campaign.preflight`; with `--json` it prints one object (`ok`, `campaign_toml`, `manifest`, `runs`,
 `param_sets`, `replicates`, `param_keys`, `sampler`, `warnings`, `preflight`) or `{"ok": false, "error": {"kind",
-"message"}}`, with exit 0 written, 2 refused, 64 usage, 70 internal (IB-04's codes).
+"message"}}`, with exit 0 written, 2 refused, 64 usage, 70 internal (IB-04's codes). From step S6-2, `preflight`
+includes `shared_out`, the output folder as `sim_hpc` resolves it.
 
 ### 5.8 `sim_query` — campaign query engine (new, D10)
 
@@ -1858,6 +1877,7 @@ fragment_impacts = true          # *_impacts.parquet (IB-16); default: on when t
 | As built (step 4b) | CLI: `sim_hpc --campaign c.toml [--local \| --validate-only] [--resume [--override-crash-policy]] [--deadline UNIX_S] [--threads N] [--json]`; `--override-crash-policy` without `--resume` is a usage error (64). Without `--resume` an output directory that already holds a campaign is refused (exit 2, `OutputExists`), also by `--validate-only`; with it, `--validate-only` adds `attempt`, `committed_runs` and `missing_runs` (the plan, refused as the run would be). The walltime deadline is `--deadline`, else `SABER_WALLTIME_END`, else `SLURM_JOB_END_TIME`. `--json` adds `attempt`, `committed_runs` and `missing_runs` (every attempt), and `stopped` (`walltime`, `signal` or null). New refusal kinds: `OutputExists`, `ResumeMismatch` (2), `BuildMismatch` (3, from a part footer), `ResumeRead` (4), `Aborted` (6). `saber.campaign`: `preflight` and `run_local` take `resume` and `override_crash_policy` (`run_local` also `deadline`); `Resources` (nodes, cpus per node, walltime, queue, account, threads, setup lines, launcher and its flags, the cluster's `sim_hpc` path, extra directives), `render_job` (PBS Pro, or Slurm with `scheduler="slurm"`; one rank per node; the job exports `SABER_WALLTIME_END` from the walltime) and `submit` (preflight, `qsub` or `sbatch --parsable`, then `auto_resume` resubmissions each with `depend=afterany` / `--dependency=afterany` on the one before). A resubmission reads the job directory's `ledger.tsv` (each job's start with the committed part count, and its end with `sim_hpc`'s exit from the JSON report, since a launcher killed by SIGTERM exits with its own code) and exits 0 at once if the attempt before it ended `0`, `2`, `3`, `6`, `64` or `70`, or committed no new parts. `submit` refuses a `drain_margin_s` as long as the walltime. |
 | As built (step 4a) | Without `--local` or `--validate-only`, `sim_hpc --campaign c.toml` is one rank of an MPI job (`mpiexec -n N sim_hpc --campaign c.toml [--threads N] [--json]`); a binary built without the `mpi` feature refuses that with `64`. Every rank exits with the code rank 0 broadcasts; only rank 0 prints. `--json` adds `ranks`, `abort` (`{reason, detail}`), an `error` sentence for an abort, and `status` (the heartbeat's path). New key `output.heartbeat_s` (default 15, positive, at most a day), mirrored by `saber.campaign.Output`. |
 | As built (step 5e-2) | New key `output.fragment_impacts` (bool, optional), mirrored by `saber.campaign.Output`: whether the campaign writes `*_impacts.parquet` (IB-16). Unset, it is on exactly when the scene has a `Fragmentable` body; set on a scene without one, `sim_hpc` warns and writes no file (a part opens the file only at its first run that broke up). A fragmenting scene also adds the four `fragments_*` summary columns and the 20 `ch_frag_*` snapshot channels (IB-09, IB-16). |
+| As built (step S6-2) | `--heartbeat S` writes `campaign_status.json` every S seconds instead of `output.heartbeat_s` (more than 0, at most a day; anything else is a usage error, 64); the studio's local runs pass 1. `--validate-only --json` adds `shared_out`, the output folder with variables expanded and relative paths resolved, and `saber.campaign.Preflight.shared_out` carries it. |
 
 ### IB-05 · MPI wire protocol (Rank0.Dispatcher ↔ RankN.Main)
 

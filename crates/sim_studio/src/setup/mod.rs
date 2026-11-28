@@ -8,8 +8,13 @@
 //! scenario at its defaults, and lists what the requirement set has the campaign record.
 //!
 //! The campaign runs the scenario file as saved: unsaved Builder edits are not in it.
+//!
+//! A written campaign runs on this machine with **Run here** ([`local`], step S6-2): `sim_hpc
+//! --local` as a child process, with its progress read from the heartbeat. The campaign joins
+//! the Launcher's recent campaigns as it starts.
 
 pub mod job;
+pub mod local;
 pub mod plan;
 
 use std::path::{Path, PathBuf};
@@ -22,11 +27,13 @@ use sim_core::{RunSeed, Scenario};
 use sim_studio_ui::prelude::Toast;
 use sim_verify::RequirementSet;
 
-use crate::actions::{BuilderDoc, CurrentWorkspace, ReqPanel, StudioCommand};
+use crate::actions::{BuilderDoc, CurrentWorkspace, Recent, ReqPanel, StudioCommand};
 use crate::builder::requirements as reqs;
+use crate::clock;
 use crate::rerun::{Keep, Rerun, RerunSource, SceneRef};
 use crate::workspace::{Workspace, write_atomic};
 use job::StudyResult;
+use local::{Finished, LocalRun};
 use plan::{
     CAMPAIGNS, Checked, DistField, DistKind, Estimate, Method, STUDY_FILE, SceneParam, StudyFile,
     StudyPlan, TelemetryPlan, Timing,
@@ -93,6 +100,12 @@ pub enum SetupEdit {
     New,
     /// Write `study.json` and build the campaign with Python.
     Write,
+    /// Run the written campaign on this machine (`sim_hpc --local`).
+    RunHere,
+    /// Run the rest of a campaign that stopped here (`sim_hpc --local --resume`).
+    ResumeHere,
+    /// Stop the campaign running here: first gently (it commits what finished), then at once.
+    StopRun,
 }
 
 /// Campaign Setup changed: its panels are laid out again.
@@ -160,6 +173,12 @@ pub struct SetupState {
     pub written: Option<Written>,
     /// The Python interpreter (`None`: [`job::python`], from `SABER_PYTHON`).
     pub python: Option<String>,
+    /// `sim_hpc` (`None`: [`local::sim_hpc`], from `SABER_SIM_HPC` or beside the studio).
+    pub sim_hpc: Option<PathBuf>,
+    /// The campaign running on this machine.
+    pub local: Option<LocalRun>,
+    /// The last campaign that ran on this machine.
+    pub finished: Option<Finished>,
     timer: Option<TimingRun>,
     task: Option<(PathBuf, Task<Result<StudyResult, String>>)>,
 }
@@ -171,6 +190,8 @@ impl std::fmt::Debug for SetupState {
             .field("timing", &self.timing)
             .field("written", &self.written)
             .field("writing", &self.writing())
+            .field("local", &self.local)
+            .field("finished", &self.finished)
             .finish_non_exhaustive()
     }
 }
@@ -179,6 +200,51 @@ impl SetupState {
     /// Python is building the campaign.
     pub fn writing(&self) -> bool {
         self.task.is_some()
+    }
+
+    /// A campaign is running on this machine.
+    pub fn running(&self) -> bool {
+        self.local.is_some()
+    }
+
+    /// `sim_hpc`, as a local run starts it.
+    pub fn sim_hpc_exe(&self) -> PathBuf {
+        self.sim_hpc
+            .clone()
+            .unwrap_or_else(|| local::sim_hpc(job::own_dir().as_deref()))
+    }
+
+    /// The written campaign **Run here** would start: its id, `campaign.toml`, output folder
+    /// and runs. `None` until a Write succeeded with preflight, while it runs, and once it ran.
+    pub fn runnable(&self) -> Option<(String, PathBuf, Option<PathBuf>, u64)> {
+        let w = self.written.as_ref()?;
+        let r = w.result.as_ref().ok()?;
+        let pf = r.preflight.as_ref()?;
+        let dir = w.study.parent()?;
+        let id = dir.file_name()?.to_str()?.to_owned();
+        let toml = Path::new(&r.campaign_toml);
+        let toml = if toml.is_absolute() {
+            toml.to_owned()
+        } else {
+            dir.join(toml.file_name()?)
+        };
+        let busy = |other: &str| other == id;
+        if self.local.as_ref().is_some_and(|l| busy(&l.id))
+            || self.finished.as_ref().is_some_and(|f| busy(&f.id))
+        {
+            return None;
+        }
+        Some((id, toml, pf.shared_out.clone(), pf.runs))
+    }
+
+    /// The command **Run here** runs, as shown.
+    pub fn run_command_line(&self) -> Option<String> {
+        let plan = self.plan.as_ref()?;
+        Some(local::command_line(
+            &self.sim_hpc_exe().display().to_string(),
+            &format!("{CAMPAIGNS}/{}/campaign.toml", plan.id),
+            false,
+        ))
     }
 
     /// The timed run is still running.
@@ -371,8 +437,14 @@ pub fn enter(
     changed.write(SetupChanged);
     let Some(ws) = &ws.0 else {
         let python = setup.python.take();
+        let sim_hpc = setup.sim_hpc.take();
+        let local = setup.local.take();
+        let finished = setup.finished.take();
         *setup = SetupState {
             python,
+            sim_hpc,
+            local,
+            finished,
             ..SetupState::default()
         };
         return;
@@ -431,6 +503,7 @@ pub fn apply(
     mut commands: MessageReader<StudioCommand>,
     ws: Res<CurrentWorkspace>,
     mut setup: ResMut<SetupState>,
+    mut recent: ResMut<Recent>,
     mut toasts: MessageWriter<Toast>,
     mut changed: MessageWriter<SetupChanged>,
 ) {
@@ -438,6 +511,28 @@ pub fn apply(
         let StudioCommand::Setup(edit) = command else {
             continue;
         };
+        if matches!(
+            edit,
+            SetupEdit::RunHere | SetupEdit::ResumeHere | SetupEdit::StopRun
+        ) {
+            match run_command(edit, &mut setup) {
+                Ok(Some(text)) => {
+                    if let Some(l) = &setup.local
+                        && let Some(out) = &l.out
+                    {
+                        recent.list.touch_campaign(out, &l.id, clock::unix_now());
+                        recent.save(&mut toasts);
+                    }
+                    toasts.write(Toast::info(text));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    toasts.write(Toast::warning(e));
+                }
+            }
+            changed.write(SetupChanged);
+            continue;
+        }
         let Some(ws) = &ws.0 else {
             toasts.write(Toast::warning("No workspace is open"));
             continue;
@@ -481,6 +576,9 @@ fn edit_setup(edit: &SetupEdit, ws: &Workspace, setup: &mut SetupState) -> Resul
         }
         SetupEdit::Open(id) => return open_study(ws, setup, id).map(|_| true),
         SetupEdit::Write => return write(ws, setup).map(|_| true),
+        SetupEdit::RunHere | SetupEdit::ResumeHere | SetupEdit::StopRun => {
+            unreachable!("run_command")
+        }
         _ => {}
     }
     let scene_params = setup.scene().map(|s| s.params.clone()).unwrap_or_default();
@@ -536,7 +634,10 @@ fn edit_setup(edit: &SetupEdit, ws: &Workspace, setup: &mut SetupState) -> Resul
         | SetupEdit::Requirements(_)
         | SetupEdit::New
         | SetupEdit::Open(_)
-        | SetupEdit::Write => unreachable!("handled above"),
+        | SetupEdit::Write
+        | SetupEdit::RunHere
+        | SetupEdit::ResumeHere
+        | SetupEdit::StopRun => unreachable!("handled above"),
     }
     Ok(*plan != before)
 }
@@ -572,6 +673,14 @@ fn write(ws: &Workspace, setup: &mut SetupState) -> Result<(), String> {
     if setup.writing() {
         return Err("The campaign is being written".to_owned());
     }
+    if let (Some(l), Some(p)) = (&setup.local, &setup.plan)
+        && l.id == p.id
+    {
+        return Err(format!(
+            "Not written: {} is running here; stop it first, or give this study a new id",
+            l.id
+        ));
+    }
     let checked = setup.checked();
     if let Some(e) = checked.errors.first() {
         return Err(format!("Not written: {e}"));
@@ -588,6 +697,114 @@ fn write(ws: &Workspace, setup: &mut SetupState) -> Result<(), String> {
     setup.written = None;
     setup.studies = studies(ws);
     Ok(())
+}
+
+/// Start, resume or stop the campaign run here; what to say when one starts.
+fn run_command(edit: &SetupEdit, setup: &mut SetupState) -> Result<Option<String>, String> {
+    match edit {
+        SetupEdit::StopRun => {
+            let Some(l) = setup.local.as_mut() else {
+                return Err("No campaign is running here".to_owned());
+            };
+            l.stop()?;
+            Ok(None)
+        }
+        SetupEdit::RunHere | SetupEdit::ResumeHere => {
+            if let Some(l) = &setup.local {
+                return Err(format!(
+                    "{} is running here; one campaign runs here at a time",
+                    l.id
+                ));
+            }
+            let resume = *edit == SetupEdit::ResumeHere;
+            let (id, toml, out, runs) = if resume {
+                let f = setup
+                    .finished
+                    .as_ref()
+                    .filter(|f| f.report.as_ref().is_ok_and(|r| r.resumable()))
+                    .ok_or("Nothing here to resume")?;
+                let runs = f
+                    .report
+                    .as_ref()
+                    .map_or(0, |r| r.committed_runs + r.missing_runs);
+                (f.id.clone(), f.toml.clone(), f.out_dir(), runs)
+            } else {
+                setup
+                    .runnable()
+                    .ok_or("Write the campaign first; it runs once preflight passes")?
+            };
+            let run = LocalRun::start(&setup.sim_hpc_exe(), &id, &toml, out, runs, resume)?;
+            let text = format!(
+                "{} {id} here: {} runs, {}",
+                if resume { "Resuming" } else { "Running" },
+                plan::count(runs),
+                run.command
+            );
+            setup.local = Some(run);
+            setup.finished = None;
+            Ok(Some(text))
+        }
+        _ => unreachable!("only run commands"),
+    }
+}
+
+/// What the toast says when a campaign run here ends.
+pub fn finished_toast(f: &Finished) -> Toast {
+    let id = &f.id;
+    match &f.report {
+        Ok(r) if r.ok => Toast::success(format!(
+            "{id} ran here: {} runs committed in {}{}",
+            plan::count(r.committed_runs),
+            plan::duration(f.wall.as_secs_f64()),
+            if r.crashes > 0 {
+                format!(", {} crashed", plan::count(r.crashes))
+            } else {
+                String::new()
+            }
+        )),
+        Ok(r) if r.resumable() => Toast::warning(format!(
+            "{id} stopped: {} of {} runs committed; Resume here runs the rest",
+            plan::count(r.committed_runs),
+            plan::count(r.committed_runs + r.missing_runs)
+        )),
+        Ok(r) => Toast::error(format!(
+            "{id} ended with exit {}: {}",
+            r.exit,
+            r.error
+                .clone()
+                .or_else(|| r.io_error.clone())
+                .unwrap_or_else(|| format!(
+                    "{} of {} runs committed",
+                    plan::count(r.committed_runs),
+                    plan::count(r.committed_runs + r.missing_runs)
+                ))
+        )),
+        Err(e) => Toast::error(format!("{id} did not run: {e}")),
+    }
+}
+
+/// Follow the campaign running here: read its heartbeat, and its report when it ends.
+pub fn poll_local(
+    mut setup: ResMut<SetupState>,
+    mut recent: ResMut<Recent>,
+    mut toasts: MessageWriter<Toast>,
+    mut changed: MessageWriter<SetupChanged>,
+) {
+    let Some(l) = setup.local.as_mut() else {
+        return;
+    };
+    l.read_heartbeat(std::time::Instant::now());
+    let Some(f) = l.try_finish() else {
+        return;
+    };
+    setup.local = None;
+    if let Some(out) = f.out_dir() {
+        recent.list.touch_campaign(&out, &f.id, clock::unix_now());
+        recent.save(&mut toasts);
+    }
+    toasts.write(finished_toast(&f));
+    setup.finished = Some(f);
+    changed.write(SetupChanged);
 }
 
 /// Step the timed run and take Python's answer when it comes.

@@ -487,7 +487,18 @@ fn the_binary_runs_and_validates() {
     assert_eq!(code, Some(0), "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["runs"], 4);
-    let (code, out) = run(&["--campaign", toml, "--local", "--threads", "2", "--json"]);
+    // Where the outputs and the heartbeat go, resolved (the studio reads progress there).
+    assert_eq!(v["shared_out"].as_str(), s.out().to_str());
+    let (code, out) = run(&[
+        "--campaign",
+        toml,
+        "--local",
+        "--threads",
+        "2",
+        "--heartbeat",
+        "0.25",
+        "--json",
+    ]);
     assert_eq!(code, Some(0), "{out}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(
@@ -495,6 +506,14 @@ fn the_binary_runs_and_validates() {
         (Some(4), Some(0))
     );
     assert_eq!(summaries(&s.out()).len(), 4);
+    let status: sim_schema::CampaignStatus = serde_json::from_str(
+        &std::fs::read_to_string(s.out().join("campaign_status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (status.heartbeat_s, status.state, status.runs_done),
+        (0.25, sim_schema::CampaignState::Done, 4)
+    );
     if !cfg!(feature = "mpi") {
         // Without the mpi feature, a run that is neither local nor a validation is a usage error.
         assert_eq!(run(&["--campaign", toml]).0, Some(64));
@@ -522,6 +541,8 @@ fn the_binary_runs_and_validates() {
     for usage in [
         &["--campaign", toml, "--local", "--override-crash-policy"][..],
         &["--campaign", toml, "--local", "--deadline", "soon"],
+        &["--campaign", toml, "--local", "--heartbeat", "0"],
+        &["--campaign", toml, "--local", "--heartbeat", "NaN"],
     ] {
         assert_eq!(run(usage).0, Some(64), "{usage:?}");
     }

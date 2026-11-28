@@ -443,6 +443,8 @@ As built (step 4b): `saber.campaign.submit` preflights on the login node (with `
 
 As built (step 3c): the scene-hash check runs in `sim_hpc`'s preflight (`ManifestError::SceneMismatch`, exit 2), which `saber.campaign.preflight` calls through `--validate-only` on the login node, so the same check also guards a job submitted by hand. Rendering the PBS script and `qsub` arrive with step 4b.
 
+As built (step S6-2): the studio's **Run here** is this flow on the workstation with one rank and no scheduler. After **Write campaign** has preflighted the campaign, the studio starts `sim_hpc --campaign campaigns/<id>/campaign.toml --local --json --heartbeat 1` as a child process, with its report and log in `jobs/` as a job's are, and follows it through `campaign_status.json` in the output folder that preflight reported (`shared_out`). Stop is the walltime path above without the scheduler: `SIGTERM`, then a kill (section 7 says what survives).
+
 ---
 
 ## 5. MPI broadcast and dynamic chunking
