@@ -2055,7 +2055,11 @@ fn campaign_setup_sets_up_and_writes_a_campaign() {
     );
 
     let python = dir.join("python.sh");
-    let answer = r#"{"ok": true, "campaign_toml": "campaign.toml", "manifest": "sweep_manifest.parquet", "runs": 40, "param_sets": 10, "replicates": 4, "param_keys": ["cla"], "sampler": {}, "warnings": [], "preflight": {"runs": 40, "build_id": "saber test", "scene_hash": "1", "manifest_hash": "2", "req_set_hash": "3", "param_keys": ["cla"], "summary_columns": [], "warnings": []}}"#;
+    let out = ws.root.join("campaigns/shell-001/out");
+    let answer = format!(
+        r#"{{"ok": true, "campaign_toml": "campaign.toml", "manifest": "sweep_manifest.parquet", "runs": 40, "param_sets": 10, "replicates": 4, "param_keys": ["cla"], "sampler": {{}}, "warnings": [], "preflight": {{"runs": 40, "build_id": "saber test", "scene_hash": "1", "manifest_hash": "2", "req_set_hash": "3", "param_keys": ["cla"], "summary_columns": [], "shared_out": "{}", "warnings": []}}}}"#,
+        out.display()
+    );
     std::fs::write(&python, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
     std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
     app.world_mut().resource_mut::<SetupState>().python = Some(python.display().to_string());
@@ -2085,5 +2089,85 @@ fn campaign_setup_sets_up_and_writes_a_campaign() {
         texts.iter().any(|t| t.ends_with("▸ shell-001")),
         "listed under Studies"
     );
+
+    // Run here, through a stand-in sim_hpc: a heartbeat of 10 runs done, then a resumable stop
+    // on SIGTERM.
+    let status = |state: &str, done: u64| {
+        format!(
+            r#"{{"format": "saber-campaign-status", "campaign_id": "shell-001", "attempt": 0, "started_utc": "STARTED", "updated_utc": "STARTED", "heartbeat_s": 1.0, "state": "{state}", "abort_reason": null, "abort_detail": null, "ranks": 1, "runs_total": 40, "runs_done": {done}, "runs_committed": 0, "setup_errors": 0, "crashes": 0, "chunks_outstanding": 0, "queue_depth": 0, "per_rank": [], "crashes_by_param_set": {{}}, "status_counts": {{}}, "req_tallies": {{}}}}"#
+        )
+    };
+    std::fs::write(dir.join("running.json"), status("Running", 10)).unwrap();
+    std::fs::write(dir.join("stopped.json"), status("Failed", 16)).unwrap();
+    let report = format!(
+        r#"{{"ok": false, "exit": 5, "campaign_id": "shell-001", "attempt": 0, "ranks": 1, "threads": 2, "runs": 16, "crashes": 0, "crash_dumps": 0, "setup_errors": 0, "parts": 1, "failed_parts": 0, "committed_runs": 16, "missing_runs": 24, "stopped": "Signal", "io_error": null, "abort": null, "error": null, "manifest": "{o}/_MANIFEST.json", "status": "{o}/campaign_status.json"}}"#,
+        o = out.display()
+    );
+    let sim_hpc = dir.join("sim_hpc.sh");
+    std::fs::write(
+        &sim_hpc,
+        format!(
+            "#!/bin/sh\nmkdir -p '{o}'\nnow=$(date -u +%Y-%m-%dT%H:%M:%SZ)\nstop=\ntrap 'stop=1' TERM\nsed \"s/STARTED/$now/g\" '{d}/running.json' > '{o}/campaign_status.json'\nwhile [ -z \"$stop\" ]; do sleep 0.02; done\nsed \"s/STARTED/$now/g\" '{d}/stopped.json' > '{o}/campaign_status.json'\necho '{report}'\nexit 5\n",
+            o = out.display(),
+            d = dir.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&sim_hpc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.world_mut().resource_mut::<SetupState>().sim_hpc = Some(sim_hpc);
+    let wait = |app: &mut App, what: &str, done: &dyn Fn(&App) -> bool| {
+        let started = std::time::Instant::now();
+        while !done(app) {
+            assert!(
+                started.elapsed().as_secs() < 60,
+                "timed out waiting for {what}"
+            );
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    press(&mut app, "Run here");
+    wait(&mut app, "the heartbeat", &|a| {
+        a.world()
+            .resource::<SetupState>()
+            .local
+            .as_ref()
+            .is_some_and(|l| l.runs_done() == 10)
+    });
+    app.update();
+    let texts = all_texts(&mut app);
+    assert!(texts.iter().any(|t| t == "Running shell-001 here"));
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("running: 10 of 40 runs (25%), 0 committed, 0 crashed · ")),
+        "the live progress line"
+    );
+    let mut bars = app
+        .world_mut()
+        .query_filtered::<&Node, With<sim_studio::ui::setup::RunBar>>();
+    let widths: Vec<Val> = bars.iter(app.world()).map(|n| n.width).collect();
+    assert_eq!(widths, [Val::Percent(25.0)]);
+    press(&mut app, "Stop");
+    wait(&mut app, "the stop", &|a| {
+        a.world().resource::<SetupState>().finished.is_some()
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    let texts = all_texts(&mut app);
+    assert!(texts.iter().any(|t| t == "Ran shell-001 here"));
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("⚠ Stopped: 16 of 40 runs committed in ")),
+        "{:?}",
+        texts
+            .iter()
+            .filter(|t| t.contains("committed"))
+            .collect::<Vec<_>>()
+    );
+    labelled(&mut app, "Resume here");
+    labelled(&mut app, "Replay runs");
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }

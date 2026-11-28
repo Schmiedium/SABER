@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S6-1. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S6-2. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -76,8 +76,9 @@ aircraft.
 > and a definition for every swept parameter, replicates and seed, the telemetry and crash quota, and shows the runs,
 > an estimate from a timed run and the runs each probability requirement needs; **Write campaign** writes
 > `campaigns/<id>/study.json` and builds the campaign from it with `python -m saber.study`, so the studio's campaign
-> is the one `saber.sweep` and `saber.campaign` write for the same choices. Running and submitting from the studio
-> come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> is the one `saber.sweep` and `saber.campaign` write for the same choices. **Run here** runs it on this machine
+> with `sim_hpc --local`, with live progress from its heartbeat, Stop and Resume, and the campaign on the Launcher.
+> Submitting to a cluster comes next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout

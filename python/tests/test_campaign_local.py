@@ -74,6 +74,7 @@ def test_tiny_campaign_end_to_end(tmp_path, scene):
     pf = campaign.preflight(toml)
     assert (pf.campaign_id, pf.runs, pf.scene_hash, pf.param_keys) == ("proj-e2e", 18, scene.scene_hash, ["muzzle_vz"])
     assert pf.summary_columns[:2] == ["param_muzzle_vz", "metric_apogee_m"] and pf.warnings == []
+    assert Path(pf.shared_out).resolve() == (toml.parent / "out").resolve()
 
     run = campaign.run_local(toml, threads=2).check()
     assert run.report["runs"] == 18 and run.report["crashes"] == 0
@@ -282,6 +283,7 @@ def test_the_studio_study_builds_the_campaign_the_api_builds(tmp_path, scene, ca
     assert out["param_keys"] == ["muzzle_vz"] and out["warnings"] == []
     pf = out["preflight"]
     assert pf["runs"] == 18 and pf["scene_hash"] == f"{scene.scene_hash:016x}" and pf["warnings"] == []
+    assert Path(pf["shared_out"]).resolve() == (tmp_path / "studio" / "out").resolve()
 
     # The same choices through the API.
     s = sweep.generate(scene, {"muzzle_vz": sweep.Uniform(30, 90)}, sweep.LatinHypercube(6), replicates=3, seed=11)

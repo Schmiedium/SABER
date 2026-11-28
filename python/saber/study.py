@@ -41,7 +41,9 @@ be null for the binding's bounds), `log_uniform` (`lo`, `hi`), `normal` (`mean`,
 
 With `--json` the command prints one JSON object: `{"ok": true, "campaign_toml": …, "runs": …,
 "param_sets": …, "replicates": …, "param_keys": […], "sampler": {…}, "warnings": […],
-"preflight": {…} | null}`, or `{"ok": false, "error": {"kind": …, "message": …}}`. Exit codes
+"preflight": {…} | null}` (`preflight` is `sim_hpc --validate-only`'s answer, with `shared_out`,
+where the parts and the heartbeat will go), or `{"ok": false, "error": {"kind": …, "message":
+…}}`. Exit codes
 follow IB-04: 0 written (and valid, with `--preflight`), 2 refused, 64 usage, 70 internal.
 """
 
@@ -311,6 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "req_set_hash": None if pf.req_set_hash is None else f"{pf.req_set_hash:016x}",
             "param_keys": pf.param_keys,
             "summary_columns": pf.summary_columns,
+            "shared_out": pf.shared_out,
             "warnings": pf.warnings,
         },
     }

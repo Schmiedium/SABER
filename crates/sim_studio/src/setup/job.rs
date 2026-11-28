@@ -62,6 +62,9 @@ pub struct Preflight {
     pub param_keys: Vec<String>,
     /// The summary columns the runs will write.
     pub summary_columns: Vec<String>,
+    /// Where the parts and the heartbeat go, as `sim_hpc` resolves `output.shared_out`.
+    #[serde(default)]
+    pub shared_out: Option<PathBuf>,
     /// Its warnings.
     #[serde(default)]
     pub warnings: Vec<String>,

@@ -3,7 +3,9 @@
 //! against the golden file `python/tests/data/studio_study.json` (which the end-to-end Python
 //! test builds with `python -m saber.study` and compares with the campaign the Python API writes
 //! for the same choices), and the screen's commands writing a study and building it through a
-//! stand-in Python.
+//! stand-in Python. Step S6-2: a written campaign runs here through a stand-in `sim_hpc` that
+//! writes heartbeats and answers as `sim_hpc --local --json` does, with progress, Stop, Resume
+//! and the Launcher's card.
 
 use std::path::{Path, PathBuf};
 
@@ -12,6 +14,7 @@ use sim_core::Scenario;
 use sim_studio::StudioCorePlugin;
 use sim_studio::actions::StudioCommand;
 use sim_studio::setup::job::{self, StudyResult};
+use sim_studio::setup::local;
 use sim_studio::setup::plan::{
     self, Dist, DistField, DistKind, Method, SceneParam, StudyFile, StudyPlan, Timing,
 };
@@ -684,4 +687,342 @@ fn campaign_setup_writes_a_study_and_builds_it_with_python() {
         "{text}"
     );
     assert!(!setup(&app).writing());
+}
+
+#[test]
+fn sim_hpc_reports_are_read() {
+    let report = |exit: i32, extra: &str| {
+        format!(
+            r#"{{"ok": {}, "exit": {exit}, "campaign_id": "c", "attempt": 0, "ranks": 1, "threads": 4, "runs": 12, "crashes": 1, "crash_dumps": 1, "setup_errors": 0, "parts": 3, "failed_parts": 0, "committed_runs": 12, "missing_runs": {}, "stopped": null, "io_error": null, "abort": null, "error": {extra}, "manifest": "o/_MANIFEST.json", "status": "o/campaign_status.json"}}"#,
+            exit == 0,
+            if exit == 0 { 0 } else { 8 }
+        )
+    };
+    let r = local::report(Some(0), &report(0, "null"), "").unwrap();
+    assert!(r.ok && !r.resumable());
+    assert_eq!((r.runs, r.crashes, r.parts, r.threads), (12, 1, 3, 4));
+    assert_eq!(r.status, Path::new("o/campaign_status.json"));
+    let r = local::report(Some(5), &format!("\n{}\n\n", report(5, "null")), "").unwrap();
+    assert!(!r.ok && r.resumable());
+    let r = local::report(
+        Some(6),
+        &report(6, r#""aborted by the crash policy (CrashStorm): 9 of 10""#),
+        "",
+    )
+    .unwrap();
+    assert!(!r.resumable() && r.error.unwrap().contains("CrashStorm"));
+    let e = local::report(
+        Some(2),
+        r#"{"ok": false, "exit": 2, "kind": "OutputExists", "error": "out already holds a campaign"}"#,
+        "",
+    )
+    .unwrap_err();
+    assert_eq!(e, "OutputExists: out already holds a campaign");
+    let e = local::report(Some(64), "", "sim_hpc: unexpected argument\nusage: …\n").unwrap_err();
+    assert_eq!(e, "sim_hpc exited with code 64: usage: …");
+    assert_eq!(
+        local::report(None, "", "").unwrap_err(),
+        "sim_hpc was killed"
+    );
+
+    assert_eq!(
+        local::command_line("sim_hpc", "campaigns/a/campaign.toml", true),
+        "sim_hpc --campaign campaigns/a/campaign.toml --local --json --heartbeat 1 --resume"
+    );
+    assert_eq!(local::stamp(1_795_000_000), "20261118T110640Z");
+    let own = scratch("own");
+    let beside = own.join(format!("sim_hpc{}", std::env::consts::EXE_SUFFIX));
+    if std::env::var_os(local::SIM_HPC_ENV).is_none() {
+        assert_eq!(
+            local::sim_hpc(Some(&own)),
+            Path::new(beside.file_name().unwrap())
+        );
+        std::fs::write(&beside, "").unwrap();
+        assert_eq!(local::sim_hpc(Some(&own)), beside);
+    }
+    let e = local::LocalRun::start(
+        Path::new("/no/such/sim_hpc"),
+        "a",
+        &own.join("campaign.toml"),
+        None,
+        1,
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        e.contains("was not found") && e.contains("SABER_SIM_HPC"),
+        "{e}"
+    );
+}
+
+/// The heartbeat a stand-in `sim_hpc` writes, with `STARTED` for its start time.
+#[cfg(unix)]
+fn heartbeat_template(state: sim_schema::CampaignState, done: u64, committed: u64) -> String {
+    serde_json::to_string(&sim_schema::CampaignStatus {
+        format: sim_schema::CAMPAIGN_STATUS_FORMAT.into(),
+        campaign_id: "shell-001".into(),
+        attempt: 0,
+        started_utc: "STARTED".into(),
+        updated_utc: "STARTED".into(),
+        heartbeat_s: 1.0,
+        state,
+        abort_reason: None,
+        abort_detail: None,
+        ranks: 1,
+        runs_total: 20,
+        runs_done: done,
+        runs_committed: committed,
+        setup_errors: 0,
+        crashes: 1,
+        chunks_outstanding: 0,
+        queue_depth: 0,
+        per_rank: vec![],
+        crashes_by_param_set: Default::default(),
+        status_counts: Default::default(),
+        req_tallies: Default::default(),
+    })
+    .unwrap()
+}
+
+/// A stand-in `sim_hpc --local --json`: it records its arguments, writes a Running heartbeat and
+/// waits for `dir/go` (then reports every run committed) or for `SIGTERM` (then reports a
+/// resumable stop, exit 5).
+#[cfg(unix)]
+fn stand_in_sim_hpc(dir: &Path, out: &Path) -> PathBuf {
+    use sim_schema::CampaignState;
+    use std::os::unix::fs::PermissionsExt;
+
+    let files = [
+        (
+            "running.json",
+            heartbeat_template(CampaignState::Running, 7, 3),
+        ),
+        (
+            "stopped.json",
+            heartbeat_template(CampaignState::Failed, 12, 12),
+        ),
+        ("done.json", heartbeat_template(CampaignState::Done, 20, 20)),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    let report = |ok: bool, exit: i32, attempt: u16, runs: u64, missing: u64| {
+        format!(
+            r#"{{"ok": {ok}, "exit": {exit}, "campaign_id": "shell-001", "attempt": {attempt}, "ranks": 1, "threads": 3, "runs": {runs}, "crashes": 1, "crash_dumps": 1, "setup_errors": 0, "parts": 2, "failed_parts": 0, "committed_runs": {}, "missing_runs": {missing}, "stopped": {}, "io_error": null, "abort": null, "error": null, "manifest": "{o}/_MANIFEST.json", "status": "{o}/campaign_status.json"}}"#,
+            20 - missing,
+            if ok { "null" } else { r#""Signal""# },
+            o = out.display()
+        )
+    };
+    let script = dir.join("sim_hpc.sh");
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{d}/args.txt'
+attempt=0
+case " $* " in *" --resume "*) attempt=1 ;; esac
+mkdir -p '{o}'
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+beat() {{ sed "s/STARTED/$now/g" '{d}'/$1 > '{o}/campaign_status.json'; }}
+stop=
+trap 'stop=1' TERM
+beat running.json
+echo 'working' >&2
+while [ -z "$stop" ] && [ ! -f '{d}/go' ]; do sleep 0.02; done
+if [ -n "$stop" ]; then
+  beat stopped.json
+  echo '{partial}'
+  exit 5
+fi
+beat done.json
+if [ "$attempt" = 1 ]; then echo '{resumed}'; else echo '{whole}'; fi
+"#,
+            d = dir.display(),
+            o = out.display(),
+            partial = report(false, 5, 0, 12, 8),
+            resumed = report(true, 0, 1, 8, 0),
+            whole = report(true, 0, 0, 20, 0),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// A written campaign runs here: progress from its heartbeat, the Launcher's card, Write refused
+/// while it runs, Stop (SIGTERM) with a resumable report, and Resume to the end.
+#[cfg(unix)]
+#[test]
+fn a_written_campaign_runs_here_with_progress_stop_and_resume() {
+    use sim_studio::actions::{LauncherCampaigns, Recent};
+    use sim_studio_ui::widgets::Status;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("run");
+    let mut app = app(&dir.join("recent.ron"));
+    let root = dir.join("aero");
+    let ws = Workspace::create(&root, "aero", Pack::AeroBallistics).unwrap();
+    send(&mut app, StudioCommand::OpenWorkspace(ws.root.clone()));
+    send(&mut app, StudioCommand::Rail(Rail::Campaigns));
+    edit(&mut app, SetupEdit::N("10".into()));
+    edit(&mut app, SetupEdit::Replicates("2".into()));
+
+    // Nothing written yet: nothing to run.
+    edit(&mut app, SetupEdit::RunHere);
+    assert!(last_toast(&app).1.starts_with("Write the campaign first"));
+
+    let camp = root.join("campaigns/shell-001");
+    let out = camp.join("out");
+    let python = dir.join("python.sh");
+    let answer = format!(
+        r#"{{"ok": true, "campaign_toml": "{}", "manifest": "sweep_manifest.parquet", "runs": 20, "param_sets": 10, "replicates": 2, "param_keys": ["cla"], "sampler": {{}}, "warnings": [], "preflight": {{"runs": 20, "build_id": "saber test", "scene_hash": "1", "manifest_hash": "2", "req_set_hash": "3", "param_keys": ["cla"], "summary_columns": [], "shared_out": "{}", "warnings": []}}}}"#,
+        camp.join("campaign.toml").display(),
+        out.display()
+    );
+    std::fs::write(&python, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sim_hpc = stand_in_sim_hpc(&dir, &out);
+    {
+        let mut s = app.world_mut().resource_mut::<SetupState>();
+        s.python = Some(python.display().to_string());
+        s.sim_hpc = Some(sim_hpc.clone());
+    }
+    assert_eq!(
+        setup(&app).run_command_line().unwrap(),
+        format!(
+            "{} --campaign campaigns/shell-001/campaign.toml --local --json --heartbeat 1",
+            sim_hpc.display()
+        )
+    );
+    edit(&mut app, SetupEdit::Write);
+    until(&mut app, "Python", |a| setup(a).written.is_some());
+    let (id, toml, shared, runs) = setup(&app).runnable().expect("runnable once written");
+    assert_eq!(
+        (id.as_str(), toml, shared, runs),
+        (
+            "shell-001",
+            camp.join("campaign.toml"),
+            Some(out.clone()),
+            20
+        )
+    );
+
+    // Run here: the heartbeat gives the progress, and the Launcher lists the campaign.
+    edit(&mut app, SetupEdit::RunHere);
+    assert!(setup(&app).running() && setup(&app).runnable().is_none());
+    let (level, text) = last_toast(&app);
+    assert_eq!(level, ToastLevel::Info);
+    assert!(
+        text.starts_with("Running shell-001 here: 20 runs, "),
+        "{text}"
+    );
+    until(&mut app, "the heartbeat", |a| {
+        setup(a).local.as_ref().is_some_and(|l| l.runs_done() == 7)
+    });
+    let line = sim_studio::ui::setup::progress_text(setup(&app).local.as_ref().unwrap());
+    assert!(
+        line.starts_with("running: 7 of 20 runs (35%), 3 committed, 1 crashed · "),
+        "{line}"
+    );
+    let recent = &app.world().resource::<Recent>().list.campaigns;
+    assert_eq!(
+        (recent[0].path.as_path(), recent[0].name.as_str()),
+        (out.as_path(), "shell-001")
+    );
+    app.world_mut()
+        .run_system_cached(sim_studio::actions::refresh_campaigns)
+        .unwrap();
+    let cards = app.world().resource::<LauncherCampaigns>().0.clone();
+    assert_eq!(
+        cards[0].as_ref().unwrap().status(),
+        (Status::Running, "running 15%".into())
+    );
+
+    // The running campaign is not written over, and one campaign runs here at a time.
+    edit(&mut app, SetupEdit::Write);
+    assert!(
+        last_toast(&app)
+            .1
+            .starts_with("Not written: shell-001 is running here"),
+        "{:?}",
+        last_toast(&app)
+    );
+    edit(&mut app, SetupEdit::ResumeHere);
+    assert!(
+        last_toast(&app)
+            .1
+            .contains("one campaign runs here at a time")
+    );
+
+    // Stop: SIGTERM, a resumable report.
+    edit(&mut app, SetupEdit::StopRun);
+    until(&mut app, "the stop", |a| setup(a).finished.is_some());
+    app.update();
+    let f = setup(&app).finished.clone().unwrap();
+    assert!(!setup(&app).running());
+    let r = f.report.clone().unwrap();
+    assert!(
+        r.resumable() && r.stopped.as_deref() == Some("Signal"),
+        "{r:?}"
+    );
+    assert_eq!(f.out_dir(), Some(out.clone()));
+    assert_eq!(
+        last_toast(&app),
+        (
+            ToastLevel::Warning,
+            "shell-001 stopped: 12 of 20 runs committed; Resume here runs the rest".into()
+        )
+    );
+    assert!(f.report_file.starts_with(camp.join("jobs")));
+    assert!(
+        f.report_file
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("report-local-")
+    );
+    assert!(setup(&app).runnable().is_none(), "it ran: Resume, not Run");
+
+    // Resume runs the rest.
+    std::fs::write(dir.join("go"), "").unwrap();
+    edit(&mut app, SetupEdit::ResumeHere);
+    until(&mut app, "the resume", |a| setup(a).finished.is_some());
+    app.update();
+    // It may end within the frames that started it: look past the last toast.
+    assert!(
+        app.world()
+            .resource::<ToastLog>()
+            .entries
+            .iter()
+            .any(|(_, t)| t.text.starts_with("Resuming shell-001 here: 20 runs, ")),
+        "the resume's toast"
+    );
+    app.update();
+    let f = setup(&app).finished.clone().unwrap();
+    let r = f.report.unwrap();
+    assert!(r.ok && r.attempt == 1 && r.committed_runs == 20, "{r:?}");
+    let (level, text) = last_toast(&app);
+    assert_eq!(level, ToastLevel::Success);
+    assert!(
+        text.starts_with("shell-001 ran here: 20 runs committed in ")
+            && text.ends_with(", 1 crashed"),
+        "{text}"
+    );
+    let log = std::fs::read_dir(camp.join("jobs"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("job-local-"))
+        .count();
+    assert_eq!(log, 2, "a log per run");
+    let toml = camp.join("campaign.toml").display().to_string();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("args.txt")).unwrap(),
+        format!(
+            "--campaign {toml} --local --json --heartbeat 1\n--campaign {toml} --local --json --heartbeat 1 --resume\n"
+        )
+    );
+    edit(&mut app, SetupEdit::StopRun);
+    assert_eq!(last_toast(&app).1, "No campaign is running here");
 }

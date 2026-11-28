@@ -1,7 +1,8 @@
 //! Campaign Setup's panels (`sim_studio_ux.md` §7.6) in the shell's dock: the form in the
 //! center (scenario and requirements, study design, telemetry, execution, notes), the summary
-//! card with the generated files and **Write campaign** on the right, the workspace's studies
-//! on the left and the Console at the bottom. Rebuilt on [`SetupChanged`].
+//! card with the generated files, **Write campaign** and **Run here** on the right, the
+//! workspace's studies on the left and the Console at the bottom. Rebuilt on [`SetupChanged`];
+//! a local run's progress is rewritten in place ([`live`]).
 
 use bevy::prelude::*;
 use bevy::scene::{CommandsSceneExt, SceneList, bsn, bsn_list};
@@ -11,6 +12,7 @@ use sim_studio_ui::prelude::*;
 use super::builder::RegionBody;
 use super::{action, child};
 use crate::actions::{CurrentWorkspace, StudioCommand};
+use crate::setup::local::{Finished, LocalRun};
 use crate::setup::plan::{self, DistField, DistKind, Method, num};
 use crate::setup::{SetupChanged, SetupEdit, SetupState};
 use crate::state::AppState;
@@ -78,6 +80,14 @@ impl SetupField {
 /// The summary card's text, for tests.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct SummaryCard;
+
+/// The text of a local run's progress, rewritten as its heartbeat comes.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct RunLive;
+
+/// The filled part of a local run's progress bar.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct RunBar;
 
 fn wrap_row() -> impl bevy::scene::Scene {
     bsn! {
@@ -510,7 +520,7 @@ fn form(commands: &mut Commands, body: Entity, s: &SetupState) {
     child(
         commands,
         r,
-        muted("cluster profiles and Submit arrive with step S6-2"),
+        muted("Run here once written; cluster profiles and Submit arrive with step S6-3"),
     );
     let r = labelled(commands, body, "Threads");
     field(
@@ -663,6 +673,10 @@ fn summary(commands: &mut Commands, body: Entity, s: &SetupState, ws: Option<&Wo
             child(commands, body, muted("Builds the campaign:"));
             child(commands, body, mono(line));
         }
+        if let Some(line) = s.run_command_line() {
+            child(commands, body, muted("Runs it here:"));
+            child(commands, body, mono(line));
+        }
         if let Some(f) = ws.and_then(|w| s.study_file(w)) {
             child(commands, body, muted(format!("{}:", plan::STUDY_FILE)));
             for l in f.to_json().lines() {
@@ -694,6 +708,11 @@ fn summary(commands: &mut Commands, body: Entity, s: &SetupState, ws: Option<&Wo
             set_enabled(commands, b, false);
         }
     }
+    written(commands, body, s, ws);
+    run_here(commands, body, s, ws);
+}
+
+fn written(commands: &mut Commands, body: Entity, s: &SetupState, ws: Option<&Workspace>) {
     let Some(w) = &s.written else {
         return;
     };
@@ -749,13 +768,6 @@ fn summary(commands: &mut Commands, body: Entity, s: &SetupState, ws: Option<&Wo
                     status_text(Status::Warning, warning.clone()),
                 );
             }
-            child(
-                commands,
-                body,
-                muted(format!(
-                    "Run it here with sim_hpc --campaign {shown}/campaign.toml --local"
-                )),
-            );
         }
         Err(e) => {
             child(
@@ -763,6 +775,237 @@ fn summary(commands: &mut Commands, body: Entity, s: &SetupState, ws: Option<&Wo
                 body,
                 status_text(Status::Fail, format!("Not built: {e}")),
             );
+        }
+    }
+}
+
+/// A local run's progress line: runs done of the total, crashes, wall time.
+pub fn progress_text(l: &LocalRun) -> String {
+    let done = l.runs_done();
+    let total = l.status.as_ref().map_or(l.runs_total, |s| s.runs_total);
+    let pct = if total == 0 {
+        0.0
+    } else {
+        (100.0 * done as f64 / total as f64).floor()
+    };
+    let state = match l.status.as_ref().map(|s| s.state) {
+        _ if l.stops > 0 => "stopping",
+        None | Some(sim_schema::CampaignState::Starting) => "starting",
+        Some(sim_schema::CampaignState::Draining) => "finishing",
+        Some(_) => "running",
+    };
+    let crashes = l.status.as_ref().map_or(0, |s| s.crashes);
+    format!(
+        "{state}: {} of {} runs ({pct}%), {} committed, {} crashed · {}",
+        plan::count(done),
+        plan::count(total),
+        plan::count(l.status.as_ref().map_or(0, |s| s.runs_committed)),
+        plan::count(crashes),
+        plan::duration(l.started.elapsed().as_secs_f64())
+    )
+}
+
+/// A local run's progress, 0 to 1.
+pub fn progress(l: &LocalRun) -> f64 {
+    match &l.status {
+        Some(s) if s.runs_total > 0 => (s.runs_done as f64 / s.runs_total as f64).clamp(0.0, 1.0),
+        _ => 0.0,
+    }
+}
+
+fn progress_bar(commands: &mut Commands, body: Entity, fraction: f64) {
+    let track = child(
+        commands,
+        body,
+        bsn! {
+            Node {
+                width: percent(100),
+                height: px(6),
+                border_radius: {BorderRadius::all(px(3))},
+            }
+            Background(token::BORDER)
+        },
+    );
+    let width = percent((fraction * 100.0) as f32);
+    let fill = child(
+        commands,
+        track,
+        bsn! {
+            Node {
+                width: {width},
+                height: percent(100),
+                border_radius: {BorderRadius::all(px(3))},
+            }
+            Background(token::ACCENT)
+        },
+    );
+    commands.entity(fill).insert(RunBar);
+}
+
+fn shown_path(p: &std::path::Path, ws: Option<&Workspace>) -> String {
+    ws.filter(|w| p.starts_with(&w.root))
+        .map_or(p.display().to_string(), |w| plan::relative(&w.root, p))
+}
+
+fn run_here(commands: &mut Commands, body: Entity, s: &SetupState, ws: Option<&Workspace>) {
+    if let Some(l) = &s.local {
+        child(commands, body, heading(format!("Running {} here", l.id)));
+        let t = child(commands, body, mono(progress_text(l)));
+        commands.entity(t).insert(RunLive);
+        progress_bar(commands, body, progress(l));
+        if l.out.is_none() {
+            child(
+                commands,
+                body,
+                muted(
+                    "No progress until it ends: this sim_hpc does not say where its heartbeat is",
+                ),
+            );
+        }
+        let label = if l.stops == 0 { "Stop" } else { "Stop now" };
+        action(commands, body, button(label), setup(SetupEdit::StopRun));
+        child(
+            commands,
+            body,
+            muted(if l.stops == 0 {
+                "Stop abandons the runs in flight and commits the finished ones; Resume here runs the rest."
+            } else {
+                "Stopping: the finished runs are being committed. Stop now ends it at once."
+            }),
+        );
+        child(
+            commands,
+            body,
+            muted(format!("Log: {}", shown_path(&l.log_file, ws))),
+        );
+        return;
+    }
+    if let Some((_, toml, _, _)) = s.runnable() {
+        action(
+            commands,
+            body,
+            primary_button("Run here"),
+            setup(SetupEdit::RunHere),
+        );
+        child(
+            commands,
+            body,
+            muted(format!(
+                "Runs {} with sim_hpc --local on this machine; it goes on if the studio closes, and the Launcher shows its progress.",
+                shown_path(&toml, ws)
+            )),
+        );
+    }
+    if let Some(f) = &s.finished {
+        finished(commands, body, f, ws);
+    }
+}
+
+fn finished(commands: &mut Commands, body: Entity, f: &Finished, ws: Option<&Workspace>) {
+    child(commands, body, heading(format!("Ran {} here", f.id)));
+    match &f.report {
+        Ok(r) => {
+            let total = r.committed_runs + r.missing_runs;
+            let (status, what) = if r.ok {
+                (Status::Pass, "Done".to_owned())
+            } else if r.resumable() {
+                (Status::Warning, "Stopped".to_owned())
+            } else {
+                (Status::Fail, format!("Ended with exit {}", r.exit))
+            };
+            child(
+                commands,
+                body,
+                status_text(
+                    status,
+                    format!(
+                        "{what}: {} of {} runs committed in {} on {} threads (attempt {})",
+                        plan::count(r.committed_runs),
+                        plan::count(total),
+                        plan::duration(f.wall.as_secs_f64()),
+                        r.threads,
+                        r.attempt
+                    ),
+                ),
+            );
+            child(
+                commands,
+                body,
+                mono(format!(
+                    "{} ran, {} crashed ({} dumps kept), {} setup errors, {} parts",
+                    plan::count(r.runs),
+                    plan::count(r.crashes),
+                    r.crash_dumps,
+                    plan::count(r.setup_errors),
+                    r.parts
+                )),
+            );
+            for e in [&r.error, &r.io_error].into_iter().flatten() {
+                child(commands, body, status_text(Status::Fail, e.clone()));
+            }
+            if r.resumable() {
+                action(
+                    commands,
+                    body,
+                    primary_button("Resume here"),
+                    setup(SetupEdit::ResumeHere),
+                );
+            }
+            if r.committed_runs > 0
+                && let Some(out) = f.out_dir()
+            {
+                action(
+                    commands,
+                    body,
+                    button("Replay runs"),
+                    StudioCommand::OpenRuns(out),
+                );
+            }
+        }
+        Err(e) => {
+            child(
+                commands,
+                body,
+                status_text(Status::Fail, format!("Not run: {e}")),
+            );
+        }
+    }
+    if let Some(out) = f.out_dir() {
+        child(
+            commands,
+            body,
+            muted(format!(
+                "Output: {} (listed under recent campaigns on the Launcher)",
+                shown_path(&out, ws)
+            )),
+        );
+    }
+    child(
+        commands,
+        body,
+        muted(format!("Report: {}", shown_path(&f.report_file, ws))),
+    );
+}
+
+/// Rewrite a local run's progress line and bar.
+pub fn live(
+    setup: Res<SetupState>,
+    mut texts: Query<&mut Text, With<RunLive>>,
+    mut bars: Query<&mut Node, With<RunBar>>,
+) {
+    let Some(l) = &setup.local else {
+        return;
+    };
+    let t = progress_text(l);
+    for mut text in &mut texts {
+        if text.0 != t {
+            text.0 = t.clone();
+        }
+    }
+    let w = percent((progress(l) * 100.0) as f32);
+    for mut node in &mut bars {
+        if node.width != w {
+            node.width = w;
         }
     }
 }

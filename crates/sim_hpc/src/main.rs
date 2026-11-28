@@ -1,5 +1,5 @@
 //! `sim_hpc --campaign campaign.toml [--local | --validate-only] [--resume
-//! [--override-crash-policy]] [--deadline UNIX_S] [--threads N] [--json]` (IB-04).
+//! [--override-crash-policy]] [--deadline UNIX_S] [--threads N] [--heartbeat S] [--json]` (IB-04).
 //!
 //! Without `--local` or `--validate-only` it is one rank of an MPI job (`mpiexec -n N sim_hpc
 //! --campaign ...`; needs the `mpi` feature). Exit codes: `0` ok (or nothing left to resume), `2`
@@ -11,7 +11,8 @@
 //! The walltime deadline is `--deadline`, else `SABER_WALLTIME_END`, else `SLURM_JOB_END_TIME`
 //! (Unix seconds); rank 0 stops dispatch `checkpoint.drain_margin_s` before it. The first SIGTERM
 //! or SIGINT abandons in-flight runs and commits what finished; a second one ends the process at
-//! once (exit 128 + signal).
+//! once (exit 128 + signal). `--heartbeat` writes `campaign_status.json` every S seconds instead of
+//! `output.heartbeat_s` (the studio's local runs use 1 s for their progress bar).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,11 +33,12 @@ struct Args {
     mode: Mode,
     deadline: Option<SystemTime>,
     threads: Option<usize>,
+    heartbeat: Option<Duration>,
     json: bool,
 }
 
 const USAGE: &str = "usage: sim_hpc --campaign <campaign.toml> [--local | --validate-only] [--resume [--override-crash-policy]]\n\
-    \x20             [--deadline <unix seconds>] [--threads N] [--json]\n\
+    \x20             [--deadline <unix seconds>] [--threads N] [--heartbeat <seconds>] [--json]\n\
     without --local or --validate-only, run as one rank of an MPI job (mpiexec -n N sim_hpc ...)";
 
 /// Unix seconds as a time.
@@ -68,6 +70,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         mode: Mode::Fresh,
         deadline: None,
         threads: None,
+        heartbeat: None,
         json: false,
     };
     let (mut resume, mut override_policy) = (false, false);
@@ -85,6 +88,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     .filter(|&n| n > 0)
                     .ok_or("--threads needs a positive number")?;
                 out.threads = Some(n);
+            }
+            "--heartbeat" => {
+                let s = it
+                    .next()
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+                    .filter(|s| s.is_finite() && *s > 0.0 && *s <= 86_400.0)
+                    .ok_or("--heartbeat needs seconds, more than 0 and at most a day")?;
+                out.heartbeat = Some(Duration::from_secs_f64(s));
             }
             "--resume" => resume = true,
             "--override-crash-policy" => override_policy = true,
@@ -176,6 +187,7 @@ fn main() -> std::process::ExitCode {
                     "req_set_hash": campaign.requirements.as_ref().map(|r| format!("{:016x}", r.hash())),
                     "param_keys": campaign.manifest.param_keys,
                     "summary_columns": campaign.summary_columns,
+                    "shared_out": campaign.shared_out().ok(),
                     "warnings": campaign.warnings,
                     "attempt": prior.attempt,
                     "committed_runs": prior.committed.len(),
@@ -203,6 +215,7 @@ fn main() -> std::process::ExitCode {
 fn options(args: &Args, prior: Prior, stop: Option<Arc<AtomicBool>>) -> RunOptions {
     RunOptions {
         threads: args.threads,
+        heartbeat: args.heartbeat,
         attempt: prior.attempt,
         prior: Some(prior),
         deadline: args.deadline.or_else(deadline_from_env),
