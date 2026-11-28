@@ -241,6 +241,7 @@ fn materials() -> Vec<MaterialSpec> {
         base_color: [c[0], c[1], c[2], 1.0],
         metallic,
         roughness,
+        ..Default::default()
     };
     vec![
         m("grey", [0.55, 0.56, 0.58], 0.2, 0.55),

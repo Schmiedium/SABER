@@ -1,6 +1,7 @@
-//! `saber-cli model inspect` (step S5-1) and `model import` (S5-2, IB-20): a built-in reports its
-//! size, triangles and nodes and passes; a file the import rules refuse exits 2 with the reason; a
-//! `.gltf` imports into the workspace as one `.glb` with its manifest; usage errors exit 64.
+//! `saber-cli model inspect` (step S5-1), `model import` (S5-2, IB-20) and `model convert` (S5-4):
+//! a built-in reports its size, triangles and nodes and passes; a file the import rules refuse
+//! exits 2 with the reason; a `.gltf` imports into the workspace as one `.glb` with its manifest;
+//! an OBJ converts and imports once its unit and axes are given; usage errors exit 64.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -175,4 +176,155 @@ fn a_gltf_imports_into_the_workspace() {
         out.contains("frame       millimetre, up +Y, forward +Z"),
         "{out}"
     );
+}
+
+/// A 1 m cube in centimetres, z up and x forward, with no materials file.
+const CUBE_OBJ: &str = "\
+o cube
+v 0 0 0
+v 100 0 0
+v 100 100 0
+v 0 100 0
+v 0 0 100
+v 100 0 100
+v 100 100 100
+v 0 100 100
+f 1 4 3 2
+f 5 6 7 8
+f 1 2 6 5
+f 2 3 7 6
+f 3 4 8 7
+f 4 1 5 8
+";
+
+#[test]
+fn an_obj_converts_and_imports_with_its_unit_and_axes() {
+    let dir = std::env::temp_dir().join(format!("saber-cli-obj-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj = dir.join("cube.obj");
+    std::fs::write(&obj, CUBE_OBJ).unwrap();
+    let o = obj.to_str().unwrap();
+
+    // An OBJ has no unit or axes: convert needs all three; import refuses without them.
+    assert_eq!(
+        cli(&["model", "convert", o, "--unit", "cm", "--up", "+z"]).0,
+        64
+    );
+    let (code, out, _) = cli(&[
+        "model",
+        "import",
+        o,
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 2, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["error"]["kind"], "Refused");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no unit or axes"),
+        "{v}"
+    );
+
+    let (code, out, err) = cli(&[
+        "model",
+        "convert",
+        o,
+        "--unit",
+        "cm",
+        "--up",
+        "+z",
+        "--forward",
+        "+x",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let glb = dir.join("cube.glb");
+    assert_eq!(v["out"], glb.display().to_string());
+    assert_eq!(v["triangles"], 12);
+    assert_eq!(
+        v["source_hash"],
+        sim_assets::ContentHash::of(CUBE_OBJ.as_bytes()).to_string()
+    );
+    // In glTF's frame: 1 m along each axis.
+    let report = sim_assets::inspect(&std::fs::read(&glb).unwrap(), None).unwrap();
+    assert!(report.usable());
+    let b = report.bounds.unwrap();
+    for i in 0..3 {
+        assert!((b.max[i] - b.min[i] - 1.0).abs() < 1e-6, "{b:?}");
+    }
+    // Not twice without --replace; as a .gltf beside its .bin.
+    assert_eq!(
+        cli(&[
+            "model",
+            "convert",
+            o,
+            "--unit",
+            "cm",
+            "--up",
+            "+z",
+            "--forward",
+            "+x"
+        ])
+        .0,
+        2
+    );
+    let gltf = dir.join("out.gltf");
+    let (code, _, err) = cli(&[
+        "model",
+        "convert",
+        o,
+        "--unit",
+        "cm",
+        "--up",
+        "+z",
+        "--forward",
+        "+x",
+        "-o",
+        gltf.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.join("out.bin").is_file());
+    let (code, out, _) = cli(&["model", "inspect", gltf.to_str().unwrap(), "--json"]);
+    assert_eq!(code, 0, "{out}");
+    // inspect takes the OBJ itself too.
+    let (code, out, _) = cli(&["model", "inspect", o, "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["triangles"], 12);
+
+    let (code, out, err) = cli(&[
+        "model",
+        "import",
+        o,
+        "--unit",
+        "cm",
+        "--up",
+        "+z",
+        "--forward",
+        "+x",
+        "--workspace",
+        dir.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["id"], "models/cube");
+    let text = std::fs::read_to_string(dir.join("models/cube/model.ron")).unwrap();
+    let m = sim_assets::VisualAssetManifest::from_ron(&text).unwrap();
+    assert!(
+        matches!(
+            &m.source,
+            sim_assets::manifest::FileSource::Converted { format: sim_assets::manifest::SourceFormat::Obj, hash, .. }
+                if *hash == sim_assets::ContentHash::of(CUBE_OBJ.as_bytes())
+        ),
+        "{:?}",
+        m.source
+    );
+    assert!((m.bounds.size().max_element() - 1.0).abs() < 1e-9);
 }

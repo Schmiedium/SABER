@@ -146,7 +146,8 @@ pub fn load_thumbs(
     }
 }
 
-/// A `.glb` or `.gltf` dropped on the window while the Builder shows opens the Import dialog.
+/// A `.glb`, `.gltf` or `.obj` dropped on the window while the Builder shows opens the Import
+/// dialog.
 pub fn drop_files(
     mut drops: MessageReader<FileDragAndDrop>,
     state: Res<State<AppState>>,
@@ -389,6 +390,10 @@ pub fn center(
             "source {} · license {}{}",
             match &m.source {
                 sim_assets::manifest::FileSource::Native => "glTF".to_owned(),
+                sim_assets::manifest::FileSource::Converted {
+                    format: sim_assets::manifest::SourceFormat::Obj,
+                    ..
+                } => "OBJ, converted on import".to_owned(),
                 sim_assets::manifest::FileSource::Converted { format, .. } =>
                     format!("{format:?}, packed on import"),
             },
@@ -493,7 +498,7 @@ fn import_dialog(
             commands,
             body,
             muted(
-                "Type or paste the path of a .glb or .gltf file and press Enter, or drop the file on the window. A .gltf with separate files is packed into one .glb; the original is left untouched.",
+                "Type or paste the path of a .glb, .gltf or .obj file and press Enter, or drop the file on the window. A .gltf with separate files is packed into one .glb, and an OBJ with its MTL materials and textures is converted to one; the original is left untouched.",
             ),
         );
         footer(commands, body, d);
@@ -504,6 +509,15 @@ fn import_dialog(
             commands,
             body,
             muted(format!("(+ {})", c.report.external.join(", "))),
+        );
+    }
+    if c.converted_from.is_some() {
+        child(
+            commands,
+            body,
+            muted(
+                "ℹ An OBJ: converted to glTF and stored as .glb, each object a named node; the manifest records the OBJ's hash. OBJ has no unit or axes, so choose Units, Up and Forward.",
+            ),
         );
     }
     let r = child(commands, body, row());
@@ -572,18 +586,34 @@ fn import_dialog(
             commands,
             r,
             u.short(),
-            s.frame.unit == u,
+            s.chosen.unit && s.frame.unit == u,
             StudioCommand::ImportSet(ImportEdit::Unit(u)),
         );
     }
-    if guess == Some(s.frame.unit) {
-        child(commands, r, muted("ℹ guessed from the size"));
+    match guess {
+        Some(g) if !s.chosen.unit => {
+            child(
+                commands,
+                r,
+                muted(format!("ℹ choose one; the size suggests {}", g.short())),
+            );
+        }
+        Some(g) if g == s.frame.unit => {
+            child(commands, r, muted("ℹ guessed from the size"));
+        }
+        _ => {}
     }
-    for (name, current, make) in [
-        ("Up", s.frame.up, ImportEdit::Up as fn(Axis) -> ImportEdit),
+    for (name, current, chosen, make) in [
+        (
+            "Up",
+            s.frame.up,
+            s.chosen.up,
+            ImportEdit::Up as fn(Axis) -> ImportEdit,
+        ),
         (
             "Forward",
             s.frame.forward,
+            s.chosen.forward,
             ImportEdit::Forward as fn(Axis) -> ImportEdit,
         ),
     ] {
@@ -593,9 +623,12 @@ fn import_dialog(
                 commands,
                 r,
                 a.label(),
-                current == a,
+                chosen && current == a,
                 StudioCommand::ImportSet(make(a)),
             );
+        }
+        if !chosen {
+            child(commands, r, muted("ℹ choose one"));
         }
     }
     let r = row_in(commands, "Origin");

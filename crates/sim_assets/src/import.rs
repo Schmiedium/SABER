@@ -1,7 +1,8 @@
-//! `Assets.Importer` (subsystems §5.10; `sequence-diagrams.md` §2.1): reads a glTF or GLB, applies
-//! the import rules, packs a `.gltf` and its separate files into one `.glb`, works out the manifest
-//! from the chosen unit, axes and origin, and writes `<models>/<slug>/{model.glb, model.ron,
-//! thumb.png}`. The studio's Import dialog and `saber-cli model import` both use it.
+//! `Assets.Importer` (subsystems §5.10; `sequence-diagrams.md` §2.1): reads a glTF or GLB (or an
+//! OBJ, converted first by [`crate::obj`]), applies the import rules, packs a `.gltf` and its
+//! separate files into one `.glb`, works out the manifest from the chosen unit, axes and origin,
+//! and writes `<models>/<slug>/{model.glb, model.ron, thumb.png}`. The studio's Import dialog and
+//! `saber-cli model import` both use it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -103,6 +104,54 @@ pub struct ImportSettings {
     pub license: String,
     /// Credit, when the license asks for it.
     pub attribution: Option<String>,
+    /// Which of unit, up and forward have been chosen: a glTF defines all three, an OBJ none, and
+    /// its import waits until all three are.
+    pub chosen: FrameChosen,
+}
+
+/// Which parts of a file's frame have been chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameChosen {
+    /// The unit.
+    pub unit: bool,
+    /// The up axis.
+    pub up: bool,
+    /// The forward axis.
+    pub forward: bool,
+}
+
+impl FrameChosen {
+    /// All three (a glTF: metres, +Y up, +Z forward).
+    pub const ALL: FrameChosen = FrameChosen {
+        unit: true,
+        up: true,
+        forward: true,
+    };
+
+    /// None (an OBJ).
+    pub const NONE: FrameChosen = FrameChosen {
+        unit: false,
+        up: false,
+        forward: false,
+    };
+
+    /// Whether all three are chosen.
+    pub fn all(self) -> bool {
+        self == Self::ALL
+    }
+
+    /// The names of those not chosen yet.
+    pub fn missing(self) -> Vec<&'static str> {
+        [
+            (self.unit, "Units"),
+            (self.up, "Up"),
+            (self.forward, "Forward"),
+        ]
+        .into_iter()
+        .filter(|(c, _)| !c)
+        .map(|(_, n)| n)
+        .collect()
+    }
 }
 
 /// Why an import failed.
@@ -112,6 +161,8 @@ pub enum ImportError {
     Read(String),
     /// The file is not a glTF 2.0 file.
     Inspect(InspectError),
+    /// The OBJ could not be converted.
+    Convert(String),
     /// The import rules refuse it; each reason has its fix.
     Refused(Vec<String>),
     /// The settings cannot make a manifest.
@@ -127,6 +178,7 @@ impl fmt::Display for ImportError {
         match self {
             ImportError::Read(e) => write!(f, "the file could not be read: {e}"),
             ImportError::Inspect(e) => write!(f, "{e}"),
+            ImportError::Convert(e) => write!(f, "{e}"),
             ImportError::Refused(r) => write!(f, "refused: {}", r.join("; ")),
             ImportError::Invalid(e) => write!(f, "{e}"),
             ImportError::Exists(p) => write!(
@@ -166,12 +218,24 @@ pub struct Candidate {
     pub report: ModelReport,
     /// Its drawn triangles with colours, in the file's units and axes.
     pub facets: Vec<Facet>,
+    /// The original's format and hash when the file was converted on opening (an OBJ): `bytes`
+    /// are then the converted GLB.
+    pub converted_from: Option<(SourceFormat, ContentHash)>,
 }
 
 impl Candidate {
-    /// Read and inspect a `.glb` or `.gltf` (separate files are looked for beside it).
+    /// Read and inspect a `.glb` or `.gltf` (separate files are looked for beside it), or read an
+    /// `.obj` and convert it, with its materials and textures from beside it.
     pub fn open(path: &Path) -> Result<Self, ImportError> {
         let bytes = std::fs::read(path).map_err(|e| ImportError::Read(e.to_string()))?;
+        if crate::obj::is_obj(path) {
+            let c = crate::obj::convert_bytes(&bytes, path.parent(), None)
+                .map_err(ImportError::Convert)?;
+            let mut out = Self::from_bytes(path, c.glb)?;
+            out.report.problems.extend(c.notes);
+            out.converted_from = Some((SourceFormat::Obj, c.source_hash));
+            return Ok(out);
+        }
         Self::from_bytes(path, bytes)
     }
 
@@ -186,11 +250,14 @@ impl Candidate {
             bytes,
             report,
             facets,
+            converted_from: None,
         })
     }
 
     /// The settings to start from: the file's name, the unit its size suggests, glTF's axes
-    /// (+Y up, +Z forward) and the bounds' centre as the reference point.
+    /// (+Y up, +Z forward) and the bounds' centre as the reference point. For an OBJ, which has
+    /// no unit or axes, the same values are only a starting point for the preview: none of the
+    /// three counts as chosen.
     pub fn defaults(&self) -> ImportSettings {
         let name = self
             .path
@@ -212,6 +279,11 @@ impl Candidate {
             origin: OriginChoice::BoundsCentre,
             license: UNSPECIFIED_LICENSE.into(),
             attribution: None,
+            chosen: if self.converted_from.is_some() {
+                FrameChosen::NONE
+            } else {
+                FrameChosen::ALL
+            },
         }
     }
 
@@ -282,10 +354,20 @@ impl Candidate {
                 ),
             ));
         }
+        if !s.chosen.all() {
+            out.push(Problem::new(
+                Severity::Refused,
+                format!(
+                    "An OBJ file has no unit or axes: choose {}.",
+                    s.chosen.missing().join(", ")
+                ),
+            ));
+        }
         if let Some(p) = self
             .report
             .bounds
             .as_ref()
+            .filter(|_| s.chosen.unit)
             .and_then(|b| unit_problem(b, s.frame.unit))
         {
             out.push(p);
@@ -318,7 +400,13 @@ impl Candidate {
             .origin(s)
             .ok_or_else(|| ImportError::Invalid("the axes are on one line".into()))?;
         let hash = ContentHash::of(glb);
-        let source = if glb == self.bytes.as_slice() {
+        let source = if let Some((format, hash)) = &self.converted_from {
+            FileSource::Converted {
+                format: *format,
+                hash: *hash,
+                converter: crate::obj::converter(),
+            }
+        } else if glb == self.bytes.as_slice() {
             FileSource::Native
         } else {
             FileSource::Converted {
@@ -570,7 +658,7 @@ fn chunks(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), String> {
 }
 
 /// An image's media type from its first bytes.
-fn mime(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if bytes.starts_with(&[0xFF, 0xD8]) {
@@ -684,6 +772,24 @@ pub fn pack(bytes: &[u8], folder: Option<&Path>) -> Result<Vec<u8>, String> {
     }
     let text = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
     Ok(glb_container(&text, &out))
+}
+
+/// A GLB as a `.gltf` text and the `.bin` it names (`bin_name`, beside it): images stay in the
+/// binary buffer, so the pair is complete on its own.
+pub fn unpack(glb: &[u8], bin_name: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (json, bin) = chunks(glb)?;
+    let mut doc: Value =
+        serde_json::from_slice(json).map_err(|e| format!("the glTF JSON does not parse: {e}"))?;
+    let bin = bin.unwrap_or_default().to_vec();
+    if let Some(b) = doc
+        .get_mut("buffers")
+        .and_then(Value::as_array_mut)
+        .and_then(|a| a.first_mut())
+    {
+        b["uri"] = json!(bin_name.replace('%', "%25").replace(' ', "%20"));
+    }
+    let text = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
+    Ok((text, bin))
 }
 
 /// Which file a glTF container is, by its first bytes.

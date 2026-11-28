@@ -12,22 +12,27 @@
 //! bindings' defaults, so setup errors show before a campaign is submitted. A requirement set is
 //! checked on its own, and with a scenario also compiled against that scenario's Tick-0 World
 //! (signals, events, custom checks). `--emit-req-json` prints the compiled JSON form Python reads
-//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector and S5-2 the importer
-//! (`sim_assets`, IB-20):
+//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector, S5-2 the importer and S5-4
+//! the OBJ converter (`sim_assets`, IB-20):
 //!
 //! ```text
-//! saber-cli model inspect <model.glb | model.gltf> [--json]
-//! saber-cli model import <model.glb | model.gltf> [--name <name>] [--unit <unit>] [--up <axis>]
-//!     [--forward <axis>] [--origin file|centre|bottom|x,y,z] [--license <text>]
+//! saber-cli model inspect <model.glb | model.gltf | model.obj> [--json]
+//! saber-cli model import <model.glb | model.gltf | model.obj> [--name <name>] [--unit <unit>]
+//!     [--up <axis>] [--forward <axis>] [--origin file|centre|bottom|x,y,z] [--license <text>]
 //!     [--attribution <text>] [--workspace <dir> | --library <dir>] [--replace] [--json]
+//! saber-cli model convert <model.obj> --unit <unit> --up <axis> --forward <axis>
+//!     [-o <out.glb | out.gltf>] [--replace] [--json]
 //! ```
 //!
 //! `inspect` reports a glTF file's size, bounds, triangles, nodes and extensions and the import
-//! rules' findings, without rendering it. `import` does what the studio's Import dialog does:
-//! packs a `.gltf` and its files into one `.glb`, writes `models/<slug>/{model.glb, model.ron,
-//! thumb.png}` in the workspace (or `<slug>/` in a library root) and prints the manifest's id and
-//! hash. Unit, axes and origin default as the dialog's do: the unit the size suggests, glTF's +Y up
-//! and +Z forward, the bounds' centre. `convert` (OBJ) is the stretch step S5-4.
+//! rules' findings, without rendering it (an OBJ is converted first). `import` does what the
+//! studio's Import dialog does: packs a `.gltf` and its files into one `.glb` (or converts an OBJ),
+//! writes `models/<slug>/{model.glb, model.ron, thumb.png}` in the workspace (or `<slug>/` in a
+//! library root) and prints the manifest's id and hash. Unit, axes and origin default as the
+//! dialog's do: the unit the size suggests, glTF's +Y up and +Z forward, the bounds' centre; an OBJ
+//! has no unit or axes, so it needs `--unit`, `--up` and `--forward`. `convert` turns an OBJ and its
+//! MTL materials and textures into a stand-alone `.glb` (or `.gltf` beside a `.bin`) in glTF's frame
+//! (metres, +Y up, +Z forward), the given unit and axes baked into a root node.
 //!
 //! Exit codes follow IB-04: `0` valid, `2` invalid (or unreadable), `64` usage.
 
@@ -41,11 +46,14 @@ use sim_verify::{ReqError, RequirementSet, VerifyState};
 const USAGE: &str = "usage:
   saber-cli validate <scenario.scn.ron> [--req <set.req.ron>] [--json]
   saber-cli validate <set.req.ron> [--scenario <scenario.scn.ron>] [--json | --emit-req-json]
-  saber-cli model inspect <model.glb | model.gltf> [--json]
-  saber-cli model import <model.glb | model.gltf> [--name <name>] [--unit m|cm|mm|in|ft]
-      [--up <axis>] [--forward <axis>] [--origin file|centre|bottom|x,y,z] [--license <text>]
-      [--attribution <text>] [--workspace <dir> | --library <dir>] [--replace] [--json]
-  (axes: +x, -x, +y, -y, +z, -z)";
+  saber-cli model inspect <model.glb | model.gltf | model.obj> [--json]
+  saber-cli model import <model.glb | model.gltf | model.obj> [--name <name>]
+      [--unit m|cm|mm|in|ft] [--up <axis>] [--forward <axis>] [--origin file|centre|bottom|x,y,z]
+      [--license <text>] [--attribution <text>] [--workspace <dir> | --library <dir>] [--replace]
+      [--json]
+  saber-cli model convert <model.obj> --unit m|cm|mm|in|ft --up <axis> --forward <axis>
+      [-o <out.glb | out.gltf>] [--replace] [--json]
+  (axes: +x, -x, +y, -y, +z, -z; an OBJ needs --unit, --up and --forward to be imported)";
 
 /// Parsed command line.
 #[derive(Default)]
@@ -361,11 +369,12 @@ fn validate_req(path: &str, scenario: Option<&str>, json: bool, emit: bool) -> R
     Ok(())
 }
 
-/// `saber-cli model inspect|import`.
+/// `saber-cli model inspect|import|convert`.
 fn model_command(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("inspect") => model_inspect(args),
         Some("import") => model_import(&args[1..]),
+        Some("convert") => model_convert(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(64)
@@ -451,10 +460,14 @@ fn model_import(args: &[String]) -> ExitCode {
     let candidate = match Candidate::open(std::path::Path::new(file)) {
         Ok(c) => c,
         Err(ImportError::Read(e)) => return fail("Io", e),
+        Err(ImportError::Convert(e)) => return fail("NotObj", e),
         Err(e) => return fail("NotGltf", e.to_string()),
     };
     let mut s = candidate.defaults();
     let guessed = unit.is_none();
+    s.chosen.unit |= unit.is_some();
+    s.chosen.up |= up.is_some();
+    s.chosen.forward |= forward.is_some();
     if let Some(v) = flag("--name") {
         s.name = v.to_owned();
     }
@@ -534,6 +547,152 @@ fn model_import(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `saber-cli model convert <file.obj> --unit U --up A --forward A [-o out] [--replace] [--json]`:
+/// exit 0 when the file was written, 2 when the OBJ cannot be converted or the output exists, 64
+/// on a usage error (the unit and both axes are required: an OBJ has none).
+fn model_convert(args: &[String]) -> ExitCode {
+    use sim_assets::ModelFrame;
+    use sim_assets::import::{parse_axis, parse_unit};
+
+    let usage = || {
+        eprintln!("{USAGE}");
+        ExitCode::from(64)
+    };
+    let mut file = None;
+    let (mut json, mut replace) = (false, false);
+    let (mut unit, mut up, mut forward, mut out) = (None, None, None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--replace" => replace = true,
+            "--unit" | "--up" | "--forward" | "-o" => {
+                let Some(v) = it.next() else { return usage() };
+                match a.as_str() {
+                    "--unit" => unit = Some(v.as_str()),
+                    "--up" => up = Some(v.as_str()),
+                    "--forward" => forward = Some(v.as_str()),
+                    _ => out = Some(v.as_str()),
+                }
+            }
+            s if s.starts_with('-') => return usage(),
+            s => {
+                if file.replace(s).is_some() {
+                    return usage();
+                }
+            }
+        }
+    }
+    let (Some(file), Some(unit), Some(up), Some(forward)) = (
+        file,
+        unit.and_then(parse_unit),
+        up.and_then(parse_axis),
+        forward.and_then(parse_axis),
+    ) else {
+        return usage();
+    };
+    let path = std::path::Path::new(file);
+    let out = out.map_or_else(|| path.with_extension("glb"), std::path::PathBuf::from);
+    let gltf = out
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
+    if !gltf
+        && !out
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("glb"))
+    {
+        return usage();
+    }
+    let fail = |kind: &str, message: String| {
+        if json {
+            let o = serde_json::json!({
+                "ok": false,
+                "file": file,
+                "error": { "kind": kind, "message": message },
+            });
+            println!("{o}");
+        } else {
+            eprintln!("{file}: {message}");
+        }
+        ExitCode::from(2)
+    };
+    if !sim_assets::obj::is_obj(path) {
+        return fail(
+            "NotObj",
+            "only OBJ files are converted; import glTF and GLB as they are".into(),
+        );
+    }
+    let frame = ModelFrame { unit, up, forward };
+    if frame.rotation().is_none() {
+        return fail(
+            "Refused",
+            format!(
+                "up {} and forward {} are on one line",
+                up.label(),
+                forward.label()
+            ),
+        );
+    }
+    let bin = out.with_extension("bin");
+    if !replace && (out.exists() || (gltf && bin.exists())) {
+        return fail(
+            "Exists",
+            format!("{} already exists; pass --replace or -o", out.display()),
+        );
+    }
+    let converted = match sim_assets::obj::convert(path, Some(&frame)) {
+        Ok(c) => c,
+        Err(e) => return fail("NotObj", e),
+    };
+    let written = if gltf {
+        let name = bin
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        sim_assets::import::unpack(&converted.glb, &name).and_then(|(text, data)| {
+            std::fs::write(&bin, data)
+                .and_then(|()| std::fs::write(&out, text))
+                .map_err(|e| e.to_string())
+        })
+    } else {
+        std::fs::write(&out, &converted.glb).map_err(|e| e.to_string())
+    };
+    if let Err(e) = written {
+        return fail("Io", format!("{}: {e}", out.display()));
+    }
+    if json {
+        let o = serde_json::json!({
+            "ok": true,
+            "file": file,
+            "out": out.display().to_string(),
+            "bin": gltf.then(|| bin.display().to_string()),
+            "source_hash": converted.source_hash.to_string(),
+            "content_hash": sim_assets::ContentHash::of(&converted.glb).to_string(),
+            "triangles": converted.triangles,
+            "converter": sim_assets::obj::converter(),
+            "problems": converted.notes.iter().map(|p| serde_json::json!({
+                "severity": severity_name(p.severity),
+                "message": p.message,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{o}");
+    } else {
+        println!("{file}: converted to {}", out.display());
+        println!("  source      {}", converted.source_hash);
+        println!(
+            "  frame       {}, up {}, forward {} baked in (glTF: metres, +Y up, +Z forward)",
+            unit.name(),
+            up.label(),
+            forward.label()
+        );
+        println!("  triangles   {}", converted.triangles);
+        for p in &converted.notes {
+            println!("  {:8}    {}", severity_name(p.severity), p.message);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// `saber-cli model inspect <file> [--json]`: exit 0 when the file can be imported, 2 when a rule
 /// refuses it or it is not glTF 2.0, 64 on a usage error.
 fn model_inspect(args: &[String]) -> ExitCode {
@@ -563,14 +722,25 @@ fn model_inspect(args: &[String]) -> ExitCode {
         }
         ExitCode::from(2)
     };
-    let bytes = match std::fs::read(path) {
+    let mut bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return fail("Io", e.to_string()),
     };
-    let report = match inspect(&bytes, path.parent()) {
+    let mut notes = Vec::new();
+    if sim_assets::obj::is_obj(path) {
+        match sim_assets::obj::convert_bytes(&bytes, path.parent(), None) {
+            Ok(c) => {
+                bytes = c.glb;
+                notes = c.notes;
+            }
+            Err(e) => return fail("NotObj", e),
+        }
+    }
+    let mut report = match inspect(&bytes, path.parent()) {
         Ok(r) => r,
         Err(e) => return fail("NotGltf", e.to_string()),
     };
+    report.problems.extend(notes);
     let severity = severity_name;
     let unit = report.bounds.as_ref().map(guess_unit);
     if json {

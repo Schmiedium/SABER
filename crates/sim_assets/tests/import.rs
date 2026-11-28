@@ -43,6 +43,7 @@ fn cuboid(lo: [f32; 3], hi: [f32; 3]) -> MeshData {
         positions,
         normals,
         indices,
+        uvs: Vec::new(),
     }
 }
 
@@ -52,6 +53,7 @@ fn materials() -> Vec<MaterialSpec> {
         base_color: [0.9, 0.4, 0.1, 1.0],
         metallic: 0.0,
         roughness: 0.8,
+        ..Default::default()
     }]
 }
 

@@ -242,6 +242,8 @@ sequenceDiagram
 
 As built (step S5-2): the flow above for `.gltf` and `.glb`, with `Candidate::open` as `inspect(path)` and `Candidate::commit` as `commit` (subsystems §5.10). The preview and `thumb.png` are both drawn on the CPU by `sim_assets::thumb`, so the importer writes the thumbnail itself and `saber-cli model import` writes one too. The dialog opens from the 3D Models tab's **+ Import model…** or a file dropped on the window; origin is file origin, bounding-box centre or bottom centre (a picked point only through `--origin x,y,z`); the destination is the workspace's `models/` or a library root. After `commit` the studio reloads the catalogue (there is no `register` call) and selects the new model. OBJ waits for S5-4.
 
+As built (step S5-4): an `.obj` takes the same flow. `Candidate::open` converts it first (`sim_assets::obj`, with its MTL and textures from its folder), so `inspect` and the preview see the converted GLB; the dialog's Units, Up and Forward start unchosen and `commit` is refused until all three are chosen; the manifest records the OBJ's hash as `source: Converted(format: Obj, …)`. A missing or out-of-folder materials file or texture is a warning, and the file is left out.
+
 ### 2.2 Linking a model to an entity and deriving collision
 
 Linking writes only to the scenario's `visual:` section. Deriving collision is a separate, explicit step that writes a `CollisionShape` into the sim section and therefore changes `scene_hash` (IB-19, IB-20).

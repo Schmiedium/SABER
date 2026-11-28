@@ -278,6 +278,7 @@ fn materials() -> Vec<MaterialSpec> {
         base_color: [1.0, 0.5, 0.0, 1.0],
         metallic: 0.0,
         roughness: 1.0,
+        ..Default::default()
     }]
 }
 
@@ -287,6 +288,7 @@ fn box_node() -> NodeSpec {
         normals: vec![[0.0, 0.0, 1.0]; 3],
         positions,
         indices: vec![0, 1, 2],
+        uvs: Vec::new(),
     };
     NodeSpec::new("tri").with(mesh, 0)
 }

@@ -1674,3 +1674,76 @@ fn the_builder_derives_aligns_and_shows_collision() {
     press(&mut app, "Stop");
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }
+
+/// Importing an OBJ (§7.11.3, step S5-4): the dialog converts it, says so, and keeps Import
+/// refused until Units, Up and Forward are chosen; the model is then written as a `.glb` whose
+/// manifest records the OBJ's hash.
+#[test]
+fn the_import_dialog_converts_an_obj_once_its_frame_is_chosen() {
+    use sim_assets::{Axis, Unit};
+    use sim_studio::library::ImportEdit;
+
+    let dir = scratch("obj");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let obj = dir.join("src/crate.obj");
+    std::fs::write(
+        &obj,
+        "o crate\nv 0 0 0\nv 100 0 0\nv 100 100 0\nv 0 100 0\nf 1 2 3 4\nf 4 3 2 1\n",
+    )
+    .unwrap();
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    press(&mut app, "3D Models tab");
+    press(&mut app, "+ Import model…");
+    let input = labelled(&mut app, "Import file path");
+    submit(&mut app, input, obj.to_str().unwrap());
+    let texts = all_texts(&mut app);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.starts_with("ℹ An OBJ: converted to glTF")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t
+                == "✖ Cannot import: An OBJ file has no unit or axes: choose Units, Up, Forward."),
+        "{texts:?}"
+    );
+    press(&mut app, "cm");
+    for edit in [ImportEdit::Up(Axis::PosZ), ImportEdit::Forward(Axis::PosX)] {
+        app.world_mut()
+            .write_message(StudioCommand::ImportSet(edit));
+        app.update();
+    }
+    for _ in 0..2 {
+        app.update();
+    }
+    {
+        let panel = app.world().resource::<ModelPanel>();
+        let s = panel.import.as_ref().unwrap().settings.as_ref().unwrap();
+        assert!(s.chosen.all());
+        assert_eq!(s.frame.unit, Unit::Centimetre);
+    }
+    press(&mut app, "Import");
+    let text = std::fs::read_to_string(ws.root.join("models/crate/model.ron")).unwrap();
+    let m = sim_assets::VisualAssetManifest::from_ron(&text).unwrap();
+    assert!(
+        matches!(
+            m.source,
+            sim_assets::manifest::FileSource::Converted {
+                format: sim_assets::manifest::SourceFormat::Obj,
+                ..
+            }
+        ),
+        "{:?}",
+        m.source
+    );
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
