@@ -1,7 +1,8 @@
-//! `saber-cli model inspect` (step S5-1), `model import` (S5-2, IB-20) and `model convert` (S5-4):
-//! a built-in reports its size, triangles and nodes and passes; a file the import rules refuse
-//! exits 2 with the reason; a `.gltf` imports into the workspace as one `.glb` with its manifest;
-//! an OBJ converts and imports once its unit and axes are given; usage errors exit 64.
+//! `saber-cli model inspect` (step S5-1), `model import` (S5-2, IB-20), `model convert` (S5-4)
+//! and `model lod` (S5-5): a built-in reports its size, triangles and nodes and passes; a file the
+//! import rules refuse exits 2 with the reason; a `.gltf` imports into the workspace as one `.glb`
+//! with its manifest; an OBJ converts and imports once its unit and axes are given; LOD files are
+//! added, listed and removed; usage errors exit 64.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -327,4 +328,88 @@ fn an_obj_converts_and_imports_with_its_unit_and_axes() {
         m.source
     );
     assert!((m.bounds.size().max_element() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn lod_files_are_added_listed_and_removed() {
+    let dir = std::env::temp_dir().join(format!("saber-cli-lod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let hex = builtin("rotorcraft/hex_x");
+    let (code, out, err) = cli(&[
+        "model",
+        "import",
+        hex.to_str().unwrap(),
+        "--name",
+        "Hex",
+        "--unit",
+        "m",
+        "--up",
+        "-z",
+        "--forward",
+        "+x",
+        "--workspace",
+        ws.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let model = ws.join("models/hex");
+    let m = model.to_str().unwrap();
+    let quad = builtin("rotorcraft/quad_x");
+    let q = quad.to_str().unwrap();
+
+    let (code, out, err) = cli(&["model", "lod", "add", m, q, "--below", "150", "--json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["added"], "lod1.glb");
+    assert_eq!(v["lods"][0]["below_px"], 150.0);
+    assert!(
+        v["lods"][0]["content_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("blake3:")
+    );
+    assert!(model.join("lod1.glb").is_file());
+
+    // The same size again, or one the far marker covers: refused, exit 2.
+    for px in ["150", "3"] {
+        let (code, out, _) = cli(&["model", "lod", "add", m, q, "--below", px, "--json"]);
+        assert_eq!(code, 2, "{px}: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"]["kind"], "Refused", "{px}");
+    }
+    let (code, out, err) = cli(&["model", "lod", "list", m]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("lod1.glb") && out.contains("under 150 px"),
+        "{out}"
+    );
+
+    let (code, out, err) = cli(&["model", "lod", "remove", m, "lod1.glb", "--json"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["removed"], "lod1.glb");
+    assert_eq!(v["lods"].as_array().unwrap().len(), 0);
+    assert!(!model.join("lod1.glb").exists());
+    let (code, _, err) = cli(&["model", "lod", "remove", m, "lod1.glb"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("no LOD files"), "{err}");
+
+    // Usage: a size is needed to add and not taken elsewhere; a size must be a number.
+    for bad in [
+        &["model", "lod", "add", m, q][..],
+        &["model", "lod", "add", m, q, "--below", "big"],
+        &["model", "lod", "list", m, "--below", "20"],
+        &["model", "lod", "remove", m],
+        &["model", "lod"],
+    ] {
+        assert_eq!(cli(bad).0, 64, "{bad:?}");
+    }
+    let (code, _, _) = cli(&[
+        "model",
+        "lod",
+        "list",
+        dir.join("nothing").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2);
 }

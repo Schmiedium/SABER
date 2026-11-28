@@ -45,7 +45,7 @@ pub struct VisualAssetRef {
 }
 
 /// An optional hash written as a bare string, as the design's examples write it.
-mod bare_hash {
+pub(crate) mod bare_hash {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     use crate::hash::ContentHash;

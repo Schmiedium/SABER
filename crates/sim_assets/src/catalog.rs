@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::builtin;
 use crate::hash::ContentHash;
-use crate::manifest::{MANIFEST_FILE, VisualAssetManifest};
+use crate::manifest::{Lod, MANIFEST_FILE, VisualAssetManifest};
 use crate::thumb::THUMB_FILE;
 use crate::visual::{AssetSource, VisualAssetRef, VisualSection};
 
@@ -95,6 +95,26 @@ impl CatalogEntry {
     }
 }
 
+impl CatalogEntry {
+    /// An LOD file's bytes and whether they still match the hash recorded when it was added
+    /// (always, for a hand-written entry without one). Built-ins in this binary have none.
+    pub fn load_lod(&self, lod: &Lod) -> std::io::Result<Loaded> {
+        let Location::Dir(dir) = &self.location else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "a model inside the binary has no LOD files",
+            ));
+        };
+        let bytes = std::fs::read(dir.join(&lod.file))?;
+        let hash = ContentHash::of(&bytes);
+        Ok(Loaded {
+            matches_manifest: lod.content_hash.is_none_or(|h| h == hash),
+            hash,
+            bytes: Cow::Owned(bytes),
+        })
+    }
+}
+
 /// A model file read from the catalogue.
 #[derive(Clone, Debug)]
 pub struct Loaded {
@@ -151,6 +171,8 @@ pub struct Catalog {
     pub skipped: Vec<Skipped>,
     /// Models whose file no longer matches their manifest ([`Catalog::verify_files`]).
     stale: Vec<(AssetSource, String)>,
+    /// LOD files that changed since they were added or are missing, by model.
+    stale_lods: Vec<(AssetSource, String, String)>,
 }
 
 impl Catalog {
@@ -252,16 +274,38 @@ impl Catalog {
         }
     }
 
-    /// Hash every model file on disk once, noting those that changed since they were imported
-    /// (or cannot be read), so the Library and lint can say so without reading files again.
+    /// Hash every model file and LOD file on disk once, noting those that changed since they
+    /// were imported or added (or cannot be read), so the Library and lint can say so without
+    /// reading files again.
     pub fn verify_files(&mut self) {
-        self.stale = self
-            .entries
-            .iter()
-            .filter(|e| matches!(e.location, Location::Dir(_)))
+        let on_disk = || {
+            self.entries
+                .iter()
+                .filter(|e| matches!(e.location, Location::Dir(_)))
+        };
+        self.stale = on_disk()
             .filter(|e| e.load().map_or(true, |l| !l.matches_manifest))
             .map(|e| (e.source.clone(), e.manifest.id.clone()))
             .collect();
+        self.stale_lods = on_disk()
+            .flat_map(|e| {
+                e.manifest
+                    .lods
+                    .iter()
+                    .filter(|l| e.load_lod(l).map_or(true, |b| !b.matches_manifest))
+                    .map(|l| (e.source.clone(), e.manifest.id.clone(), l.file.clone()))
+            })
+            .collect();
+    }
+
+    /// A model's LOD files that changed since they were added or are missing, as of
+    /// [`Catalog::verify_files`].
+    pub fn lods_changed(&self, entry: &CatalogEntry) -> Vec<&str> {
+        self.stale_lods
+            .iter()
+            .filter(|(s, id, _)| *s == entry.source && *id == entry.manifest.id)
+            .map(|(_, _, f)| f.as_str())
+            .collect()
     }
 
     /// Whether a model's file changed since it was imported, as of [`Catalog::verify_files`].

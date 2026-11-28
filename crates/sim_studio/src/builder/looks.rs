@@ -512,6 +512,15 @@ fn notes(catalog: &Catalog, entry: &CatalogEntry, notices: &[Notice]) -> Vec<Str
     if catalog.file_changed(entry) {
         out.push("its file changed since it was imported; Re-import it in the Library".into());
     }
+    let lods = catalog.lods_changed(entry);
+    if !lods.is_empty() {
+        out.push(format!(
+            "its LOD file{} {} changed or {} missing; Re-import it in the Library",
+            if lods.len() == 1 { "" } else { "s" },
+            lods.join(", "),
+            if lods.len() == 1 { "is" } else { "are" },
+        ));
+    }
     out
 }
 

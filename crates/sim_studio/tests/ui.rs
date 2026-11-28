@@ -32,14 +32,14 @@ use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
 use sim_studio::ui::library::{LookFieldOf, Thumbs};
-use sim_studio::ui::models::{ModelRoot, SceneLooks};
+use sim_studio::ui::models::{ModelLevel, ModelRoot, SceneLooks};
 use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
 use sim_studio::ui::replay::{ReplayLive, ReplayTrack, TrackKind};
 use sim_studio::ui::requirements::ReqFieldOf;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::ui::viewport::{
-    BodyVisual, GridLabelSlot, HudPanel, HudText, SceneShapes, VIEW_LAYER, ViewportCamera,
-    ViewportView,
+    BodyVisual, FAR_MARKER_PX, FarLabel, FarMarker, GridLabelSlot, HudPanel, HudText, SceneShapes,
+    VIEW_H, VIEW_LAYER, ViewPointer, ViewportCamera, ViewportView,
 };
 use sim_studio::viewport::{FocusMode, FocusPhase, ViewSource, ViewportState};
 use sim_studio::workspace::{Pack, Workspace};
@@ -1296,7 +1296,7 @@ fn bodies_are_drawn_with_their_models() {
             .world_mut()
             .query::<(&ModelRoot, &Transform, &Visibility)>();
         let (r, t, v) = q.single(app.world()).unwrap();
-        ((*r, *t), *v)
+        ((r.clone(), *t), *v)
     };
     let body = preview(&app).run.as_ref().unwrap().bodies()[0];
     let v = view(&app);
@@ -1310,7 +1310,7 @@ fn bodies_are_drawn_with_their_models() {
     );
     assert_eq!(visibility, Visibility::Inherited, "near enough to draw");
     // At 30 m the drone is about a dozen pixels: model and marker both show. Up close the model
-    // hides the marker; far out the model goes and the marker stays.
+    // hides the marker; far out the model goes and the far marker takes the sphere's place.
     let marker = |app: &mut App| {
         let mut q = app.world_mut().query::<(&BodyVisual, &Transform)>();
         q.iter(app.world()).find(|(b, _)| b.0 == 1).unwrap().1.scale
@@ -1320,8 +1320,11 @@ fn bodies_are_drawn_with_their_models() {
         *q.single(app.world()).unwrap().1 == Visibility::Inherited
     };
     assert_ne!(marker(&mut app), Vec3::ZERO);
-    for (distance, model, marker_shown) in [(2.0, true, false), (5_000.0, false, true)] {
+    for (distance, model, marker_shown, far_shown) in
+        [(2.0, true, false, false), (5_000.0, false, false, true)]
+    {
         app.world_mut().resource_mut::<ViewportState>().rig.distance = distance;
+        app.update();
         app.update();
         assert_eq!(model_shown(&mut app), model, "at {distance} m");
         assert_eq!(
@@ -1329,10 +1332,223 @@ fn bodies_are_drawn_with_their_models() {
             marker_shown,
             "at {distance} m"
         );
+        assert_eq!(
+            far_markers(&mut app),
+            usize::from(far_shown),
+            "at {distance} m"
+        );
     }
 
     press(&mut app, "Stop");
     assert_eq!(count::<ModelRoot>(&mut app), 0);
+}
+
+/// The far markers drawn.
+fn far_markers(app: &mut App) -> usize {
+    let mut q = app.world_mut().query::<(&FarMarker, &Visibility)>();
+    q.iter(app.world())
+        .filter(|(_, v)| **v == Visibility::Inherited)
+        .count()
+}
+
+/// A model's LOD files and the far marker (step S5-5, §7.11.6): the model's own file up close,
+/// each LOD file below its size, then a constant-size diamond in place of the sphere, with the
+/// focused body's name beside it. A click on a body's marker focuses the camera on it; a drag
+/// does not.
+#[test]
+fn models_switch_to_their_lod_files_then_to_the_far_marker() {
+    use std::time::Duration;
+
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{Pointer, PointerClick};
+    use bevy::picking::pointer::{Location, PointerButton, PointerId};
+    use bevy::ui::UiGlobalTransform;
+    use sim_studio::viewport::{ViewProjection, pixel_size};
+
+    let dir = scratch("lods");
+    let ws = Workspace::create(&dir.join("ws"), "ws", Pack::Multirotor).unwrap();
+    let builtin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim_assets/builtin");
+    let drone = ws.root.join("models/drone");
+    std::fs::create_dir_all(&drone).unwrap();
+    for f in ["model.glb", "model.ron"] {
+        std::fs::copy(builtin.join("rotorcraft/hex_x").join(f), drone.join(f)).unwrap();
+    }
+    sim_assets::import::add_lod(&drone, &builtin.join("rotorcraft/quad_x/model.glb"), 150.0)
+        .unwrap();
+    sim_assets::import::add_lod(&drone, &builtin.join("primitive/box/model.glb"), 40.0).unwrap();
+    let display = sim_assets::VisualAssetManifest::from_ron(
+        &std::fs::read_to_string(drone.join("model.ron")).unwrap(),
+    )
+    .unwrap()
+    .display_name;
+    let scenario = ws.root.join(ws.file.open_scenario.as_ref().unwrap());
+    let text = std::fs::read_to_string(&scenario).unwrap().replacen(
+        "    config: (",
+        r#"    visual: (
+        schema_version: "1.0.0",
+        models: { 1: (asset: (source: Workspace, id: "models/drone")) },
+    ),
+    config: ("#,
+        1,
+    );
+    std::fs::write(&scenario, text).unwrap();
+
+    let mut app = headless(&dir.join("recent.ron"));
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..4 {
+        app.update();
+    }
+    press(&mut app, "Preview (F5)");
+    press(&mut app, "Pause");
+    let look = app.world().resource::<SceneLooks>().looks[0].clone();
+    let files: Vec<(&str, f64)> = look
+        .lods
+        .iter()
+        .map(|l| (l.file.as_str(), l.below_px))
+        .collect();
+    assert_eq!(files, [("lod1.glb", 150.0), ("lod2.glb", 40.0)]);
+    for _ in 0..600 {
+        app.update();
+        if count::<ModelRoot>(&mut app) == 1 {
+            break;
+        }
+    }
+    let root = {
+        let mut q = app.world_mut().query::<&ModelRoot>();
+        q.single(app.world()).unwrap().clone()
+    };
+    assert_eq!(root.levels.len(), 3, "the model and its two LOD files");
+    assert_eq!(root.below_px, [150.0, 40.0]);
+    until(&mut app, 5_000, |app| {
+        view(app).focus.phase == FocusPhase::Locked
+    });
+
+    // The distance that draws the model `px` across.
+    let at_px = |px: f64| root.extent_m / (px * pixel_size(1.0, VIEW_H as f64));
+    let shown_level = |app: &mut App| {
+        let mut q = app.world_mut().query::<(&ModelLevel, &Visibility)>();
+        let shown: Vec<usize> = q
+            .iter(app.world())
+            .filter(|(_, v)| **v == Visibility::Inherited)
+            .map(|(l, _)| l.0)
+            .collect();
+        let mut q = app.world_mut().query::<(&ModelRoot, &Visibility)>();
+        let root = *q.single(app.world()).unwrap().1 == Visibility::Inherited;
+        root.then(|| {
+            assert_eq!(shown.len(), 1, "{shown:?}");
+            shown[0]
+        })
+    };
+    let label = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query::<(&FarLabel, &Visibility, &Children)>();
+        let (_, v, c) = q.single(app.world()).unwrap();
+        let shown = *v == Visibility::Inherited;
+        let c = c[0];
+        shown.then(|| app.world().get::<Text>(c).unwrap().0.clone())
+    };
+    for (px, level, far) in [
+        (400.0, Some(0), false),
+        (90.0, Some(1), false),
+        (15.0, Some(2), false),
+        (2.0, None, true),
+    ] {
+        app.world_mut().resource_mut::<ViewportState>().rig.distance = at_px(px);
+        app.update();
+        app.update();
+        assert_eq!(shown_level(&mut app), level, "at {px} px");
+        assert_eq!(far_markers(&mut app), usize::from(far), "at {px} px");
+    }
+    // The diamond stays FAR_MARKER_PX across, in place of the sphere, named while focused.
+    let (scale, sphere) = {
+        let mut q = app.world_mut().query::<(&FarMarker, &Transform)>();
+        let s = q.single(app.world()).unwrap().1.scale.x;
+        let mut q = app.world_mut().query::<(&BodyVisual, &Transform)>();
+        (s, q.single(app.world()).unwrap().1.scale)
+    };
+    let want = FAR_MARKER_PX * pixel_size(at_px(2.0), VIEW_H as f64);
+    assert!(
+        (scale as f64 / want - 1.0).abs() < 0.05,
+        "{scale} m across, want {want}"
+    );
+    assert_eq!(sphere, Vec3::ZERO);
+    assert_eq!(label(&mut app), Some(format!("#1 {display}")));
+    app.world_mut().resource_mut::<ViewportState>().rig.distance = at_px(1.0) * 8.0;
+    app.update();
+    app.update();
+    assert_eq!(far_markers(&mut app), 1, "still there, as small as ever");
+
+    // Free the camera. A click away from the body does nothing, nor does a drag; a click on its
+    // marker focuses it again.
+    app.world_mut()
+        .write_message(StudioCommand::CameraFocus(None, FocusMode::Follow));
+    app.update();
+    app.update();
+    assert_eq!(view(&app).focus.phase, FocusPhase::Free);
+    let (entity, top_left, size) = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &ComputedNode, &UiGlobalTransform), With<ViewportView>>();
+        let (e, n, t) = q.single(app.world()).unwrap();
+        let inverse = n.inverse_scale_factor();
+        let size = n.size() * inverse;
+        (e, t.translation * inverse - size / 2.0, size)
+    };
+    let body = {
+        let v = view(&app);
+        let b = app.world().resource::<ViewSource>().bodies[0];
+        ViewProjection::new(&v.rig, size.as_dvec2())
+            .project(v.frame.position(b.pos))
+            .unwrap()
+            .as_vec2()
+    };
+    let click = |app: &mut App, at: Vec2| {
+        let pointer = Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 1,
+                    height: 1,
+                },
+                position: top_left + at,
+            },
+        );
+        app.world_mut().trigger(PointerClick {
+            entity,
+            pointer,
+            button: PointerButton::Primary,
+            hit: HitData::new(entity, 0.0, None, None),
+            duration: Duration::from_millis(80),
+            count: 1,
+        });
+        app.update();
+        app.update();
+    };
+    click(&mut app, body + Vec2::new(40.0, 0.0));
+    assert_eq!(
+        view(&app).focus.phase,
+        FocusPhase::Free,
+        "nothing within 10 px"
+    );
+    app.world_mut().resource_mut::<ViewPointer>().moved = 30.0;
+    click(&mut app, body);
+    assert_eq!(
+        view(&app).focus.phase,
+        FocusPhase::Free,
+        "a drag is not a click"
+    );
+    app.world_mut().resource_mut::<ViewPointer>().moved = 0.0;
+    click(&mut app, body + Vec2::new(3.0, -2.0));
+    assert_ne!(view(&app).focus.phase, FocusPhase::Free);
+    assert_eq!(view(&app).focus.target, Some(1));
+    assert_eq!(label(&mut app), Some(format!("#1 {display}")));
+
+    press(&mut app, "Stop");
+    assert_eq!(count::<ModelRoot>(&mut app), 0);
+    assert_eq!(count::<FarMarker>(&mut app), 0);
 }
 
 /// Every non-ASCII character in a string or character literal of the studio and its kit, in the

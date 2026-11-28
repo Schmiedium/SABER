@@ -244,6 +244,8 @@ As built (step S5-2): the flow above for `.gltf` and `.glb`, with `Candidate::op
 
 As built (step S5-4): an `.obj` takes the same flow. `Candidate::open` converts it first (`sim_assets::obj`, with its MTL and textures from its folder), so `inspect` and the preview see the converted GLB; the dialog's Units, Up and Forward start unchosen and `commit` is refused until all three are chosen; the manifest records the OBJ's hash as `source: Converted(format: Obj, …)`. A missing or out-of-folder materials file or texture is a warning, and the file is left out.
 
+As built (step S5-5): LOD files join a model after it is imported, through `saber-cli model lod add` (`import::add_lod`): the file is read as an import reads one, stored beside the model as `lodN.glb`, and listed in `model.ron` with its size, hash and triangle count. The viewport reads them with the model and draws whichever level the model's size on screen calls for, then the far marker under 4 px (`sim_studio_ux.md` §7.11.11).
+
 ### 2.2 Linking a model to an entity and deriving collision
 
 Linking writes only to the scenario's `visual:` section. Deriving collision is a separate, explicit step that writes a `CollisionShape` into the sim section and therefore changes `scene_hash` (IB-19, IB-20).

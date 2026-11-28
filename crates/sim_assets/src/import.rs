@@ -2,7 +2,8 @@
 //! OBJ, converted first by [`crate::obj`]), applies the import rules, packs a `.gltf` and its
 //! separate files into one `.glb`, works out the manifest from the chosen unit, axes and origin,
 //! and writes `<models>/<slug>/{model.glb, model.ron, thumb.png}`. The studio's Import dialog and
-//! `saber-cli model import` both use it.
+//! `saber-cli model import` both use it. [`add_lod`] and [`remove_lod`] add coarser files drawn
+//! when the model is small on screen (`lod1.glb`, …), as `saber-cli model lod` does.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -17,8 +18,8 @@ use crate::inspect::{
     unit_problem,
 };
 use crate::manifest::{
-    Axis, Bounds, FileSource, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION, ModelFrame, Origin,
-    SourceFormat, Unit, VisualAssetManifest,
+    Axis, Bounds, FAR_MARKER_PX, FileSource, Lod, MANIFEST_FILE, MANIFEST_SCHEMA_VERSION,
+    ModelFrame, Origin, SourceFormat, Unit, VisualAssetManifest,
 };
 use crate::thumb::{self, Drawn, Extras, Facet, THUMB_FILE, View};
 use crate::write::glb_container;
@@ -464,7 +465,13 @@ impl Candidate {
         }
         let data = read(&glb, None).map_err(ImportError::Inspect)?;
         let thumb = thumb::thumbnail(&data, &manifest);
-        write_model(&dir, &glb, &manifest, Some(&thumb))?;
+        // A replaced model's LOD files were made for the old file: they go with it.
+        if let Ok(old) = read_manifest(&dir) {
+            for l in &old.lods {
+                let _ = std::fs::remove_file(dir.join(&l.file));
+            }
+        }
+        write_model(&dir, &glb, &manifest, Some(&thumb), &[])?;
         Ok(Imported { dir, manifest })
     }
 }
@@ -483,6 +490,7 @@ fn write_model(
     glb: &[u8],
     manifest: &VisualAssetManifest,
     thumb: Option<&[u8]>,
+    lods: &[(String, Vec<u8>)],
 ) -> Result<(), ImportError> {
     let w = |e: std::io::Error| ImportError::Write(format!("{}: {e}", dir.display()));
     std::fs::create_dir_all(dir).map_err(w)?;
@@ -490,13 +498,17 @@ fn write_model(
     if let Some(t) = thumb {
         std::fs::write(dir.join(THUMB_FILE), t).map_err(w)?;
     }
+    for (name, bytes) in lods {
+        std::fs::write(dir.join(name), bytes).map_err(w)?;
+    }
     // The manifest last: a folder is listed only once its `model.ron` is there.
     std::fs::write(dir.join(MANIFEST_FILE), manifest.to_ron()).map_err(w)?;
     Ok(())
 }
 
 /// Copy a catalogue model into `models_dir/<slug>/` (Duplicate to workspace, to customise a
-/// built-in or keep a library model with the workspace).
+/// built-in or keep a library model with the workspace), with its LOD files; one that cannot be
+/// read is left out of the copy.
 pub fn duplicate(
     entry: &CatalogEntry,
     models_dir: &Path,
@@ -512,6 +524,15 @@ pub fn duplicate(
     manifest.id = format!("{id_prefix}{}", slug(slug_name));
     manifest.version = 1;
     manifest.content_hash = loaded.hash;
+    let mut lods = Vec::new();
+    manifest.lods.retain_mut(|l| match entry.load_lod(l) {
+        Ok(b) => {
+            l.content_hash = Some(b.hash);
+            lods.push((l.file.clone(), b.bytes.into_owned()));
+            true
+        }
+        Err(_) => false,
+    });
     let thumb = match entry.thumb() {
         Some(t) => t,
         None => {
@@ -519,17 +540,16 @@ pub fn duplicate(
             thumb::thumbnail(&data, &manifest)
         }
     };
-    write_model(&dir, &loaded.bytes, &manifest, Some(&thumb))?;
+    write_model(&dir, &loaded.bytes, &manifest, Some(&thumb), &lods)?;
     Ok(Imported { dir, manifest })
 }
 
 /// Accept a model whose file changed since it was imported (Re-import): the manifest takes the
-/// file's hash, bounds and triangle count; its frame and origin stay; the thumbnail is redrawn.
+/// file's hash, bounds and triangle count, and each LOD file its own hash and count (one that is
+/// gone or no longer reads is dropped from the list); its frame and origin stay; the thumbnail is
+/// redrawn.
 pub fn refresh(dir: &Path) -> Result<Imported, ImportError> {
-    let text = std::fs::read_to_string(dir.join(MANIFEST_FILE))
-        .map_err(|e| ImportError::Read(e.to_string()))?;
-    let mut manifest =
-        VisualAssetManifest::from_ron(&text).map_err(|e| ImportError::Invalid(e.to_string()))?;
+    let mut manifest = read_manifest(dir)?;
     let bytes =
         std::fs::read(dir.join(&manifest.file)).map_err(|e| ImportError::Read(e.to_string()))?;
     let report = inspect(&bytes, Some(dir)).map_err(ImportError::Inspect)?;
@@ -546,12 +566,163 @@ pub fn refresh(dir: &Path) -> Result<Imported, ImportError> {
         .ok_or_else(|| ImportError::Invalid("nothing in the file is drawn".into()))?;
     manifest.triangles = report.triangles;
     manifest.content_hash = ContentHash::of(&bytes);
+    manifest.lods.retain_mut(|l| {
+        let Ok(b) = std::fs::read(dir.join(&l.file)) else {
+            return false;
+        };
+        let Ok(r) = inspect(&b, Some(dir)) else {
+            return false;
+        };
+        l.triangles = r.triangles;
+        l.content_hash = Some(ContentHash::of(&b));
+        true
+    });
     let thumb = thumb::draw(&corners, thumb::THUMB_PX, View::THUMB, Extras::default())
         .picture
         .png();
     let w = |e: std::io::Error| ImportError::Write(format!("{}: {e}", dir.display()));
     std::fs::write(dir.join(THUMB_FILE), thumb).map_err(w)?;
     std::fs::write(dir.join(MANIFEST_FILE), manifest.to_ron()).map_err(w)?;
+    Ok(Imported {
+        dir: dir.to_owned(),
+        manifest,
+    })
+}
+
+fn read_manifest(dir: &Path) -> Result<VisualAssetManifest, ImportError> {
+    let text = std::fs::read_to_string(dir.join(MANIFEST_FILE))
+        .map_err(|e| ImportError::Read(format!("{}: {e}", dir.join(MANIFEST_FILE).display())))?;
+    VisualAssetManifest::from_ron(&text).map_err(|e| ImportError::Invalid(e.to_string()))
+}
+
+/// How far an LOD may sit from the model before it is flagged: a share of the model's size.
+const LOD_FIT: f64 = 0.25;
+
+/// Add a coarser file to the model in `dir`, drawn while the model is under `below_px` pixels
+/// across (`saber-cli model lod add`). The file is read as the import reads a model (a `.gltf`
+/// packed, an OBJ converted) and stored as the first free `lodN.glb`; it must be in the model's
+/// own unit and axes, since the manifest's frame and origin place it. Refused when a rule refuses
+/// the file, when `below_px` is not over [`FAR_MARKER_PX`] or another LOD has that size. Warns
+/// when it is not lighter than the model or does not sit where the model does.
+pub fn add_lod(
+    dir: &Path,
+    file: &Path,
+    below_px: f32,
+) -> Result<(Imported, Vec<Problem>), ImportError> {
+    let mut manifest = read_manifest(dir)?;
+    if !(below_px.is_finite() && below_px > FAR_MARKER_PX) {
+        return Err(ImportError::Refused(vec![format!(
+            "draw it below a size over {FAR_MARKER_PX} px: under {FAR_MARKER_PX} px the far marker is drawn instead"
+        )]));
+    }
+    if let Some(l) = manifest.lods.iter().find(|l| l.below_px == below_px) {
+        return Err(ImportError::Refused(vec![format!(
+            "{} is already drawn below {below_px} px; remove it first or choose another size",
+            l.file
+        )]));
+    }
+    let c = Candidate::open(file)?;
+    let refused: Vec<String> = c
+        .report
+        .of(Severity::Refused)
+        .map(|p| p.message.clone())
+        .collect();
+    if !refused.is_empty() {
+        return Err(ImportError::Refused(refused));
+    }
+    let glb = pack(&c.bytes, file.parent()).map_err(|e| ImportError::Refused(vec![e]))?;
+    let data = read(&glb, None).map_err(ImportError::Inspect)?;
+    let mut notes: Vec<Problem> = c
+        .report
+        .problems
+        .iter()
+        .filter(|p| p.severity != Severity::Refused)
+        .cloned()
+        .collect();
+    let name = (1..)
+        .map(|k| format!("lod{k}.glb"))
+        .find(|n| *n != manifest.file && !manifest.lods.iter().any(|l| l.file == *n))
+        .expect("a free name");
+    if c.report.triangles >= manifest.triangles {
+        notes.push(Problem::new(
+            Severity::Warning,
+            format!(
+                "{name} has {} triangles, not fewer than the model's {}; an LOD is meant to be lighter",
+                c.report.triangles, manifest.triangles
+            ),
+        ));
+    }
+    let facets = thumb::body_facets(&data, &manifest);
+    match Bounds::around(facets.iter().flat_map(|(t, _)| t.iter().copied())) {
+        None => {
+            return Err(ImportError::Refused(vec![format!(
+                "nothing in {} is drawn",
+                file.display()
+            )]));
+        }
+        Some(b) => {
+            let size = manifest.bounds.size().max_element().max(1e-9);
+            let off = (DVec3::from(b.min) - DVec3::from(manifest.bounds.min))
+                .abs()
+                .max((DVec3::from(b.max) - DVec3::from(manifest.bounds.max)).abs())
+                .max_element();
+            if off > LOD_FIT * size {
+                notes.push(Problem::new(
+                    Severity::Warning,
+                    format!(
+                        "{name} does not sit where the model does (off by {:.0} % of its size); it must be in the model's unit and axes ({}, up {}, forward {})",
+                        100.0 * off / size,
+                        manifest.frame.unit.name(),
+                        manifest.frame.up.label(),
+                        manifest.frame.forward.label()
+                    ),
+                ));
+            }
+        }
+    }
+    let w = |e: std::io::Error| ImportError::Write(format!("{}: {e}", dir.display()));
+    std::fs::write(dir.join(&name), &glb).map_err(w)?;
+    manifest.lods.push(Lod {
+        file: name,
+        below_px,
+        content_hash: Some(ContentHash::of(&glb)),
+        triangles: c.report.triangles,
+    });
+    manifest
+        .lods
+        .sort_by(|a, b| b.below_px.total_cmp(&a.below_px));
+    manifest
+        .check()
+        .map_err(|e| ImportError::Invalid(e.to_string()))?;
+    std::fs::write(dir.join(MANIFEST_FILE), manifest.to_ron()).map_err(w)?;
+    Ok((
+        Imported {
+            dir: dir.to_owned(),
+            manifest,
+        },
+        notes,
+    ))
+}
+
+/// Remove an LOD file from the model in `dir` (`saber-cli model lod remove`): its entry and the
+/// file go; the model and its other LODs stay.
+pub fn remove_lod(dir: &Path, file: &str) -> Result<Imported, ImportError> {
+    let mut manifest = read_manifest(dir)?;
+    let Some(k) = manifest.lods.iter().position(|l| l.file == file) else {
+        let listed: Vec<&str> = manifest.lods.iter().map(|l| l.file.as_str()).collect();
+        return Err(ImportError::Invalid(if listed.is_empty() {
+            format!("the model has no LOD files, so no `{file}`")
+        } else {
+            format!("no LOD file `{file}`; the model has {}", listed.join(", "))
+        }));
+    };
+    let lod = manifest.lods.remove(k);
+    let w = |e: std::io::Error| ImportError::Write(format!("{}: {e}", dir.display()));
+    std::fs::write(dir.join(MANIFEST_FILE), manifest.to_ron()).map_err(w)?;
+    match std::fs::remove_file(dir.join(&lod.file)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(w(e)),
+        _ => {}
+    }
     Ok(Imported {
         dir: dir.to_owned(),
         manifest,
