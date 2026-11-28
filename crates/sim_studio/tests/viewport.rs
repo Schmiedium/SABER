@@ -508,3 +508,67 @@ fn looks_come_from_the_scenario_or_the_domain_pack() {
     let r = resolve_looks(&with(&v), &catalog);
     assert_eq!((r.looks.len(), r.files.len()), (2, 1));
 }
+
+/// Which level of a model is drawn at a size on screen (step S5-5, §7.11.6): the model itself at
+/// or over its largest LOD's size, each LOD below its own, nothing (the far marker) under 4 px.
+#[test]
+fn a_model_draws_the_level_its_size_calls_for() {
+    use sim_studio::models::{MIN_MODEL_PX, level_for};
+    assert_eq!(MIN_MODEL_PX, 4.0);
+    let lods = [150.0, 40.0];
+    for (px, level) in [
+        (1000.0, Some(0)),
+        (150.0, Some(0)),
+        (149.9, Some(1)),
+        (40.0, Some(1)),
+        (39.0, Some(2)),
+        (4.0, Some(2)),
+        (3.9, None),
+        (0.0, None),
+        (f64::NAN, None),
+    ] {
+        assert_eq!(level_for(px, &lods), level, "{px} px");
+    }
+    assert_eq!(
+        level_for(5.0, &[]),
+        Some(0),
+        "no LOD files: the model down to 4 px"
+    );
+    assert_eq!(level_for(2.0, &[]), None);
+    assert_eq!(
+        level_for(f64::INFINITY, &lods),
+        Some(0),
+        "right up close, the model"
+    );
+}
+
+/// A click picks the body whose marker is nearest, within 10 px (step S5-5).
+#[test]
+fn a_click_picks_the_nearest_body_within_ten_pixels() {
+    use sim_studio::ui::viewport::{PICK_PX, pick_body};
+    let frame = ViewFrame::default();
+    let rig = CameraRig {
+        pivot: DVec3::ZERO,
+        distance: 100.0,
+        ..Default::default()
+    };
+    let size = DVec2::new(800.0, 420.0);
+    let view = ViewProjection::new(&rig, size);
+    let bodies = [
+        body(1, [0.0, 0.0, 0.0], [0.0; 3]),
+        body(2, [5.0, 0.0, 0.0], [0.0; 3]),
+        body(3, [f64::NAN, 0.0, 0.0], [0.0; 3]),
+    ];
+    let at = |id: usize| view.project(frame.position(bodies[id].pos)).unwrap();
+    assert_eq!(pick_body(&view, &frame, &bodies, at(0)), Some(1));
+    assert_eq!(pick_body(&view, &frame, &bodies, at(1)), Some(2));
+    let between = (at(0) + at(1)) / 2.0;
+    let near_first = at(0) + (at(1) - at(0)).normalize() * 2.0;
+    assert_eq!(pick_body(&view, &frame, &bodies, near_first), Some(1));
+    assert!(at(0).distance(at(1)) > 2.0 * PICK_PX, "{between:?}");
+    assert_eq!(pick_body(&view, &frame, &bodies, between), None);
+    assert_eq!(
+        pick_body(&view, &frame, &bodies, DVec2::new(-50.0, -50.0)),
+        None
+    );
+}

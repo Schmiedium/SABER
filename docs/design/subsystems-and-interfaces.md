@@ -148,6 +148,12 @@ v0.43 (2026-11-26, build step S5-4) records the OBJ converter as built (§5.10):
 feature and the crate's own GLB writer instead of `gltf-json`; a missing or out-of-folder materials file or texture
 is a warning with the file left out, not a refusal; the workspace always stores `.glb` (`.gltf` only from
 `saber-cli model convert`); LOD files move to a later step; IB-20 unchanged.
+v0.44 (2026-11-28, build step S5-5) records LOD files and the far marker as built (§5.10): the studio picks a level
+from the model's size in pixels itself instead of Bevy's `VisibilityRange` (which works on camera distance); the
+far marker is a camera-facing diamond 12 px across; LOD files are added with `saber-cli model lod` (no studio
+control yet); a click on a body's marker focuses the camera on it. IB-20: each `lods` entry gains optional
+`content_hash` and `triangles` (additive; the schema stays 1.0.0, since readers ignore unknown fields and default
+missing ones).
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -1397,6 +1403,40 @@ dialog, the Align session and the background job) and `sim_studio::ui::library`.
   `import::unpack` splits a GLB into `.gltf` text and the `.bin` it names. `model import` and `model inspect`
   take an OBJ too.
 
+**As built (step S5-5).** LOD files and the far marker. UX as built is `sim_studio_ux.md` §7.11.11.
+
+- **Manifest.** A `lods` entry is `(file, below_px, content_hash, triangles)`; the last two are optional (a
+  hand-written entry without a hash skips the check). The rules: a `.glb` or `.gltf` in the model's folder, not the
+  model's own file and not listed twice, `below_px` positive and different from every other entry's.
+  `lods_by_size()` gives them largest size first. `manifest::FAR_MARKER_PX` (4 px) is where every model gives way to
+  the far marker.
+- **Importer.** `import::add_lod(dir, file, below_px)` reads the file as an import does (a `.gltf` packed, an OBJ
+  converted with no frame of its own: an LOD is in the model's unit and axes, placed by the manifest's frame and
+  origin), stores it as the first free `lodN.glb` with its hash and triangle count, and returns warnings when it is
+  not lighter than the model or its body-frame bounds are off the model's by more than a quarter of its size. It
+  refuses `below_px` of 4 px or less, a size already used, and a file the import rules refuse.
+  `import::remove_lod(dir, file)` drops one. `duplicate` copies the LOD files it can read; `refresh` (Re-import)
+  takes each one's hash and count again and drops one that is gone or no longer reads; `commit` with `replace`
+  deletes the old manifest's LOD files.
+- **Catalogue.** `CatalogEntry::load_lod(lod)` reads one and compares its hash; `verify_files` also notes LOD files
+  that changed or are missing (`Catalog::lods_changed`), which lint reports on the entities that link the model.
+- **Drawing (`Studio.Assets`).** `resolve_looks` reads each LOD file (once per hash, like model files) into
+  `Look::lods`; one that cannot be read is left out with a warning. `spawn_models` waits for every level's glTF,
+  drops one that fails to load (toast), and spawns one tree per level under the frame node, each with
+  `ModelLevel(k)`; `ModelRoot` keeps the level entities and their sizes. `draw_bodies` computes the model's extent
+  in pixels at its f64 position and shows the level `models::level_for(px, below_px)` names: 0 (the model) at or
+  over the largest size, `k` below the `k`th, none under 4 px. Bevy's `VisibilityRange` is not used: it works on
+  camera distance, and the switch belongs to pixel size, which also depends on the viewport's height and the field
+  of view.
+- **Far marker.** `FarBodies` lists the bodies under 4 px; `draw_far_markers` draws each as a `Rhombus` mesh 12 px
+  across that faces the camera, unlit, in the look's tint or the accent colour, and places a `FarLabel` UI node
+  (`#id` and the model's name) beside the focus target's. The body's sphere is hidden meanwhile.
+- **Click to focus.** The view observes `PointerPress`, `PointerDrag` and `PointerClick`; a click that moved under
+  4 px picks the body whose projected position is nearest and within 10 px (`ui::viewport::pick_body`) and sends
+  `CameraFocus(Some(id), mode)`.
+- **`saber-cli model lod add <dir> <file> --below <px>` / `remove <dir> <lodN.glb>` / `list <dir>`**, each with
+  `--json`: exit 0 done, 2 refused or not found, 64 on usage.
+
 ## 6. The tick pipeline
 
 The draft chains six systems. With domain models, ordering must be expressed as `SystemSet`s so plugins
@@ -2127,7 +2167,7 @@ sequenceDiagram
 | | |
 |---|---|
 | Direction | Model files (built-in library, workspace `models/`, library roots) → `Assets.Catalog` → `Studio.Assets` (Bevy `AssetServer`). The scenario's `visual:` section is written by `Studio.Builder` and read only by the studio. |
-| Contract | glTF 2.0 stored as `.glb` (`.gltf` + files accepted at import and packed), with `model.ron` (`VisualAssetManifest`: `id`, `version`, `content_hash`, `source`, `frame { unit, up, forward }`, `origin`, `bounds`, `bindings`, `lods`, `license`). Entities link through `VisualModel { asset: VisualAssetRef { source, id, version, content_hash }, offset, scale, tint, visible, bindings }` keyed by `SimId`; look-only props are `Scenery`. Unit, axes and origin are applied from the manifest at load, not baked per instance. |
+| Contract | glTF 2.0 stored as `.glb` (`.gltf` + files accepted at import and packed), with `model.ron` (`VisualAssetManifest`: `id`, `version`, `content_hash`, `source`, `frame { unit, up, forward }`, `origin`, `bounds`, `bindings`, `lods [(file, below_px, content_hash, triangles)]`, `license`). Entities link through `VisualModel { asset: VisualAssetRef { source, id, version, content_hash }, offset, scale, tint, visible, bindings }` keyed by `SimId`; look-only props are `Scenery`. Unit, axes and origin are applied from the manifest at load, not baked per instance. |
 | Owner | `sim_assets` (manifest, reference and `visual:` section types, validation, conversion); `sim_studio` (loading, spawning, LOD); `sim_core::geometry` for shapes derived from a model (IB-19). |
 | Validation | Import rules in §5.10 (glTF 2.0, local URIs only, supported extensions, unit plausibility, size budgets). The catalogue verifies `content_hash` when it loads a model. Built-ins are checked by `cargo test -p sim_assets` in CI. |
 | Errors | Missing model → placeholder from the collision shape or bounds plus a lint warning; export and submit are not blocked. Hash mismatch → warning "model changed since the scenario was saved", still drawn. Unsupported file → import refused with a reason. Load failure at run time → placeholder and a toast. None of these reach `sim_core` or `sim_hpc`. |

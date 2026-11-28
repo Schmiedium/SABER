@@ -1,7 +1,9 @@
 //! `Studio.Assets` (subsystems §5.5, §5.10; `sim_studio_ux.md` §7.11.6): which 3D model each body
 //! of the scenario on show is drawn with. A body's model comes from the scenario's `visual:`
 //! section, else from its Domain Pack's default; a model that is missing or unreadable leaves the
-//! body's marker as its placeholder. Looks never change results: nothing here touches the run.
+//! body's marker as its placeholder. A model's LOD files take over as it gets smaller on screen,
+//! and under [`MIN_MODEL_PX`] the far marker does ([`level_for`]). Looks never change results:
+//! nothing here touches the run.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -20,8 +22,8 @@ use crate::workspace::Workspace;
 /// files are read and hash-checked by `sim_assets`, so Bevy never opens a path itself.
 pub const MODEL_ASSET_DIR: &str = "saber_models";
 
-/// A model drawn at under this many pixels across is hidden, leaving the body's marker.
-pub const MIN_MODEL_PX: f64 = 4.0;
+/// A model drawn at under this many pixels across is hidden, and the far marker drawn instead.
+pub const MIN_MODEL_PX: f64 = sim_assets::manifest::FAR_MARKER_PX as f64;
 
 /// A model drawn at over this many pixels across hides the body's marker.
 pub const HIDE_MARKER_PX: f64 = 16.0;
@@ -61,6 +63,28 @@ pub enum LookState {
     Placeholder(String),
 }
 
+/// One of a model's LOD files, as read for drawing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LodLook {
+    /// Its file in the model's folder.
+    pub file: String,
+    /// Drawn while the model is under this many pixels across.
+    pub below_px: f64,
+    /// The hash of the file handed to Bevy.
+    pub hash: ContentHash,
+}
+
+/// Which of a model's levels to draw at `px` across: `Some(0)` the model itself, `Some(k)` its
+/// `k`th LOD file (`below_px` largest first, as in [`Look::lods`]), `None` under [`MIN_MODEL_PX`]
+/// or not finite, where the far marker is drawn. A level is drawn below its size and at or over
+/// the next one's.
+pub fn level_for(px: f64, below_px: &[f64]) -> Option<usize> {
+    if px.is_nan() || px < MIN_MODEL_PX {
+        return None;
+    }
+    Some(below_px.iter().take_while(|b| px < **b).count())
+}
+
 /// How one body is drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Look {
@@ -74,6 +98,9 @@ pub struct Look {
     pub manifest: Option<VisualAssetManifest>,
     /// The hash of the file handed to Bevy, when read.
     pub hash: Option<ContentHash>,
+    /// The LOD files read, `below_px` largest first; one that cannot be read is left out with a
+    /// warning, and the level above it is drawn instead.
+    pub lods: Vec<LodLook>,
     /// What differs from the link (drawn anyway).
     pub warnings: Vec<String>,
     /// Model or placeholder.
@@ -152,6 +179,7 @@ pub fn resolve_looks(scenario: &Scenario, catalog: &Catalog) -> Resolved {
             default,
             manifest: None,
             hash: None,
+            lods: Vec::new(),
             warnings: Vec::new(),
             state: LookState::Model,
         };
@@ -183,6 +211,30 @@ pub fn resolve_looks(scenario: &Scenario, catalog: &Catalog) -> Resolved {
                             out.files.push((loaded.hash, loaded.bytes));
                         }
                         look.hash = Some(loaded.hash);
+                        for lod in entry.manifest.lods_by_size() {
+                            match entry.load_lod(lod) {
+                                Ok(l) => {
+                                    if !l.matches_manifest {
+                                        look.warnings.push(format!(
+                                            "{}'s {} changed since it was added",
+                                            entry.manifest.id, lod.file
+                                        ));
+                                    }
+                                    if !out.files.iter().any(|(h, _)| *h == l.hash) {
+                                        out.files.push((l.hash, l.bytes));
+                                    }
+                                    look.lods.push(LodLook {
+                                        file: lod.file.clone(),
+                                        below_px: lod.below_px as f64,
+                                        hash: l.hash,
+                                    });
+                                }
+                                Err(e) => look.warnings.push(format!(
+                                    "{}'s {} could not be read ({e}); the level above is drawn",
+                                    entry.manifest.id, lod.file
+                                )),
+                            }
+                        }
                         look.manifest = Some(entry.manifest.clone());
                     }
                     Err(e) => {

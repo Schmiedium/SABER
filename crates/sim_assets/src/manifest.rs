@@ -17,6 +17,10 @@ pub const MANIFEST_FILE: &str = "model.ron";
 /// The manifest schema this build writes and reads (same major, IB-20).
 pub const MANIFEST_SCHEMA_VERSION: Semver = Semver::new(1, 0, 0);
 
+/// A model drawn under this many pixels across is replaced by the far marker, a constant-size
+/// diamond (`sim_studio_ux.md` §7.11.6), so an LOD below it would never be drawn.
+pub const FAR_MARKER_PX: f32 = 4.0;
+
 /// The length unit a file's coordinates are in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Unit {
@@ -327,13 +331,25 @@ pub struct VisualBinding {
     pub drive: Drive,
 }
 
-/// A coarser file drawn when the model is small on screen.
+/// A coarser file drawn when the model is small on screen. It is in the model's own unit and
+/// axes, so the manifest's frame and origin place it as they place the model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lod {
     /// The file, in the model's folder.
     pub file: String,
-    /// Drawn when the model is under this many pixels across.
+    /// Drawn when the model is under this many pixels across (and over the next LOD's).
     pub below_px: f32,
+    /// The file's hash when it was added; a different file now is a warning. Written bare;
+    /// absent in a hand-written manifest, which then skips the check.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::visual::bare_hash"
+    )]
+    pub content_hash: Option<ContentHash>,
+    /// Triangles drawn (0 when not known).
+    #[serde(default)]
+    pub triangles: u64,
 }
 
 /// How a collision shape is derived from a model, on request (IB-19).
@@ -485,11 +501,31 @@ impl VisualAssetManifest {
         if self.license.trim().is_empty() {
             return invalid("the license is empty".into());
         }
-        if let Some(l) = self.lods.iter().find(|l| !is_plain_file_name(&l.file)) {
-            return invalid(format!(
-                "LOD file `{}` must be in the model's folder",
-                l.file
-            ));
+        for (k, l) in self.lods.iter().enumerate() {
+            let lower = l.file.to_ascii_lowercase();
+            if !is_plain_file_name(&l.file)
+                || !(lower.ends_with(".glb") || lower.ends_with(".gltf"))
+            {
+                return invalid(format!(
+                    "LOD file `{}` must be a .glb or .gltf in the model's folder",
+                    l.file
+                ));
+            }
+            if l.file == self.file || self.lods[..k].iter().any(|o| o.file == l.file) {
+                return invalid(format!("LOD file `{}` is listed twice", l.file));
+            }
+            if !(l.below_px.is_finite() && l.below_px > 0.0) {
+                return invalid(format!(
+                    "LOD file `{}`: below_px must be a positive number of pixels",
+                    l.file
+                ));
+            }
+            if self.lods[..k].iter().any(|o| o.below_px == l.below_px) {
+                return invalid(format!(
+                    "two LOD files are drawn below {} px; give each its own size",
+                    l.below_px
+                ));
+            }
         }
         Ok(())
     }
@@ -497,6 +533,13 @@ impl VisualAssetManifest {
     /// A file point in the body frame, metres: the frame's rotation and unit, then the origin.
     pub fn to_body(&self, file: DVec3) -> DVec3 {
         self.frame.to_body(file).unwrap_or(DVec3::NAN) + self.origin.offset()
+    }
+
+    /// The LOD files, coarsest last: by `below_px`, largest first.
+    pub fn lods_by_size(&self) -> Vec<&Lod> {
+        let mut out: Vec<&Lod> = self.lods.iter().collect();
+        out.sort_by(|a, b| b.below_px.total_cmp(&a.below_px));
+        out
     }
 
     /// `quad_x`: the id's last part.

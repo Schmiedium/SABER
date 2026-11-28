@@ -404,7 +404,10 @@ pub fn center(
                 .unwrap_or_default()
         ),
         format!("hash {}", m.content_hash.short()),
-    ] {
+    ]
+    .into_iter()
+    .chain(lod_line(m))
+    {
         child(commands, info, mono(line));
     }
     if library.catalog.file_changed(e) {
@@ -1272,4 +1275,22 @@ pub const TABS: [(&str, BuilderTab); 3] = [
 /// Whether the Models tab shows (for [`ReqPanel`] users).
 pub fn models_tab(panel: &ReqPanel) -> bool {
     panel.tab == BuilderTab::Models
+}
+
+/// The details line for a model's LOD files: "LOD lod1.glb under 150 px (1200 triangles) ·
+/// lod2.glb under 40 px", or nothing when it has none.
+pub fn lod_line(m: &sim_assets::VisualAssetManifest) -> Option<String> {
+    let parts: Vec<String> = m
+        .lods_by_size()
+        .iter()
+        .map(|l| {
+            let tris = if l.triangles > 0 {
+                format!(" ({} triangles)", l.triangles)
+            } else {
+                String::new()
+            };
+            format!("{} under {} px{tris}", l.file, l.below_px)
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("LOD {}", parts.join(" · ")))
 }

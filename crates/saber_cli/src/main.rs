@@ -12,8 +12,8 @@
 //! bindings' defaults, so setup errors show before a campaign is submitted. A requirement set is
 //! checked on its own, and with a scenario also compiled against that scenario's Tick-0 World
 //! (signals, events, custom checks). `--emit-req-json` prints the compiled JSON form Python reads
-//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector, S5-2 the importer and S5-4
-//! the OBJ converter (`sim_assets`, IB-20):
+//! instead of parsing RON (IB-03). Step S5-1 adds the model inspector, S5-2 the importer, S5-4
+//! the OBJ converter and S5-5 LOD files (`sim_assets`, IB-20):
 //!
 //! ```text
 //! saber-cli model inspect <model.glb | model.gltf | model.obj> [--json]
@@ -22,6 +22,9 @@
 //!     [--attribution <text>] [--workspace <dir> | --library <dir>] [--replace] [--json]
 //! saber-cli model convert <model.obj> --unit <unit> --up <axis> --forward <axis>
 //!     [-o <out.glb | out.gltf>] [--replace] [--json]
+//! saber-cli model lod add <model folder> <lod.glb | lod.gltf | lod.obj> --below <px> [--json]
+//! saber-cli model lod remove <model folder> <lodN.glb> [--json]
+//! saber-cli model lod list <model folder> [--json]
 //! ```
 //!
 //! `inspect` reports a glTF file's size, bounds, triangles, nodes and extensions and the import
@@ -32,7 +35,9 @@
 //! dialog's do: the unit the size suggests, glTF's +Y up and +Z forward, the bounds' centre; an OBJ
 //! has no unit or axes, so it needs `--unit`, `--up` and `--forward`. `convert` turns an OBJ and its
 //! MTL materials and textures into a stand-alone `.glb` (or `.gltf` beside a `.bin`) in glTF's frame
-//! (metres, +Y up, +Z forward), the given unit and axes baked into a root node.
+//! (metres, +Y up, +Z forward), the given unit and axes baked into a root node. `lod add` stores a
+//! coarser file in an imported model's folder as `lodN.glb`, drawn while the model is under
+//! `--below` pixels across; it must be in the model's own unit and axes.
 //!
 //! Exit codes follow IB-04: `0` valid, `2` invalid (or unreadable), `64` usage.
 
@@ -53,6 +58,9 @@ const USAGE: &str = "usage:
       [--json]
   saber-cli model convert <model.obj> --unit m|cm|mm|in|ft --up <axis> --forward <axis>
       [-o <out.glb | out.gltf>] [--replace] [--json]
+  saber-cli model lod add <model folder> <lod.glb | lod.gltf | lod.obj> --below <px> [--json]
+  saber-cli model lod remove <model folder> <lodN.glb> [--json]
+  saber-cli model lod list <model folder> [--json]
   (axes: +x, -x, +y, -y, +z, -z; an OBJ needs --unit, --up and --forward to be imported)";
 
 /// Parsed command line.
@@ -369,12 +377,13 @@ fn validate_req(path: &str, scenario: Option<&str>, json: bool, emit: bool) -> R
     Ok(())
 }
 
-/// `saber-cli model inspect|import|convert`.
+/// `saber-cli model inspect|import|convert|lod`.
 fn model_command(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("inspect") => model_inspect(args),
         Some("import") => model_import(&args[1..]),
         Some("convert") => model_convert(&args[1..]),
+        Some("lod") => model_lod(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(64)
@@ -687,6 +696,144 @@ fn model_convert(args: &[String]) -> ExitCode {
         );
         println!("  triangles   {}", converted.triangles);
         for p in &converted.notes {
+            println!("  {:8}    {}", severity_name(p.severity), p.message);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `saber-cli model lod add|remove|list <model folder> …`: exit 0 when done, 2 when a rule refuses
+/// it or the folder or file is not there, 64 on a usage error.
+fn model_lod(args: &[String]) -> ExitCode {
+    use sim_assets::import::{ImportError, add_lod, remove_lod};
+    use sim_assets::manifest::{MANIFEST_FILE, VisualAssetManifest};
+
+    let usage = || {
+        eprintln!("{USAGE}");
+        ExitCode::from(64)
+    };
+    let mut json = false;
+    let mut below = None;
+    let mut words: Vec<&str> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--below" => {
+                let Some(v) = it.next() else { return usage() };
+                let Ok(px) = v.trim_end_matches("px").parse::<f32>() else {
+                    return usage();
+                };
+                below = Some(px);
+            }
+            s if s.starts_with("--") => return usage(),
+            s => words.push(s),
+        }
+    }
+    let (verb, dir, file) = match (words.as_slice(), below) {
+        (["add", dir, file], Some(_)) => ("add", *dir, Some(*file)),
+        (["remove", dir, file], None) => ("remove", *dir, Some(*file)),
+        (["list", dir], None) => ("list", *dir, None),
+        _ => return usage(),
+    };
+    let fail = |kind: &str, message: String| {
+        if json {
+            let o = serde_json::json!({
+                "ok": false,
+                "model": dir,
+                "error": { "kind": kind, "message": message },
+            });
+            println!("{o}");
+        } else {
+            eprintln!("{dir}: {message}");
+        }
+        ExitCode::from(2)
+    };
+    let kind = |e: &ImportError| match e {
+        ImportError::Read(_) | ImportError::Write(_) => "Io",
+        ImportError::Inspect(_) => "NotGltf",
+        ImportError::Convert(_) => "NotObj",
+        ImportError::Refused(_) => "Refused",
+        ImportError::Invalid(_) | ImportError::Exists(_) => "Invalid",
+    };
+    let folder = std::path::Path::new(dir);
+    let mut notes = Vec::new();
+    let manifest = match verb {
+        "add" => match add_lod(
+            folder,
+            std::path::Path::new(file.unwrap_or_default()),
+            below.unwrap_or_default(),
+        ) {
+            Ok((done, n)) => {
+                notes = n;
+                done.manifest
+            }
+            Err(e) => return fail(kind(&e), e.to_string()),
+        },
+        "remove" => match remove_lod(folder, file.unwrap_or_default()) {
+            Ok(done) => done.manifest,
+            Err(e) => return fail(kind(&e), e.to_string()),
+        },
+        _ => match std::fs::read_to_string(folder.join(MANIFEST_FILE))
+            .map_err(|e| {
+                (
+                    "Io",
+                    format!("{}: {e}", folder.join(MANIFEST_FILE).display()),
+                )
+            })
+            .and_then(|t| VisualAssetManifest::from_ron(&t).map_err(|e| ("Invalid", e.to_string())))
+        {
+            Ok(m) => m,
+            Err((k, e)) => return fail(k, e),
+        },
+    };
+    let added = (verb == "add")
+        .then(|| {
+            manifest
+                .lods
+                .iter()
+                .find(|l| Some(l.below_px) == below)
+                .map(|l| l.file.clone())
+        })
+        .flatten();
+    if json {
+        let o = serde_json::json!({
+            "ok": true,
+            "model": dir,
+            "id": manifest.id,
+            "added": added,
+            "removed": (verb == "remove").then_some(file),
+            "lods": manifest.lods.iter().map(|l| serde_json::json!({
+                "file": l.file,
+                "below_px": l.below_px,
+                "content_hash": l.content_hash.map(|h| h.to_string()),
+                "triangles": l.triangles,
+            })).collect::<Vec<_>>(),
+            "problems": notes.iter().map(|p| serde_json::json!({
+                "severity": severity_name(p.severity),
+                "message": p.message,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{o}");
+    } else {
+        match (&added, verb) {
+            (Some(a), _) => println!("{dir}: added {a}"),
+            (None, "remove") => println!("{dir}: removed {}", file.unwrap_or_default()),
+            _ => {}
+        }
+        if manifest.lods.is_empty() {
+            println!(
+                "  no LOD files: the model is drawn until it is under {} px, then the far marker",
+                sim_assets::manifest::FAR_MARKER_PX
+            );
+        }
+        for l in manifest.lods_by_size() {
+            println!(
+                "  {:10}  under {} px  {} triangles",
+                l.file, l.below_px, l.triangles
+            );
+        }
+        for p in &notes {
             println!("  {:8}    {}", severity_name(p.severity), p.message);
         }
     }

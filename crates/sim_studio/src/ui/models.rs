@@ -3,7 +3,9 @@
 //! to Bevy through the `embedded://` source (cached per content hash, so many bodies of one model
 //! share one mesh), and spawned as a tree under a `ModelRoot` that [`super::viewport::draw_bodies`]
 //! places on the body's f64 state each frame: model root (the body's pose) → instance offset and
-//! scale → the manifest's frame and origin → the file's nodes.
+//! scale → the manifest's frame and origin → one level per file (the model, then its LOD files)
+//! → the file's nodes. `draw_bodies` shows the level that fits the model's size on screen
+//! ([`crate::models::level_for`]), or none and the far marker.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -57,7 +59,7 @@ impl ModelStore {
 }
 
 /// The top of a body's model tree; placed on the body every frame.
-#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[derive(Component, Clone, Debug, PartialEq)]
 pub struct ModelRoot {
     /// The body.
     pub sim_id: u32,
@@ -65,7 +67,15 @@ pub struct ModelRoot {
     pub extent_m: f64,
     /// The looks it was spawned for ([`SceneLooks::key`]).
     pub key: (u64, Option<u64>, u64),
+    /// The tree of each level: the model's own file, then its LOD files.
+    pub levels: Vec<Entity>,
+    /// Each LOD file's size, px across, largest first (one fewer than `levels`).
+    pub below_px: Vec<f64>,
 }
+
+/// One level of a model tree: 0 is the model's own file, `k` its `k`th LOD file.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelLevel(pub usize);
 
 fn view_layer() -> RenderLayers {
     RenderLayers::layer(VIEW_LAYER)
@@ -223,14 +233,40 @@ pub fn spawn_models(
         let Some(gltf) = assets.gltfs.get(handle) else {
             continue;
         };
+        // The LOD files too: wait for each to load; one that fails is left out.
+        let mut waiting = false;
+        let mut failed = Vec::new();
+        for (k, l) in look.lods.iter().enumerate() {
+            match store.handle(&l.hash) {
+                Some(h) if matches!(server.get_load_state(h.id()), Some(LoadState::Failed(_))) => {
+                    failed.push(k)
+                }
+                Some(h) if assets.gltfs.get(h).is_none() => waiting = true,
+                Some(_) => {}
+                None => failed.push(k),
+            }
+        }
+        if waiting {
+            continue;
+        }
+        for k in failed.into_iter().rev() {
+            let l = look.lods.remove(k);
+            toasts.write(Toast::warning(format!(
+                "#{}: {}'s {} could not be drawn; the level above is drawn instead",
+                look.sim_id, look.model.asset, l.file
+            )));
+        }
+        let files: Vec<&Gltf> = std::iter::once(Some(gltf))
+            .chain(
+                look.lods
+                    .iter()
+                    .map(|l| store.handle(&l.hash).and_then(|h| assets.gltfs.get(h))),
+            )
+            .flatten()
+            .collect();
         let offset = &look.model.offset;
         let root = commands
             .spawn((
-                ModelRoot {
-                    sim_id: look.sim_id,
-                    extent_m: look.extent_m(),
-                    key,
-                },
                 Transform::default(),
                 Visibility::Hidden,
                 view_layer(),
@@ -292,32 +328,59 @@ pub fn spawn_models(
                 })
                 .clone()
         };
-        let children: Vec<usize> = gltf
-            .nodes
-            .iter()
-            .filter_map(|h| assets.nodes.get(h))
-            .flat_map(|n| {
-                n.children
-                    .iter()
-                    .filter_map(|c| assets.nodes.get(c))
-                    .map(|c| c.index)
-            })
-            .collect();
-        let tops: Vec<&Handle<GltfNode>> = gltf
-            .nodes
-            .iter()
-            .filter(|h| {
-                assets
-                    .nodes
-                    .get(*h)
-                    .is_some_and(|n| !children.contains(&n.index))
-            })
-            .collect();
-        for top in tops {
-            spawn_node(&mut commands, &assets, top, frame, &mut material);
+        let mut levels = Vec::with_capacity(files.len());
+        for (k, file) in files.into_iter().enumerate() {
+            let level = commands
+                .spawn((
+                    Transform::IDENTITY,
+                    if k == 0 {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ModelLevel(k),
+                    view_layer(),
+                    ChildOf(frame),
+                ))
+                .id();
+            for top in top_nodes(file, &assets) {
+                spawn_node(&mut commands, &assets, top, level, &mut material);
+            }
+            levels.push(level);
         }
+        commands.entity(root).insert(ModelRoot {
+            sim_id: look.sim_id,
+            extent_m: look.extent_m(),
+            key,
+            levels,
+            below_px: look.lods.iter().map(|l| l.below_px).collect(),
+        });
         spawned.push(look.sim_id);
     }
+}
+
+/// A file's top nodes: those no other node has as a child.
+fn top_nodes<'a>(gltf: &'a Gltf, assets: &GltfAssets) -> Vec<&'a Handle<GltfNode>> {
+    let children: Vec<usize> = gltf
+        .nodes
+        .iter()
+        .filter_map(|h| assets.nodes.get(h))
+        .flat_map(|n| {
+            n.children
+                .iter()
+                .filter_map(|c| assets.nodes.get(c))
+                .map(|c| c.index)
+        })
+        .collect();
+    gltf.nodes
+        .iter()
+        .filter(|h| {
+            assets
+                .nodes
+                .get(*h)
+                .is_some_and(|n| !children.contains(&n.index))
+        })
+        .collect()
 }
 
 fn spawn_node(

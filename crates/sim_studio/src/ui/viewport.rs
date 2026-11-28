@@ -1,8 +1,9 @@
 //! The 3D viewport in Preview Run and Crash Replay (`sim_studio_ux.md` §7.10, §10.3): a camera
-//! rendering into a `ViewportNode`'s image, a sphere per body, the ground as graph paper with
-//! distance labels, velocity arrows and body axes, and the State HUD. Every position comes from
-//! the f64 state in [`ViewSource`] through [`crate::viewport`]; nothing here reads a `Transform`
-//! back.
+//! rendering into a `ViewportNode`'s image, a sphere per body (or its model, its LOD files and
+//! the far marker), the ground as graph paper with distance labels, velocity arrows and body
+//! axes, and the State HUD. A click on a body's marker focuses the camera on it. Every position
+//! comes from the f64 state in [`ViewSource`] through [`crate::viewport`]; nothing here reads a
+//! `Transform` back.
 
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
@@ -12,13 +13,14 @@ use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::scene::{CommandsSceneExt, bsn};
+use bevy::ui::UiGlobalTransform;
 use bevy::ui::widget::ViewportNode;
 use sim_studio_ui::prelude::*;
 
-use super::models::{ModelRoot, shown_scenario};
+use super::models::{ModelLevel, ModelRoot, SceneLooks, shown_scenario};
 use super::{action, child};
 use crate::actions::{PreviewState, StudioCommand};
-use crate::models::{HIDE_MARKER_PX, MIN_MODEL_PX};
+use crate::models::{HIDE_MARKER_PX, level_for};
 use crate::replay::{ReplayState, finite_kept, last_finite_position};
 use crate::state::AppState;
 use crate::viewport::{
@@ -44,6 +46,35 @@ pub struct ViewportView;
 /// The sphere drawn for a body, by `SimId`.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BodyVisual(pub u32);
+
+/// The far marker of a body, by `SimId`: a diamond [`FAR_MARKER_PX`] across, facing the camera,
+/// drawn while the body's model is too small to see (§7.11.6).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FarMarker(pub u32);
+
+/// The name label beside the focused body's far marker.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct FarLabel;
+
+/// The far marker's size on screen, px across (corner to corner).
+pub const FAR_MARKER_PX: f64 = 12.0;
+
+/// A click within this many px of a body's marker focuses the camera on it.
+pub const PICK_PX: f64 = 10.0;
+
+/// A press that moves further than this many px before it is released is a drag, not a click.
+pub const CLICK_SLOP_PX: f32 = 4.0;
+
+/// The bodies drawn as far markers this frame, by `SimId`, with their display position (ENU).
+#[derive(Resource, Clone, Debug, Default, PartialEq)]
+pub struct FarBodies(pub Vec<(u32, DVec3)>);
+
+/// How far the pointer moved since it was pressed in the view, px (to tell clicks from drags).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewPointer {
+    /// Distance moved since the press.
+    pub moved: f32,
+}
 
 /// The ground plane under the grid.
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -86,6 +117,7 @@ pub struct BodyGizmos;
 #[derive(Resource, Clone, Debug)]
 pub struct ViewAssets {
     sphere: Handle<Mesh>,
+    diamond: Handle<Mesh>,
     plane: Handle<Mesh>,
     body: Handle<StandardMaterial>,
     paper: Handle<StandardMaterial>,
@@ -108,6 +140,7 @@ pub fn setup(
 ) {
     commands.insert_resource(ViewAssets {
         sphere: meshes.add(Sphere::new(1.0).mesh().uv(24, 12)),
+        diamond: meshes.add(Rhombus::new(1.0, 1.0)),
         plane: meshes.add(Plane3d::default().mesh().size(1.0, 1.0)),
         body: materials.add(unlit(Color::WHITE)),
         paper: materials.add(unlit(Color::WHITE)),
@@ -310,9 +343,25 @@ pub fn spawn_view(commands: &mut Commands, body: Entity, camera: Entity, view: &
             ViewportView,
             ChildOf(body),
         ))
+        .observe(on_press)
         .observe(on_drag)
+        .observe(on_click)
         .observe(on_scroll)
         .id();
+    let far = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                padding: UiRect::axes(px(4), px(1)),
+                ..default()
+            },
+            Background(token::BG_PANEL),
+            FarLabel,
+            Visibility::Hidden,
+            ChildOf(v),
+        ))
+        .id();
+    child(commands, far, mono(""));
     for i in 0..MAX_LABELS {
         commands.spawn_scene(mono("")).insert((
             Node {
@@ -344,12 +393,64 @@ fn view_size(nodes: &Query<&ComputedNode, With<ViewportView>>) -> DVec2 {
         .unwrap_or(DVec2::new(800.0, VIEW_H as f64))
 }
 
+/// A press starts a possible click.
+fn on_press(_press: On<PointerPress>, mut pointer: ResMut<ViewPointer>) {
+    pointer.moved = 0.0;
+}
+
+/// A click (a press released without dragging) on or near a body's marker focuses the camera on
+/// that body, in the current focus mode.
+fn on_click(
+    click: On<PointerClick>,
+    pointer: Res<ViewPointer>,
+    view: Res<ViewportState>,
+    source: Res<ViewSource>,
+    nodes: Query<(&ComputedNode, &UiGlobalTransform), With<ViewportView>>,
+    mut out: MessageWriter<StudioCommand>,
+) {
+    if click.button != PointerButton::Primary || pointer.moved > CLICK_SLOP_PX {
+        return;
+    }
+    let Some((node, transform)) = nodes.iter().next() else {
+        return;
+    };
+    let inverse = node.inverse_scale_factor();
+    let size = (node.size() * inverse).as_dvec2();
+    let top_left = (transform.translation * inverse).as_dvec2() - size / 2.0;
+    let at = click.pointer.position.as_dvec2() - top_left;
+    let projection = ViewProjection::new(&view.rig, size);
+    if let Some(id) = pick_body(&projection, &view.frame, &source.bodies, at) {
+        out.write(StudioCommand::CameraFocus(Some(id), view.focus.mode));
+    }
+}
+
+/// The body whose marker is nearest `at` (px from the view's top left), within [`PICK_PX`].
+pub fn pick_body(
+    projection: &ViewProjection,
+    frame: &crate::viewport::ViewFrame,
+    bodies: &[sim_schema::BodySnapshot],
+    at: DVec2,
+) -> Option<u32> {
+    bodies
+        .iter()
+        .filter_map(|b| {
+            let p = frame.position(b.pos);
+            let s = p.is_finite().then(|| projection.project(p)).flatten()?;
+            let d = s.distance(at);
+            (d <= PICK_PX).then_some((d, b.sim_id))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, id)| id)
+}
+
 /// Drag with the left button orbits; with the right or middle button pans and frees the camera.
 fn on_drag(
     drag: On<PointerDrag>,
     mut view: ResMut<ViewportState>,
+    mut pointer: ResMut<ViewPointer>,
     nodes: Query<&ComputedNode, With<ViewportView>>,
 ) {
+    pointer.moved += drag.delta.length();
     let (dx, dy) = (drag.delta.x as f64, drag.delta.y as f64);
     match drag.button {
         PointerButton::Primary => view.rig.orbit(-dx * 0.006, dy * 0.006),
@@ -403,9 +504,11 @@ pub fn step_camera(
     }
 }
 
-/// Place every body's model and marker sphere, and draw velocity arrows and body axes. A model
-/// under [`MIN_MODEL_PX`] across is hidden, and one over [`HIDE_MARKER_PX`] hides its marker, so a
-/// body far away is still a findable dot and a near one shows its shape (§7.11.6).
+/// Place every body's model and marker sphere, and draw velocity arrows and body axes. Each
+/// model shows the level its size on screen calls for: its own file, then its LOD files; under
+/// [`crate::models::MIN_MODEL_PX`] across none, and the far marker instead of the sphere
+/// ([`FarBodies`], [`draw_far_markers`]). One over [`HIDE_MARKER_PX`] hides its sphere, so a body
+/// far away is still findable and a near one shows its shape (§7.11.6).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn draw_bodies(
     mut commands: Commands,
@@ -416,6 +519,8 @@ pub fn draw_bodies(
     nodes: Query<&ComputedNode, With<ViewportView>>,
     mut visuals: Query<(Entity, &BodyVisual, &mut Transform), Without<ModelRoot>>,
     mut models: Query<(&ModelRoot, &mut Transform, &mut Visibility), Without<BodyVisual>>,
+    mut levels: Query<&mut Visibility, (With<ModelLevel>, Without<ModelRoot>)>,
+    mut far: ResMut<FarBodies>,
     mut gizmos: Gizmos<BodyGizmos>,
     colors: ThemeColors,
 ) {
@@ -427,6 +532,7 @@ pub fn draw_bodies(
     let origin = view.rig.pivot;
     let frame = &view.frame;
     let mut big = Vec::new();
+    let mut small = Vec::new();
     for (root, mut transform, mut visibility) in &mut models {
         let b = bodies.iter().find(|b| b.sim_id == root.sim_id);
         let p = b.map(|b| frame.position(b.pos)).unwrap_or(DVec3::NAN);
@@ -441,15 +547,29 @@ pub fn draw_bodies(
             rotation: attitude_to_render(q),
             scale: Vec3::ONE,
         };
-        let shown = if px >= MIN_MODEL_PX {
+        let level = level_for(px, &root.below_px);
+        let shown = if level.is_some() {
             Visibility::Inherited
         } else {
+            small.push((root.sim_id, p));
             Visibility::Hidden
         };
         visibility.set_if_neq(shown);
+        for (k, e) in root.levels.iter().enumerate() {
+            if let Ok(mut v) = levels.get_mut(*e) {
+                v.set_if_neq(if level == Some(k) {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                });
+            }
+        }
         if px >= HIDE_MARKER_PX {
             big.push(root.sim_id);
         }
+    }
+    if far.0 != small {
+        far.0 = small;
     }
     let mut shown = Vec::with_capacity(bodies.len());
     for (entity, BodyVisual(id), mut transform) in &mut visuals {
@@ -459,7 +579,7 @@ pub fn draw_bodies(
         };
         shown.push(*id);
         let p = frame.position(b.pos);
-        if !p.is_finite() || big.contains(id) {
+        if !p.is_finite() || big.contains(id) || far.0.iter().any(|(f, _)| f == id) {
             *transform = Transform::from_scale(Vec3::ZERO);
             continue;
         }
@@ -572,6 +692,110 @@ pub fn draw_bodies(
 
 /// Segments drawn per collision shape at most, so a large triangle mesh stays cheap to draw.
 pub const MAX_WIRE_SEGMENTS: usize = 4_000;
+
+/// Draw the far markers of [`FarBodies`]: a diamond [`FAR_MARKER_PX`] across, facing the camera,
+/// in the entity's colour (its look's tint, else the bodies' accent), with a name label beside
+/// the focused body's.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn draw_far_markers(
+    mut commands: Commands,
+    far: Res<FarBodies>,
+    view: Res<ViewportState>,
+    looks: Res<SceneLooks>,
+    state: Res<State<AppState>>,
+    assets: Option<Res<ViewAssets>>,
+    nodes: Query<&ComputedNode, With<ViewportView>>,
+    mut markers: Query<(Entity, &FarMarker, &mut Transform, &mut Visibility)>,
+    mut labels: Query<
+        (&mut Node, &mut Visibility, &Children),
+        (With<FarLabel>, Without<FarMarker>),
+    >,
+    mut texts: Query<&mut Text>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut tints: Local<Vec<([u32; 4], Handle<StandardMaterial>)>>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    let projection = ViewProjection::new(&view.rig, view_size(&nodes));
+    let origin = view.rig.pivot;
+    let eye = to_render(view.rig.eye(), origin);
+    let facing = Transform::from_translation(eye)
+        .looking_at(Vec3::ZERO, Vec3::Y)
+        .rotation;
+    let mut placed = Vec::with_capacity(far.0.len());
+    for (entity, FarMarker(id), mut transform, mut visibility) in &mut markers {
+        let Some((_, p)) = far.0.iter().find(|(f, _)| f == id) else {
+            if looks.get(*id).is_none() {
+                commands.entity(entity).despawn();
+            } else {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
+            continue;
+        };
+        placed.push(*id);
+        let size = FAR_MARKER_PX * projection.pixel_size_at(*p);
+        *transform = Transform {
+            translation: to_render(*p, origin),
+            rotation: facing,
+            scale: Vec3::splat(size as f32),
+        };
+        visibility.set_if_neq(Visibility::Inherited);
+    }
+    for (id, _) in far.0.iter().filter(|(id, _)| !placed.contains(id)) {
+        let tint = looks.get(*id).and_then(|l| l.model.tint);
+        let material = match tint {
+            None => assets.body.clone(),
+            Some(t) => {
+                let key = t.map(f32::to_bits);
+                match tints.iter().find(|(k, _)| *k == key) {
+                    Some((_, h)) => h.clone(),
+                    None => {
+                        let h = materials.add(unlit(Color::srgba(t[0], t[1], t[2], 1.0)));
+                        tints.push((key, h.clone()));
+                        h
+                    }
+                }
+            }
+        };
+        commands.spawn((
+            Mesh3d(assets.diamond.clone()),
+            MeshMaterial3d(material),
+            Transform::from_scale(Vec3::ZERO),
+            FarMarker(*id),
+            view_layer(),
+            DespawnOnExit(*state.get()),
+        ));
+    }
+    let focused = view
+        .focus
+        .target
+        .and_then(|t| far.0.iter().find(|(id, _)| *id == t))
+        .and_then(|(id, p)| Some((*id, projection.project(*p)?)))
+        .filter(|(_, s)| projection.inside(*s));
+    for (mut node, mut visibility, children) in &mut labels {
+        let Some((id, s)) = focused else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        let name = looks
+            .get(id)
+            .and_then(|l| l.manifest.as_ref())
+            .map(|m| format!("#{id} {}", m.display_name))
+            .unwrap_or_else(|| format!("#{id}"));
+        let half = (FAR_MARKER_PX / 2.0) as f32;
+        node.left = px(s.x as f32 + half + 4.0);
+        node.top = px(s.y as f32 - half - 6.0);
+        for c in children.iter() {
+            if let Ok(mut t) = texts.get_mut(c)
+                && t.0 != name
+            {
+                t.0.clone_from(&name);
+            }
+        }
+        visibility.set_if_neq(Visibility::Inherited);
+    }
+}
 
 /// The collision shapes of the scenario on show as wireframe segments, rebuilt when its
 /// `scene_hash` changes: a body's in body axes about its origin, a static collider's in the

@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S5-4. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S5-5. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -60,9 +60,11 @@ aircraft.
 > (same final state hash), with parameter corners and seed, play, pause, step and speeds, live body states,
 > requirements and plots; a crash opens Crash Replay from memory. Its 3D viewport draws the bodies with their 3D
 > models (glTF from a built-in library of 16, the workspace's `models/` or a team library, linked in the scenario's
-> `visual:` section or defaulted from the body's physics model; `saber-cli model inspect` checks a file) and velocity
-> arrows, and on request every collision shape as a wireframe, over a graph-paper ground labelled every 10 m, a camera that frames, follows, chases or tracks a body, and
-> a large position and velocity read-out. Crash Replay scrubs a crash dump's or a crashed preview's recorded frames
+> `visual:` section or defaulted from the body's physics model; `saber-cli model inspect` checks a file), switching to
+> a model's coarser LOD files as it shrinks on screen (`saber-cli model lod add`) and then to a constant-size diamond,
+> so a far body stays findable and a click on it focuses the camera, with velocity arrows, and on request every
+> collision shape as a wireframe, over a graph-paper ground labelled every 10 m, a camera that frames, follows,
+> chases or tracks a body, and a large position and velocity read-out. Crash Replay scrubs a crash dump's or a crashed preview's recorded frames
 > exactly as written, with jumps to the first contact, the first ×10 growth, the first non-finite value and the
 > energy bound, energy and event tracks, a growth inspector and a red ring where the NaN started. A crash re-simulates
 > from Tick 0 in the background and is checked bit for bit against its recorded frames (a dump from another build

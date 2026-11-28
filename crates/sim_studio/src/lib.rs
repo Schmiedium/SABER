@@ -116,6 +116,8 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<ui::library::Thumbs>()
             .init_resource::<ui::models::ModelStore>()
             .init_resource::<ui::viewport::SceneShapes>()
+            .init_resource::<ui::viewport::FarBodies>()
+            .init_resource::<ui::viewport::ViewPointer>()
             .init_gizmo_group::<ui::viewport::GridGizmos>()
             .init_gizmo_group::<ui::viewport::BodyGizmos>()
             .add_systems(Startup, (setup_ui, ui::viewport::setup))
@@ -162,6 +164,7 @@ impl Plugin for StudioUiPlugin {
                         ui::models::spawn_models,
                         ui::viewport::step_camera,
                         ui::viewport::draw_bodies,
+                        ui::viewport::draw_far_markers,
                         ui::viewport::draw_collision,
                         ui::viewport::draw_grid,
                         ui::viewport::draw_hud,
