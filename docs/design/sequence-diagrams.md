@@ -389,6 +389,8 @@ sequenceDiagram
 
 Dense, contiguous `run_id`s matter: section 5 hands out `[start, end)` ranges, which only works if every id in a range is a real row.
 
+As built (step S6-1): from the studio this flow starts at Campaign Setup. The studio writes the choices as `campaigns/<id>/study.json` and runs `python -m saber.study campaigns/<id>/study.json --preflight --json`. `saber.study` then runs this flow (`saber.sweep.generate`, reading the bindings through `saber-cli validate --json`), lays the folder out with `saber.campaign.prepare` and preflights it (section 4's `--validate-only`). One JSON answer comes back to the studio's summary card. The studio checks the study the way `SweepGen` does before it starts Python, so most refusals show at once. The estimated core-hours come from a timed run of the scenario in the studio (`sim_studio_ux.md` §7.6.1).
+
 ---
 
 ## 4. Campaign submission and job startup

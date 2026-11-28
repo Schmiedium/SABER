@@ -1,8 +1,9 @@
 """SABER Python package (subsystems-and-interfaces.md §5.7).
 
-Subpackages: schema, sweep, campaign, analyze, verify, report, testing. `schema` reads and
+Subpackages: schema, sweep, campaign, study, analyze, verify, report, testing. `schema` reads and
 writes the on-disk tables (build step 3a); `sweep` writes sweep manifests and `campaign` writes
-`campaign.toml`, drives `sim_hpc` and submits PBS or Slurm jobs (steps 3c, 4b); `analyze` reads a
+`campaign.toml`, drives `sim_hpc` and submits PBS or Slurm jobs (steps 3c, 4b); `study` builds a
+campaign from the `study.json` the studio's Campaign Setup writes (step S6-1); `analyze` reads a
 campaign's committed parts, `verify` turns per-run verdicts into campaign verdicts with confidence
 bounds (`verdicts.parquet`) and `report` writes the HTML evidence report (step 4c).
 Column lists are never hand-coded here; they come from the JSON schemas in `saber/schemas/`,
@@ -16,4 +17,4 @@ try:
 except _metadata.PackageNotFoundError:  # pragma: no cover - running from a source tree
     __version__ = "0.0.0"
 
-__all__ = ["schema", "sweep", "campaign", "analyze", "verify", "report", "testing"]
+__all__ = ["schema", "sweep", "campaign", "study", "analyze", "verify", "report", "testing"]

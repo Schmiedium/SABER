@@ -6,12 +6,15 @@ it with `sim_hpc --local`; the committed summaries come back through `saber.sche
 against the vacuum-parabola answers (apogee `vz^2 / 2g`, flight time `2 vz / g`). The same manifest
 on 1 and 3 threads gives the same `final_state_hash` per run (R3 from Python), and preflight's
 refusals reach Python as statuses. Step 4c's exit test judges a campaign with `saber.verify` and
-checks `verdicts.parquet` against verdicts worked out by hand from the same parabola.
+checks `verdicts.parquet` against verdicts worked out by hand from the same parabola. Step S6-1's
+exit test builds the studio's golden `study.json` with `python -m saber.study` and checks that the
+campaign equals the one the Python API writes for the same choices, then runs it.
 
 Needs pyarrow and the binaries (`SABER_SIM_HPC`, `SABER_CLI` or `PATH`). Without them the tests
 skip, unless `SABER_REQUIRE_BINARIES=1` (set in CI's end-to-end job), where they fail instead.
 """
 
+import json
 import math
 import os
 import time
@@ -20,13 +23,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from saber import _tools, analyze, campaign, report, schema, sweep, verify
-from saber.campaign import CampaignError, Execution, Status
+from saber import _tools, analyze, campaign, report, schema, study, sweep, verify
+from saber.campaign import CampaignError, CrashPolicy, Execution, SnapshotPolicy, Status
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENE = ROOT / "crates" / "sim_models" / "tests" / "scenarios" / "projectile.scn.ron"
 REQ = ROOT / "crates" / "saber_cli" / "tests" / "data" / "projectile.req.ron"
 VERIFY_REQ = Path(__file__).resolve().parent / "data" / "projectile_verify.req.ron"
+STUDIO_STUDY = Path(__file__).resolve().parent / "data" / "studio_study.json"
 G = 9.80665
 
 
@@ -267,3 +271,37 @@ def test_verdicts_match_a_hand_computed_expectation(tmp_path, scene, capsys):
     p = verify.verify(toml)
     assert p.partial and p.runs_judged < 20 and p.missing
     assert 'class="badge partial"' in report.write_report(toml, p).read_text(encoding="utf-8")
+
+
+def test_the_studio_study_builds_the_campaign_the_api_builds(tmp_path, scene, capsys):
+    # What the studio's Campaign Setup runs on the study it writes (crates/sim_studio/tests/setup.rs
+    # checks the studio writes exactly this file for its choices).
+    assert study.main([str(STUDIO_STUDY), "--dir", str(tmp_path / "studio"), "--preflight", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] and (out["runs"], out["param_sets"], out["replicates"]) == (18, 6, 3)
+    assert out["param_keys"] == ["muzzle_vz"] and out["warnings"] == []
+    pf = out["preflight"]
+    assert pf["runs"] == 18 and pf["scene_hash"] == f"{scene.scene_hash:016x}" and pf["warnings"] == []
+
+    # The same choices through the API.
+    s = sweep.generate(scene, {"muzzle_vz": sweep.Uniform(30, 90)}, sweep.LatinHypercube(6), replicates=3, seed=11)
+    api = campaign.prepare(
+        tmp_path / "api", id="proj-studio", scene=SCENE, requirements=REQ, sweep=s,
+        execution=Execution(flight_recorder_ticks=32, snapshot_policy=SnapshotPolicy(base_every=50, max_per_run=500),
+                            threads=2),
+        crash_policy=CrashPolicy(dump_quota_per_param_set=2),
+    )
+    toml = Path(out["campaign_toml"])
+    assert toml == tmp_path / "studio" / "campaign.toml"
+    assert toml.read_text() == api.read_text()
+    for name in ("projectile.scn.ron", "projectile.req.ron"):
+        assert (toml.parent / name).read_bytes() == (api.parent / name).read_bytes()
+    a = schema.read_table(api.parent / "sweep_manifest.parquet", "manifest")
+    b = schema.read_table(Path(out["manifest"]), "manifest")
+    assert a.table.equals(b.table) and a.metadata == b.metadata and a.dynamic == b.dynamic
+    created = "created_utc"
+    assert {k: v for k, v in a.header.items() if k != created} == {k: v for k, v in b.header.items() if k != created}
+
+    # And it runs as written.
+    run = campaign.run_local(toml).check()
+    assert run.report["runs"] == 18 and run.report["crashes"] == 0

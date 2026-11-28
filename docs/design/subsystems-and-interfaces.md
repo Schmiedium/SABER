@@ -154,6 +154,10 @@ far marker is a camera-facing diamond 12 px across; LOD files are added with `sa
 control yet); a click on a body's marker focuses the camera on it. IB-20: each `lods` entry gains optional
 `content_hash` and `triangles` (additive; the schema stays 1.0.0, since readers ignore unknown fields and default
 missing ones).
+v0.45 (2026-11-28, build step S6-1) records Campaign Setup as built (§5.5 `Studio.CampaignSetup`, §5.7
+`saber.study`): the studio writes the study it set up as `campaigns/<id>/study.json` (format `saber.study`,
+version 1) and builds the campaign with `python -m saber.study … --preflight --json`, so `saber.sweep` draws every
+sweep and the studio never samples; execution targets and submission are S6-2.
 Companion docs: `sim_studio_ux.md` (GUI UX/UI), `sequence-diagrams.md` (end-to-end flows),
 `flight-dynamics-sources.md` (reading list for aircraft and drone models), `physics-engine-tradeoffs.md`
 (Rapier vs Avian vs custom kernel, D13, the contact design, and the integrator family, D14).
@@ -852,6 +856,20 @@ it. Levels on a body's position are drawn as planes in `Studio.Viewport` (`ViewS
 and impact-circle overlays need requirement kinds that carry geometry, which IB-03 does not have yet. Details in
 `sim_studio_ux.md` §7.9.4.
 
+**As built (step S6-1).** `Studio.CampaignSetup` is `sim_studio::setup` (the study, its checks, the estimate and
+the Python job; no UI) and `sim_studio::ui::setup`. It does not call `saber.sweep` as a library: it writes
+`campaigns/<id>/study.json` (§5.7) and runs `python -m saber.study <file> --preflight --json` in the background,
+which draws the sweep, writes `campaign.toml` and the manifest with `saber.campaign.prepare` and preflights with
+`sim_hpc --validate-only`. So a campaign set up in the studio is the one the Python API writes for the same choices
+(a golden `study.json` written by a studio test is built by the end-to-end Python test and compared with the
+API's campaign file by file). `setup::plan` repeats `saber.sweep.generate`'s checks and counts each sampler's
+parameter sets, so refusals show before Python runs. The cost estimate times the scenario at its defaults in the
+frame loop (`rerun::Rerun`, 1.5 s at most) and extrapolates to `max_ticks`; the runs a `Probability` requirement
+needs come from the one-sided Clopper–Pearson bound with every run passing, pooled (D21). The interpreter is
+`SABER_PYTHON` (default `python3`); `SABER_CLI` and `SABER_SIM_HPC` are pointed at the binaries beside the studio
+when unset. Execution targets, `submit_campaign.pbs` and **Submit…** are S6-2; `Studio.Handoff`'s `OpenCampaign`
+after a submit waits for `sim_explorer` (6b). Details in `sim_studio_ux.md` §7.6.1.
+
 ### 5.6 `sim_hpc` — headless cluster runner
 
 ```mermaid
@@ -1025,6 +1043,21 @@ the policy, counterexamples, upper bounds and warnings in its `saber.verify` foo
 requirement passed; 2 a set that does not fit or an unreadable file; 6 an aborted campaign, whose report is still
 written; 64 usage). Sobol sensitivity indices (seq §10) and the top-up manifest for straddling parameter sets
 (seq §11) are not built yet.
+
+**As built (step S6-1), `saber.study`.** A campaign's choices as one JSON file, `study.json` (format `saber.study`,
+version 1), which the studio's Campaign Setup writes in `campaigns/<id>/`: `id`; `scene` and `requirements`
+(relative to the file, `requirements` may be null); `sweep` with `sampler` (`method` one of `none`,
+`monte_carlo`/`latin_hypercube` with `n`, `sobol` with `n` and `scramble`, `grid` with `levels` as a number or one
+per key, `morris` with `trajectories` and `levels`), `params` (key to `{"dist": "uniform"|"log_uniform"|"normal"|
+"levels"|"fixed"|"default", …}`, the numbers named as the `saber.sweep` definitions name them), `replicates` and
+`seed`; optional `execution`, `crash_policy` and `checkpoint` with `saber.campaign`'s keys (keys left out keep its
+defaults, unknown keys are refused); optional `output` with `shared_out` and `scratch_dir`; and `notes` and `tags`,
+which Python does not read. `Study.read(path)` reads it, `build(study, directory)` draws the sweep with
+`saber.sweep.generate` and lays the campaign out with `saber.campaign.prepare` (in the file's folder by default).
+`python -m saber.study <study.json> [--dir DIR] [--preflight] [--json]` does both and, with `--preflight`, runs
+`campaign.preflight`; with `--json` it prints one object (`ok`, `campaign_toml`, `manifest`, `runs`,
+`param_sets`, `replicates`, `param_keys`, `sampler`, `warnings`, `preflight`) or `{"ok": false, "error": {"kind",
+"message"}}`, with exit 0 written, 2 refused, 64 usage, 70 internal (IB-04's codes).
 
 ### 5.8 `sim_query` — campaign query engine (new, D10)
 

@@ -7,8 +7,8 @@
 //! S2-3 its Requirements; S3-1 the Preview Run ([`preview`]), S3-2 its 3D [`viewport`], S4-1 Crash
 //! Replay ([`replay`]), S4-2 re-simulation ([`rerun`]), S4-3 Run Replay ([`runs`]) and S4-4 its
 //! requirement overlays ([`overlay`]), S5-1 the bodies' 3D [`models`], and S5-2 the Library's 3D
-//! Models tab, the Inspector's Appearance section and the Import dialog ([`library`]). Campaign
-//! Setup follows in S6.
+//! Models tab, the Inspector's Appearance section and the Import dialog ([`library`]), and S6-1
+//! Campaign Setup ([`setup`]).
 //!
 //! The logic ([`StudioCorePlugin`]) runs without a window, so tests drive it headless
 //! (verification §8.3); [`StudioUiPlugin`] adds the screens on top of the `sim_studio_ui` kit.
@@ -28,6 +28,7 @@ pub mod recent;
 pub mod replay;
 pub mod rerun;
 pub mod runs;
+pub mod setup;
 pub mod state;
 pub mod ui;
 pub mod viewport;
@@ -67,6 +68,8 @@ impl Plugin for StudioCorePlugin {
             .add_message::<DocChanged>()
             .add_message::<PreviewChanged>()
             .add_message::<ReplayChanged>()
+            .add_message::<setup::SetupChanged>()
+            .init_resource::<setup::SetupState>()
             .init_resource::<BuilderDoc>()
             .init_resource::<ReqPanel>()
             .init_resource::<models::ModelLibrary>()
@@ -85,6 +88,7 @@ impl Plugin for StudioCorePlugin {
             .init_resource::<actions::CurrentRuns>()
             .init_resource::<LauncherCampaigns>()
             .add_systems(OnEnter(AppState::Launcher), actions::refresh_campaigns)
+            .add_systems(OnEnter(AppState::CampaignSetup), setup::enter)
             .add_systems(
                 Update,
                 (
@@ -93,6 +97,8 @@ impl Plugin for StudioCorePlugin {
                     actions::run_preview.run_if(in_state(AppState::LocalRun)),
                     actions::run_replay.run_if(replay_shown),
                     actions::run_replay_jobs.run_if(replay_shown),
+                    setup::apply,
+                    setup::poll,
                 )
                     .chain(),
             );
@@ -151,6 +157,7 @@ impl Plugin for StudioUiPlugin {
                     actions::viewport_keys.run_if(viewport_shown),
                     actions::replay_keys.run_if(replay_shown),
                     ui::replay::refresh.after(actions::run_replay_jobs),
+                    ui::setup::refresh.after(setup::poll),
                     ui::replay::display
                         .after(ui::replay::refresh)
                         .run_if(replay_shown),
