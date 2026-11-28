@@ -7,6 +7,7 @@
 //! export rebuild a [`Scenario`] from the parts with `Scenario::from_parts`, which validates and
 //! hashes exactly as a parsed file is.
 
+pub mod collision;
 pub mod fields;
 pub mod lint;
 pub mod looks;
@@ -22,6 +23,7 @@ use sim_core::{
     Uncertainties,
 };
 
+pub use collision::{AlignOp, SavedDefault, shape_summary};
 pub use fields::{FieldKind, FieldView};
 pub use lint::{LintItem, LintLevel};
 pub use looks::{Appearance, LookChoice, LookField, LookStatus};

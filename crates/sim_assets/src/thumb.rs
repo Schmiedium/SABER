@@ -148,7 +148,25 @@ impl View {
         eye: DVec3::new(1.0, -0.85, -0.6),
         up: DVec3::new(0.0, 0.0, -1.0),
     };
+    /// From straight ahead, the body's up at the top.
+    pub const FRONT: View = View {
+        eye: DVec3::X,
+        up: DVec3::NEG_Z,
+    };
+    /// From the right, forward to the right and the body's up at the top.
+    pub const SIDE: View = View {
+        eye: DVec3::Y,
+        up: DVec3::NEG_Z,
+    };
+    /// From above, forward at the top and right to the right.
+    pub const TOP: View = View {
+        eye: DVec3::NEG_Z,
+        up: DVec3::X,
+    };
 }
+
+/// A line drawn over the model (collision outlines), body frame, with its sRGB colour.
+pub type Segment = ([DVec3; 2], [u8; 4]);
 
 /// What else to draw over the model.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -173,6 +191,18 @@ const LIGHT: DVec3 = DVec3::new(0.5, -0.3, -0.8);
 
 /// Draw facets in the body frame, seen from `view`, fitted to a `size`-pixel square.
 pub fn draw(facets: &[Facet], size: u32, view: View, extras: Extras) -> Drawn {
+    draw_over(facets, &[], size, view, extras)
+}
+
+/// [`draw`] with lines over the model, never hidden by it (a collision shape's outline); the
+/// picture is fitted to the model and the lines together.
+pub fn draw_over(
+    facets: &[Facet],
+    segments: &[Segment],
+    size: u32,
+    view: View,
+    extras: Extras,
+) -> Drawn {
     // Drawn at twice the size, then halved: cheap anti-aliasing.
     let big = size * 2;
     let mut pic = Picture::new(big, big);
@@ -182,6 +212,7 @@ pub fn draw(facets: &[Facet], size: u32, view: View, extras: Extras) -> Drawn {
     let light = LIGHT.normalize();
     let screen = |p: DVec3| DVec3::new(p.dot(right), p.dot(up), p.dot(dir));
     let mut points: Vec<DVec3> = facets.iter().flat_map(|(t, _)| t.iter()).copied().collect();
+    points.extend(segments.iter().flat_map(|(s, _)| s.iter()).copied());
     if extras.axes {
         points.push(DVec3::ZERO);
     }
@@ -243,6 +274,9 @@ pub fn draw(facets: &[Facet], size: u32, view: View, extras: Extras) -> Drawn {
                 }
             }
         }
+    }
+    for ([p, q], color) in segments {
+        line(&mut pic, to_px(*p), to_px(*q), *color, 2);
     }
     if extras.axes {
         let len = b.size().x.max(b.size().y).max(1e-9) * 0.35;

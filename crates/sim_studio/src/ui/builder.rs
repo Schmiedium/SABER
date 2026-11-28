@@ -283,6 +283,7 @@ pub fn inspector(commands: &mut Commands, body: Entity, inputs: &BuilderInputs) 
     let looks_first = inputs.panel.tab == BuilderTab::Models;
     if looks_first {
         super::library::appearance(commands, body, doc, slot, inputs.models, inputs.library);
+        super::library::collision_section(commands, body, doc, slot);
     }
     for c in doc.components(slot) {
         let head = child(commands, body, wide_row());
@@ -368,6 +369,7 @@ pub fn inspector(commands: &mut Commands, body: Entity, inputs: &BuilderInputs) 
     }
     if !looks_first {
         super::library::appearance(commands, body, doc, slot, inputs.models, inputs.library);
+        super::library::collision_section(commands, body, doc, slot);
     }
     let addable = doc.addable(slot);
     if !addable.is_empty() {

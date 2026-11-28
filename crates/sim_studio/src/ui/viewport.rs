@@ -15,7 +15,7 @@ use bevy::scene::{CommandsSceneExt, bsn};
 use bevy::ui::widget::ViewportNode;
 use sim_studio_ui::prelude::*;
 
-use super::models::ModelRoot;
+use super::models::{ModelRoot, shown_scenario};
 use super::{action, child};
 use crate::actions::{PreviewState, StudioCommand};
 use crate::models::{HIDE_MARKER_PX, MIN_MODEL_PX};
@@ -253,6 +253,7 @@ pub fn toolbar(commands: &mut Commands, body: Entity, view: &ViewportState, ids:
         ("HUD", view.hud, ViewToggle::Hud),
         ("Grid", view.grid, ViewToggle::Grid),
         ("Gizmos", view.gizmos, ViewToggle::Gizmos),
+        ("Collision", view.collision, ViewToggle::Collision),
     ] {
         let command = StudioCommand::ToggleView(toggle);
         if on {
@@ -563,6 +564,85 @@ pub fn draw_bodies(
             gizmos.line(
                 to_render(p, origin),
                 to_render(p + q * axis * len, origin),
+                color,
+            );
+        }
+    }
+}
+
+/// Segments drawn per collision shape at most, so a large triangle mesh stays cheap to draw.
+pub const MAX_WIRE_SEGMENTS: usize = 4_000;
+
+/// The collision shapes of the scenario on show as wireframe segments, rebuilt when its
+/// `scene_hash` changes: a body's in body axes about its origin, a static collider's in the
+/// world frame (§7.11.2 **Show collision**).
+#[derive(Resource, Clone, Debug, Default)]
+pub struct SceneShapes {
+    /// The `scene_hash` of the scenario they are for.
+    pub key: Option<u64>,
+    /// `(SimId, on a body, segments)`.
+    pub wires: Vec<(u32, bool, Vec<[DVec3; 2]>)>,
+}
+
+/// With **Collision** on, overlay every collision shape as a wireframe in the `bound` colour, so
+/// the model and the contact geometry can be compared (§7.11.2).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_collision(
+    view: Res<ViewportState>,
+    source: Res<ViewSource>,
+    state: Res<State<AppState>>,
+    preview: Res<PreviewState>,
+    replay: Res<ReplayState>,
+    mut shapes: ResMut<SceneShapes>,
+    mut gizmos: Gizmos<BodyGizmos>,
+    colors: ThemeColors,
+) {
+    if !view.collision {
+        return;
+    }
+    let scenario = shown_scenario(state.get(), &preview, &replay);
+    let key = scenario.as_ref().map(|s| s.scene_hash());
+    if key != shapes.key {
+        shapes.key = key;
+        shapes.wires = scenario
+            .map(|s| {
+                s.entities()
+                    .iter()
+                    .filter_map(|e| {
+                        let shape = e.get::<sim_core::CollisionShape>()?;
+                        let on_body = e.get::<sim_core::RigidBody6>().is_some()
+                            || e.get::<sim_core::PointMass3>().is_some();
+                        let wires = sim_core::geometry::derive::wireframe(shape, MAX_WIRE_SEGMENTS);
+                        Some((e.sim_id()?.0, on_body, wires))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let color = colors.color(&token::BOUND);
+    let origin = view.rig.pivot;
+    let frame = &view.frame;
+    // A static shape is placed like a body at the world origin with no turn.
+    let world = (
+        frame.position([0.0; 3]),
+        frame.attitude([1.0, 0.0, 0.0, 0.0]),
+    );
+    for (id, on_body, wires) in &shapes.wires {
+        let (p, q) = if *on_body {
+            let Some(b) = source.bodies.iter().find(|b| b.sim_id == *id) else {
+                continue;
+            };
+            (frame.position(b.pos), frame.attitude(b.quat_wxyz))
+        } else {
+            world
+        };
+        if !(p.is_finite() && q.is_finite()) {
+            continue;
+        }
+        for [a, b] in wires {
+            gizmos.line(
+                to_render(p + q * *a, origin),
+                to_render(p + q * *b, origin),
                 color,
             );
         }

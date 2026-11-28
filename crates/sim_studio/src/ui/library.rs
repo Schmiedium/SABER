@@ -1,7 +1,8 @@
-//! The Builder's 3D models (`sim_studio_ux.md` §7.11.1–§7.11.3): the Library's 3D Models tab in
-//! the left dock (search, source filter, thumbnail tiles), the selected model's details or the
-//! Import dialog in the center, and the Inspector's Appearance section on the right. Every change
-//! goes through [`StudioCommand`]s; panels refresh on [`DocChanged`].
+//! The Builder's 3D models (`sim_studio_ux.md` §7.11.1–§7.11.5): the Library's 3D Models tab in
+//! the left dock (search, source filter, thumbnail tiles), the selected model's details, the
+//! Import dialog, the Derive collision dialog or Align in the center, and the Inspector's
+//! Appearance and Collision sections on the right. Every change goes through [`StudioCommand`]s;
+//! panels refresh on [`DocChanged`].
 
 use std::collections::HashMap;
 
@@ -19,9 +20,12 @@ use sim_studio_ui::prelude::*;
 use super::{action, child};
 use crate::actions::{BuilderTab, DocChanged, ReqPanel, StudioCommand};
 use crate::builder::looks::describe;
-use crate::builder::{Appearance, LookChoice, LookField, LookStatus, ScenarioDoc};
+use crate::builder::{
+    AlignOp, Appearance, LookChoice, LookField, LookStatus, ScenarioDoc, shape_summary,
+};
 use crate::library::{
-    ImportDialog, ImportEdit, ModelPanel, PREVIEW_PX, destinations, key_of, source_heading,
+    AlignSession, DeriveDialog, ImportDialog, ImportEdit, MODEL_PX, ModelPanel, ModelView,
+    PREVIEW_PX, destinations, key_of, source_heading,
 };
 use crate::models::ModelLibrary;
 use crate::state::AppState;
@@ -46,6 +50,8 @@ pub struct Thumbs {
     generation: u64,
     /// The preview's image and the dialog revision it shows.
     pub preview: Option<(u64, Handle<Image>)>,
+    /// The Derive dialog's or Align's picture and the revision it shows.
+    pub picture: Option<(u64, Handle<Image>)>,
 }
 
 impl Thumbs {
@@ -125,6 +131,14 @@ pub fn load_thumbs(
             .preview
             .as_ref()
             .map(|p| (d.rev, images.add(image_of(&p.picture))));
+        new = true;
+    }
+    let rev = panel.picture.as_ref().map(|_| panel.picture_rev);
+    if thumbs.picture.as_ref().map(|(r, _)| *r) != rev {
+        thumbs.picture = panel
+            .picture
+            .as_ref()
+            .map(|p| (panel.picture_rev, images.add(image_of(&p.picture))));
         new = true;
     }
     if new {
@@ -327,6 +341,14 @@ pub fn center(
     thumbs: &Thumbs,
     ws: Option<&Workspace>,
 ) {
+    if let Some(a) = &panel.align {
+        align_panel(commands, body, doc, panel, a, thumbs, ws);
+        return;
+    }
+    if let Some(d) = &panel.derive {
+        derive_dialog(commands, body, doc, panel, d, thumbs);
+        return;
+    }
     if let Some(d) = &panel.import {
         import_dialog(commands, body, d, thumbs, ws);
         return;
@@ -386,7 +408,7 @@ pub fn center(
             body,
             status_text(
                 Status::Warning,
-                "⚠ The file changed since it was imported. Re-import records its new hash; entities that link it keep the old one until picked again.",
+                "The file changed since it was imported. Re-import records its new hash; entities that link it keep the old one until picked again.",
             ),
         );
     }
@@ -621,21 +643,12 @@ fn import_dialog(
         StudioCommand::ImportSet(ImportEdit::Replace(true)),
     );
     for p in d.problems() {
-        let status = match p.severity {
-            Severity::Refused => Status::Fail,
-            Severity::Warning => Status::Warning,
-            Severity::Info => Status::Running,
+        let text = p.message.clone();
+        match p.severity {
+            Severity::Refused => child(commands, body, status_text(Status::Fail, text)),
+            Severity::Warning => child(commands, body, status_text(Status::Warning, text)),
+            Severity::Info => child(commands, body, muted(format!("ℹ {text}"))),
         };
-        let mark = match p.severity {
-            Severity::Refused => "✖",
-            Severity::Warning => "⚠",
-            Severity::Info => "ℹ",
-        };
-        child(
-            commands,
-            body,
-            status_text(status, format!("{mark} {}", p.message)),
-        );
     }
     footer(commands, body, d);
 }
@@ -673,12 +686,364 @@ pub fn appearance_key(doc: &ScenarioDoc, panel: &ModelPanel) -> String {
         LookStatus::Found { notes, .. } => format!("found{}", notes.len()),
         other => format!("{other:?}"),
     };
+    let slot = doc.selected.unwrap_or_default();
+    let shape = doc.collision(slot).map(|c| shape_summary(&c));
+    let notes = doc
+        .lint()
+        .iter()
+        .filter(|l| l.sim_id == Some(a.sim_id) && l.text.contains("collision was derived"))
+        .count();
     format!(
-        "look:{:?}|{}|{status}|{}",
+        "look:{:?}|{}|{}|{status}|{}|{shape:?}|{:?}|{notes}",
         a.shown(),
+        a.linked.is_some(),
         a.visible,
-        panel.picking
+        panel.picking,
+        doc.derived(slot)
     )
+}
+
+/// The Inspector's Collision section (§7.11.2, §7.11.5) for the entity in `slot`: its shape, where
+/// it came from, and Derive from model, Align and Estimate mass properties.
+pub fn collision_section(commands: &mut Commands, body: Entity, doc: &ScenarioDoc, slot: usize) {
+    let Some(id) = doc.sim_id(slot) else {
+        return;
+    };
+    let head = child(commands, body, wide_row());
+    child(commands, head, heading("Collision"));
+    let shape = doc.collision(slot);
+    let r = child(commands, body, wide_row());
+    child(commands, r, field_label("Shape"));
+    match &shape {
+        Some(s) => {
+            child(commands, r, label(shape_summary(s)));
+        }
+        None => {
+            child(commands, r, muted("none"));
+        }
+    }
+    if let Some(d) = doc.derived(slot) {
+        let r = child(commands, body, wide_row());
+        child(commands, r, field_label("Derived"));
+        let parts = if d.method == sim_core::DeriveMethod::ConvexDecomposition {
+            format!(", up to {} parts", d.max_parts)
+        } else {
+            String::new()
+        };
+        child(
+            commands,
+            r,
+            muted(format!(
+                "from {} by {}{parts}",
+                d.model,
+                d.method.label().to_lowercase()
+            )),
+        );
+        let notes: Vec<_> = doc
+            .lint()
+            .iter()
+            .filter(|l| l.sim_id == Some(id) && l.text.contains("collision was derived"))
+            .collect();
+        if notes.is_empty() {
+            child(
+                commands,
+                body,
+                status_text(Status::Pass, "matches the model it shows"),
+            );
+        }
+        for n in notes {
+            let text = n
+                .text
+                .strip_prefix(&format!("#{id}: "))
+                .unwrap_or(&n.text)
+                .to_owned();
+            child(commands, body, status_text(Status::Warning, text));
+        }
+    }
+    let r = child(commands, body, wrap_row());
+    if doc.shown_look(slot).is_some() {
+        let text = if doc.derived(slot).is_some() {
+            "Re-derive from model…"
+        } else {
+            "Derive from model…"
+        };
+        action(commands, r, button(text), StudioCommand::DeriveOpen(slot));
+        action(
+            commands,
+            r,
+            button("Align…"),
+            StudioCommand::AlignOpen(slot),
+        );
+    } else {
+        child(
+            commands,
+            r,
+            muted("Pick a model to derive a collision shape from it or align it."),
+        );
+    }
+    if doc.on_body(slot) && shape.is_some() {
+        action(
+            commands,
+            r,
+            plain_button("Estimate inertia from the shape"),
+            StudioCommand::EstimateInertia(slot),
+        );
+    }
+    child(
+        commands,
+        body,
+        muted("⚠ Collision shapes affect results: deriving one changes the scenario's scene_hash."),
+    );
+}
+
+/// The picture's view buttons and the picture.
+fn picture(commands: &mut Commands, body: Entity, panel: &ModelPanel, thumbs: &Thumbs) {
+    let r = child(commands, body, wrap_row());
+    for v in ModelView::ALL {
+        choice(
+            commands,
+            r,
+            v.label(),
+            panel.view == v,
+            StudioCommand::ModelView(v),
+        );
+    }
+    if let Some((_, img)) = &thumbs.picture {
+        spawn_image(commands, body, img.clone(), MODEL_PX as f32);
+    }
+    let mut legend = "body axes at the body's origin: x forward (red), y right (green), z down (blue); collision in orange".to_owned();
+    if let Some(m) = panel.picture.as_ref().and_then(|p| p.bar_m) {
+        legend.push_str(&format!("; bar = {}", show_length(m)));
+    }
+    child(commands, body, muted(legend));
+}
+
+/// The Derive collision dialog (§7.11.5) in the centre.
+fn derive_dialog(
+    commands: &mut Commands,
+    body: Entity,
+    doc: &ScenarioDoc,
+    panel: &ModelPanel,
+    d: &DeriveDialog,
+    thumbs: &Thumbs,
+) {
+    child(
+        commands,
+        body,
+        title(format!("Derive collision for {}", doc.label(d.slot))),
+    );
+    if let Some(look) = doc.shown_look(d.slot) {
+        child(
+            commands,
+            body,
+            muted(format!("from {}", describe(&look.asset))),
+        );
+    }
+    let on_body = doc.on_body(d.slot);
+    let r = child(commands, body, wrap_row());
+    child(commands, r, field_label("Method"));
+    for m in sim_core::DeriveMethod::ALL {
+        if m.static_only() && on_body {
+            child(
+                commands,
+                r,
+                muted(format!("{} (static bodies only)", m.label())),
+            );
+            continue;
+        }
+        choice(
+            commands,
+            r,
+            m.label(),
+            d.method == m,
+            StudioCommand::DeriveSet(m),
+        );
+    }
+    if d.method == sim_core::DeriveMethod::ConvexDecomposition {
+        let r = child(commands, body, wide_row());
+        child(commands, r, field_label("Max parts"));
+        commands
+            .spawn_scene(value_field(d.max_parts.to_string(), "Derive.max parts"))
+            .insert(ChildOf(r))
+            .observe(
+                |ev: On<KitSubmit>,
+                 panel: Res<ModelPanel>,
+                 mut out: MessageWriter<StudioCommand>| {
+                    if panel
+                        .derive
+                        .as_ref()
+                        .is_some_and(|d| d.max_parts.to_string() != ev.value.trim())
+                    {
+                        out.write(StudioCommand::DeriveParts(ev.value.clone()));
+                    }
+                },
+            );
+        child(
+            commands,
+            r,
+            muted(format!("1 to {}", sim_core::geometry::derive::MAX_PARTS)),
+        );
+    }
+    picture(commands, body, panel, thumbs);
+    match &d.result {
+        None => {
+            child(commands, body, status_text(Status::Running, "Deriving…"));
+        }
+        Some(Err(e)) => {
+            child(commands, body, status_text(Status::Fail, e.clone()));
+        }
+        Some(Ok(fm)) => {
+            let x = &fm.derived;
+            let mut lines = vec![shape_summary(&x.shape)];
+            if let Some(k) = x.axis {
+                lines[0].push_str(&format!(" · along {}", ["x", "y", "z"][k]));
+            }
+            if x.points > 0 {
+                lines[0].push_str(&format!(" · {} vertices", x.points));
+            }
+            let mesh = fm
+                .mesh_volume
+                .map(|v| format!(" (model {v:.4} m³)"))
+                .unwrap_or_else(|| " (the model is not closed, so it has no volume)".into());
+            lines.push(format!("volume {:.4} m³{mesh}", x.volume));
+            lines.push(if x.max_outside > 0.0 {
+                format!(
+                    "the model sticks out of it by up to {}",
+                    show_length(x.max_outside)
+                )
+            } else {
+                "it holds the whole model".into()
+            });
+            for l in lines {
+                child(commands, body, mono(l));
+            }
+        }
+    }
+    child(
+        commands,
+        body,
+        status_text(
+            Status::Warning,
+            "Collision shapes affect results. Applying replaces the entity's current shape and changes the scenario's scene_hash. The shape does not follow later changes to the model: lint says when it is out of date.",
+        ),
+    );
+    let r = child(commands, body, wide_row());
+    child(commands, r, spacer());
+    action(commands, r, button("Cancel"), StudioCommand::DeriveCancel);
+    if matches!(d.result, Some(Ok(_))) {
+        action(
+            commands,
+            r,
+            primary_button("Apply"),
+            StudioCommand::DeriveApply,
+        );
+    }
+}
+
+/// Align mode (§7.11.4) in the centre: quick steps on the look's offset, drawn against the body's
+/// axes and collision shape.
+fn align_panel(
+    commands: &mut Commands,
+    body: Entity,
+    doc: &ScenarioDoc,
+    panel: &ModelPanel,
+    a: &AlignSession,
+    thumbs: &Thumbs,
+    ws: Option<&Workspace>,
+) {
+    child(
+        commands,
+        body,
+        title(format!("Align {}", doc.label(a.slot))),
+    );
+    let Some(look) = doc.shown_look(a.slot) else {
+        child(commands, body, muted("The entity has no model."));
+        return;
+    };
+    child(
+        commands,
+        body,
+        muted(format!(
+            "{}: the steps move the model only; the body, its axes and its collision shape stay. The session is one undo step.",
+            describe(&look.asset)
+        )),
+    );
+    picture(commands, body, panel, thumbs);
+    let t = look.offset.translation();
+    let (yaw, pitch, roll) = look.offset.rotation().to_euler(bevy::math::EulerRot::ZYX);
+    child(
+        commands,
+        body,
+        mono(format!(
+            "offset x {} · y {} · z {} m · roll {} · pitch {} · yaw {} deg",
+            crate::builder::looks::short_number(t.x),
+            crate::builder::looks::short_number(t.y),
+            crate::builder::looks::short_number(t.z),
+            crate::builder::looks::short_number(roll.to_degrees()),
+            crate::builder::looks::short_number(pitch.to_degrees()),
+            crate::builder::looks::short_number(yaw.to_degrees()),
+        )),
+    );
+    let r = child(commands, body, wrap_row());
+    for op in [
+        AlignOp::Rotate(0),
+        AlignOp::Rotate(1),
+        AlignOp::Rotate(2),
+        AlignOp::OriginToCentre,
+        AlignOp::OriginToBottom,
+        AlignOp::Reset,
+    ] {
+        action(
+            commands,
+            r,
+            button(op.label()),
+            StudioCommand::AlignStep(op),
+        );
+    }
+    let r = child(commands, body, wrap_row());
+    if doc.collision(a.slot).is_some() {
+        let (text, on) = if a.collision {
+            ("Hide collision", false)
+        } else {
+            ("Show collision", true)
+        };
+        action(
+            commands,
+            r,
+            plain_button(text),
+            StudioCommand::AlignCollision(on),
+        );
+    }
+    let builtin = doc.catalog().and_then(|c| match c.resolve(&look.asset) {
+        sim_assets::Resolution::Found(e, _) => Some(e.source != AssetSource::Workspace),
+        sim_assets::Resolution::Missing => None,
+    });
+    match builtin {
+        Some(true) if ws.is_some() => {
+            action(
+                commands,
+                r,
+                button("Duplicate to workspace and save as default"),
+                StudioCommand::AlignSave,
+            );
+        }
+        Some(false) => {
+            action(
+                commands,
+                r,
+                button("Save as model default"),
+                StudioCommand::AlignSave,
+            );
+        }
+        _ => {}
+    }
+    child(commands, r, spacer());
+    action(
+        commands,
+        r,
+        primary_button("Done"),
+        StudioCommand::AlignDone,
+    );
 }
 
 /// The Inspector's Appearance section (§7.11.2) for the entity in `slot`.
@@ -788,14 +1153,10 @@ fn status_lines(commands: &mut Commands, body: Entity, a: &Appearance) {
             child(
                 commands,
                 body,
-                status_text(Status::Pass, format!("✓ found · {triangles} triangles")),
+                status_text(Status::Pass, format!("found · {triangles} triangles")),
             );
             for n in notes {
-                child(
-                    commands,
-                    body,
-                    status_text(Status::Warning, format!("⚠ {n}")),
-                );
+                child(commands, body, status_text(Status::Warning, n.clone()));
             }
         }
         LookStatus::Missing => {
@@ -804,7 +1165,7 @@ fn status_lines(commands: &mut Commands, body: Entity, a: &Appearance) {
                 body,
                 status_text(
                     Status::Warning,
-                    "⚠ not found: drawn as a marker. Pick another model, or import it into the workspace.",
+                    "not found: drawn as a marker. Pick another model, or import it into the workspace.",
                 ),
             );
         }
