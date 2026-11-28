@@ -5,7 +5,7 @@ simulate it under uncertainty with a deterministic f64 physics kernel, and answe
 its requirements, and with what confidence?"* Target domains: aero-ballistics, drones and fixed-wing
 aircraft.
 
-> Status: build step S5-5. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
+> Status: build step S6-1. `sim_core` runs 6DOF and 3DOF bodies in a deterministic ECS World: eight
 > integrators (fixed and adaptive), force models, a watchdog, a flight recorder and the state hash. Scenarios
 > load from `.scn.ron` files with swept parameters and per-replicate uncertainties, `sim_models` provides
 > gravity (flat and J2), the 1976 standard atmosphere, wind with Dryden turbulence, Earth rotation (Coriolis and
@@ -72,7 +72,12 @@ aircraft.
 > parameters and seed so Preview reproduces it. Run Replay lists a campaign's committed runs and shows one from
 > its Tier 3 snapshots, with its verdicts and metrics, and re-simulates it at full rate, checked bit for bit against
 > the snapshots. Each of the campaign's requirements is drawn over the run: its signal, levels and window in a
-> track, and levels on a body's position as planes in the 3D view. Models and Campaign Setup come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
+> track, and levels on a body's position as planes in the 3D view. Campaign Setup picks the requirement set, a sampler
+> and a definition for every swept parameter, replicates and seed, the telemetry and crash quota, and shows the runs,
+> an estimate from a timed run and the runs each probability requirement needs; **Write campaign** writes
+> `campaigns/<id>/study.json` and builds the campaign from it with `python -m saber.study`, so the studio's campaign
+> is the one `saber.sweep` and `saber.campaign` write for the same choices. Running and submitting from the studio
+> come next. The build order is [`docs/build-plan.md`](docs/build-plan.md), derived from the roadmap in
 > `docs/design/subsystems-and-interfaces.md` §12.
 
 ## Layout
@@ -91,7 +96,7 @@ aircraft.
 | `crates/sim_hpc` | Headless campaign runner: `--local`, or MPI ranks with `--features mpi`; `--resume` | §5.6 |
 | `crates/saber_cli` | `saber-cli`: validation for Python, model import and conversion | §4, §5.10 |
 | `crates/sim_testkit` | Test helpers (dev-dependency only) | verification §9.1 |
-| `python/saber` | Python package: schema, sweep, campaign, analyze, verify, report, testing; `saber/schemas/` is exported by `sim_schema` | §5.7 |
+| `python/saber` | Python package: schema, sweep, campaign, study, analyze, verify, report, testing; `saber/schemas/` is exported by `sim_schema` | §5.7 |
 | `tests/reference` | Reference cases, synthetic or published data only | verification §9.2 |
 | `tests/shared` | Test vectors checked by both Rust and Python (e.g. `Tol`), golden output files in `io/` | verification §3.2, §8.3 |
 | `docs/design` | The design: the source of truth for interfaces, names and decisions | |

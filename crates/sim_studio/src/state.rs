@@ -41,9 +41,9 @@ impl AppState {
             AppState::Launcher
             | AppState::ScenarioBuilder
             | AppState::LocalRun
+            | AppState::CampaignSetup
             | AppState::CrashReplay
             | AppState::RunReplay => None,
-            AppState::CampaignSetup => Some("S6"),
         }
     }
 }

@@ -1,0 +1,38 @@
+{
+  "format": "saber.study",
+  "version": 1,
+  "id": "proj-studio",
+  "scene": "../../../crates/sim_models/tests/scenarios/projectile.scn.ron",
+  "requirements": "../../../crates/saber_cli/tests/data/projectile.req.ron",
+  "sweep": {
+    "sampler": {
+      "method": "latin_hypercube",
+      "n": 6
+    },
+    "params": {
+      "muzzle_vz": {
+        "dist": "uniform",
+        "lo": 30.0,
+        "hi": 90.0
+      }
+    },
+    "replicates": 3,
+    "seed": 11
+  },
+  "execution": {
+    "flight_recorder_ticks": 32,
+    "snapshot_policy": {
+      "base_every": 50,
+      "max_per_run": 500
+    },
+    "threads": 2
+  },
+  "crash_policy": {
+    "dump_quota_per_param_set": 2
+  },
+  "output": {
+    "shared_out": "out"
+  },
+  "notes": "Written by the studio's golden test (crates/sim_studio/tests/setup.rs).",
+  "tags": []
+}

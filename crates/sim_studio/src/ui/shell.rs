@@ -267,6 +267,8 @@ pub fn fill_regions(
     view: Res<crate::viewport::ViewportState>,
     camera: Option<Res<super::viewport::ViewportCamera>>,
     mut images: ResMut<Assets<Image>>,
+    setup: Res<crate::setup::SetupState>,
+    workspace: Res<CurrentWorkspace>,
 ) {
     for (dock_entity, PendingRegions(state)) in &pending {
         let mine: Vec<_> = regions
@@ -303,6 +305,15 @@ pub fn fill_regions(
                     camera: camera.as_ref().map(|c| c.0),
                 };
                 super::preview::fill(&mut commands, &mut images, body, kind, &inputs);
+                continue;
+            }
+            if *state == AppState::CampaignSetup {
+                let inputs = super::setup::SetupInputs {
+                    setup: &setup,
+                    ws: workspace.0.as_ref(),
+                    log,
+                };
+                super::setup::fill(&mut commands, body, kind, &inputs);
                 continue;
             }
             if matches!(*state, AppState::CrashReplay | AppState::RunReplay) {

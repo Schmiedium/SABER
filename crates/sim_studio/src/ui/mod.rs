@@ -9,6 +9,7 @@ pub mod models;
 pub mod preview;
 pub mod replay;
 pub mod requirements;
+pub mod setup;
 pub mod shell;
 pub mod viewport;
 

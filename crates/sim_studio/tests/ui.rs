@@ -3,8 +3,9 @@
 //! spawn, that their buttons are wired to the commands they name, that the shell fills its
 //! regions, that the Builder's panels edit, undo and export the scenario, that the Preview Run
 //! plays, steps, plots and stops, with its 3D viewport, that a crashed preview scrubs in Crash
-//! Replay, that the 3D Models tab imports, links and edits a model, and that a collision shape
-//! is derived from a model, aligned against and shown in the viewport.
+//! Replay, that the 3D Models tab imports, links and edits a model, that a collision shape is
+//! derived from a model, aligned against and shown in the viewport, and that Campaign Setup sets
+//! up and writes a campaign.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,8 @@ use sim_studio::replay::{
     Jump, ReplayJobs, ReplaySource, ReplayState, finite_body, last_finite_position,
 };
 use sim_studio::rerun::Check;
+use sim_studio::setup::SetupState;
+use sim_studio::setup::plan::{Dist, DistField};
 use sim_studio::state::AppState;
 use sim_studio::ui::builder::{Breadcrumb, InspectorField, InspectorOf};
 use sim_studio::ui::launcher::{LauncherRoot, field};
@@ -36,6 +39,7 @@ use sim_studio::ui::models::{ModelLevel, ModelRoot, SceneLooks};
 use sim_studio::ui::preview::{ChannelPlot, Live, preview_field};
 use sim_studio::ui::replay::{ReplayLive, ReplayTrack, TrackKind};
 use sim_studio::ui::requirements::ReqFieldOf;
+use sim_studio::ui::setup::SetupField;
 use sim_studio::ui::shell::{ConsoleList, PendingRegions, ShellRoot};
 use sim_studio::ui::viewport::{
     BodyVisual, FAR_MARKER_PX, FarLabel, FarMarker, GridLabelSlot, HudPanel, HudText, SceneShapes,
@@ -1960,6 +1964,126 @@ fn the_import_dialog_converts_an_obj_once_its_frame_is_chosen() {
         ),
         "{:?}",
         m.source
+    );
+    assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
+}
+
+fn setup_input(app: &mut App, field: SetupField) -> Entity {
+    let mut q = app.world_mut().query::<(&SetupField, &Children)>();
+    let (_, children) = q
+        .iter(app.world())
+        .find(|(f, _)| **f == field)
+        .unwrap_or_else(|| panic!("no Campaign Setup field {field:?}"));
+    children[0]
+}
+
+/// Campaign Setup (§7.6): the rail opens it on the aero-ballistics pack's shell with a Sobol
+/// study over `cla`'s bounds and the pack's requirement set; a sampler choice and typed numbers
+/// change the study and the summary card follows; Show generated shows `study.json`; Write
+/// campaign runs Python (here a stand-in answering as `python -m saber.study --json` does) and
+/// shows what it answered.
+#[cfg(unix)]
+#[test]
+fn campaign_setup_sets_up_and_writes_a_campaign() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("setup");
+    let mut app = headless(&dir.join("recent.ron"));
+    let ws = Workspace::create(&dir.join("aero"), "aero", Pack::AeroBallistics).unwrap();
+    app.world_mut()
+        .write_message(StudioCommand::OpenWorkspace(ws.root.clone()));
+    for _ in 0..3 {
+        app.update();
+    }
+    press(&mut app, "Campaign Setup (C)");
+    assert_eq!(state(&app), AppState::CampaignSetup);
+    let texts = all_texts(&mut app);
+    for t in [
+        "New campaign  shell-001",
+        "Total runs  256",
+        "Param sets  64",
+        "Replicates  × 4",
+    ] {
+        assert!(texts.iter().any(|x| x == t), "{t:?} not shown");
+    }
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("R-range at P ≥ 0.9 (90% confidence) needs ≥ 22 runs")),
+        "the runs R-range needs"
+    );
+
+    press(&mut app, "Latin hypercube");
+    let n = setup_input(&mut app, SetupField::N);
+    submit(&mut app, n, "10");
+    press(&mut app, "Normal");
+    let std = setup_input(&mut app, SetupField::Dist("cla".into(), DistField::Std));
+    submit(&mut app, std, "0.2");
+    let plan = app.world().resource::<SetupState>().plan.clone().unwrap();
+    assert_eq!(plan.n, 10);
+    assert_eq!(
+        plan.params[0].1,
+        Dist::Normal {
+            mean: 1.7,
+            std: 0.2,
+            lo: None,
+            hi: None
+        }
+    );
+    assert!(all_texts(&mut app).iter().any(|t| t == "Total runs  40"));
+    // The timed run finishes and the estimate shows.
+    until(&mut app, 2000, |a| {
+        a.world().resource::<SetupState>().timing.is_some()
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        all_texts(&mut app)
+            .iter()
+            .any(|t| t.starts_with("Est. run")),
+        "the estimate"
+    );
+
+    press(&mut app, "Show generated");
+    let texts = all_texts(&mut app);
+    assert!(texts.iter().any(|t| t == "        \"dist\": \"normal\","));
+    assert!(
+        texts.iter().any(
+            |t| t.ends_with("-m saber.study campaigns/shell-001/study.json --preflight --json")
+        )
+    );
+
+    let python = dir.join("python.sh");
+    let answer = r#"{"ok": true, "campaign_toml": "campaign.toml", "manifest": "sweep_manifest.parquet", "runs": 40, "param_sets": 10, "replicates": 4, "param_keys": ["cla"], "sampler": {}, "warnings": [], "preflight": {"runs": 40, "build_id": "saber test", "scene_hash": "1", "manifest_hash": "2", "req_set_hash": "3", "param_keys": ["cla"], "summary_columns": [], "warnings": []}}"#;
+    std::fs::write(&python, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.world_mut().resource_mut::<SetupState>().python = Some(python.display().to_string());
+    press(&mut app, "Write campaign");
+    until(&mut app, 2000, |a| {
+        a.world().resource::<SetupState>().written.is_some()
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    let texts = all_texts(&mut app);
+    for t in [
+        "✓ Written to campaigns/shell-001: 40 runs (10 parameter sets × 4)",
+        "✓ Preflight passed: 40 runs on saber test",
+    ] {
+        assert!(
+            texts.iter().any(|x| x == t),
+            "{t:?} not shown: {:?}",
+            texts
+                .iter()
+                .filter(|x| x.contains("Written") || x.contains("built") || x.contains("Preflight"))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(ws.root.join("campaigns/shell-001/study.json").is_file());
+    assert!(
+        texts.iter().any(|t| t.ends_with("▸ shell-001")),
+        "listed under Studies"
     );
     assert_eq!(empty_boxes(&app), 0, "a character drew as an empty box");
 }

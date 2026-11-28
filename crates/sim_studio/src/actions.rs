@@ -35,6 +35,7 @@ use crate::replay::{
 };
 use crate::rerun::param_values;
 use crate::runs::CampaignRuns;
+use crate::setup::SetupEdit;
 use crate::state::{AppState, Rail, RailContext, RailTarget};
 use crate::viewport::{FocusMode, ViewToggle, ViewportState};
 use crate::workspace::{Pack, Workspace, WorkspaceError};
@@ -258,6 +259,8 @@ pub enum StudioCommand {
     OpenRun(u64),
     /// Close the run and show the campaign's run list again.
     CloseRun,
+    /// Change Campaign Setup's study, or write it (handled by [`crate::setup::apply`]).
+    Setup(SetupEdit),
 }
 
 /// The Preview Run screen (`sim_studio_ux.md` §7.5): the run and how it is driven.
@@ -784,6 +787,7 @@ pub fn apply_commands(mut commands: MessageReader<StudioCommand>, mut cx: Comman
             | StudioCommand::ReplayGhost(_)
             | StudioCommand::ReplayGhostOff => rerun_command(command, &mut cx),
             StudioCommand::ReplayOpenInBuilder => open_in_builder(&mut cx),
+            StudioCommand::Setup(_) => {} // crate::setup::apply
             StudioCommand::Undo | StudioCommand::Redo if cx.req.tab == BuilderTab::Requirements => {
                 edit_requirements(command, &mut cx);
             }
